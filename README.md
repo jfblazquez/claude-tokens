@@ -8,6 +8,50 @@ python3 claude_tokens.py /path/to/conversation.jsonl
 python3 claude_tokens.py /path/to/conversation.jsonl --json
 ```
 
+If you omit the conversation, it browses the Claude projects folder
+(`~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`) and shows an
+interactive picker with the most recent conversations first: size in KB, number
+of subagents used, project path, and the session title (its rename/`aiTitle`,
+blank when the session was never named). The list is paged 10 at a time: type a
+number to analyze that conversation, press Enter for the next 10, `a` to show
+them all, or `q` to quit. Filter by project with `--project`:
+
+```bash
+python3 claude_tokens.py                       # pick from all projects
+python3 claude_tokens.py --project webfilter   # only matching project paths
+python3 claude_tokens.py --projects-dir /other/projects
+```
+
+The picker looks like this (data below is illustrative):
+
+```
+ #  | Date             | Size KB | Subagents | Project                       | Title
+----+------------------+---------+-----------+-------------------------------+------------------------------------
+ 1  | 2026-01-15 18:42 | 246     | 0         | /home/dev/projects/webfilter  | Add request-cache invalidation
+ 2  | 2026-01-15 17:10 | 3.377   | 12        | /home/dev/projects/webfilter  | Migrate parser to streaming API
+ 3  | 2026-01-15 09:58 | 152     | 1         | /home/dev/projects/api-gateway | Fix flaky auth integration test
+ 4  | 2026-01-14 20:31 | 4       | 0         | /home/dev/projects/api-gateway |
+ 5  | 2026-01-14 11:05 | 799     | 3         | /home/dev/projects/dashboard  | Redesign metrics landing page
+
+Select 1-42, Enter for next 10, 'a' for all, 'q' to quit:
+```
+
+After you pick one (or pass a path directly) it prints the usage report:
+
+```
+Conversation usage
+Scope    | ID    | Task                     | Model           | Total     | Input  | Output | Cache read | Cache write 5m/1h | Cost
+---------+-------+--------------------------+-----------------+-----------+--------+--------+------------+-------------------+--------
+main     | main  | Add request-cache inva…  | claude-opus-4-8 | 1.284.902 | 12.430 | 48.117 | 1.180.355  | 44.000/0          | $2.9871
+
+Summary by model
+Model           | Total     | Input  | Output | Raw output* | Cache read | Cache write 5m/1h | Cost
+----------------+-----------+--------+--------+-------------+------------+-------------------+--------
+claude-opus-4-8 | 1.284.902 | 12.430 | 48.117 |             | 1.180.355  | 44.000/0          | $2.9871
+
+Estimated cost: $2.9871
+```
+
 For each conversation it shows the task/reason (the `.meta.json` description
 when available, otherwise the first user message), usage by model and cache
 class, and estimated cost. Subagents are shown first, then the main

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 # USD per million tokens. See README for source and overrides.
@@ -246,13 +248,136 @@ def text(data):
         print("Models without pricing: " + ", ".join(data["unknown_price_models"]))
 
 
+def default_projects_dir():
+    root = os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")
+    return Path(root) / "projects"
+
+
+def project_path_of(path):
+    """Real cwd stored in the log; fall back to the encoded folder name."""
+    for event in lines(path):
+        cwd = event.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    return "/" + path.parent.name.lstrip("-").replace("-", "/")
+
+
+def count_subagents(path):
+    folder = path.parent / path.stem / "subagents"
+    return len(list(folder.glob("*.jsonl"))) if folder.is_dir() else 0
+
+
+def session_title(path, tail=131072):
+    """Last user-facing session rename (aiTitle); empty when there is none."""
+    try:
+        with path.open("rb") as f:
+            size = path.stat().st_size
+            if size > tail:
+                f.seek(-tail, 2)
+            data = f.read()
+    except OSError:
+        return ""
+    title = ""
+    for line in data.decode("utf-8", "ignore").splitlines():
+        if '"aiTitle"' not in line:
+            continue
+        try:
+            value = json.loads(line).get("aiTitle")
+        except json.JSONDecodeError:
+            continue
+        if value:
+            title = value
+    return title
+
+
+def list_conversations(projects_dir, project_filter=None):
+    """Top-level session logs across every project, most recent first."""
+    conversations = []
+    for project in projects_dir.iterdir() if projects_dir.is_dir() else []:
+        if not project.is_dir():
+            continue
+        for path in project.glob("*.jsonl"):
+            cwd = project_path_of(path)
+            if project_filter and project_filter.lower() not in cwd.lower():
+                continue
+            stat = path.stat()
+            conversations.append({
+                "path": path, "mtime": stat.st_mtime, "size_kb": stat.st_size / 1024,
+                "subagents": count_subagents(path), "project": cwd, "title": session_title(path),
+            })
+    conversations.sort(key=lambda row: row["mtime"], reverse=True)
+    return conversations
+
+
+def show_page(conversations, start, end):
+    rows = []
+    for index in range(start, end):
+        row = conversations[index]
+        when = datetime.fromtimestamp(row["mtime"]).strftime("%Y-%m-%d %H:%M")
+        rows.append([index + 1, when, f"{row['size_kb']:,.0f}".replace(",", "."),
+                     row["subagents"], row["project"], short(row["title"], 50)])
+    table(["#", "Date", "Size KB", "Subagents", "Project", "Title"], rows)
+
+
+def pick_conversation(projects_dir, project_filter, page_size=10):
+    conversations = list_conversations(projects_dir, project_filter)
+    total = len(conversations)
+    if not total:
+        print(f"No conversations found in {projects_dir}"
+              + (f" for project matching '{project_filter}'" if project_filter else ""), file=sys.stderr)
+        return None
+    if not sys.stdin.isatty():
+        show_page(conversations, 0, total)
+        print("\nNo TTY: pass the conversation path explicitly.", file=sys.stderr)
+        return None
+
+    def select(choice):
+        if choice.isdigit() and 1 <= int(choice) <= total:
+            return conversations[int(choice) - 1]["path"]
+        return None
+
+    shown, all_mode = 0, False
+    while shown < total:
+        end = total if all_mode else min(shown + page_size, total)
+        show_page(conversations, shown, end)
+        shown = end
+        if shown >= total:
+            break
+        prompt = f"\nSelect 1-{total}, Enter for next {page_size}, 'a' for all, 'q' to quit: "
+        try:
+            choice = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if choice == "":
+            continue
+        if choice == "a":
+            all_mode = True
+            continue
+        if choice == "q":
+            return None
+        return select(choice)
+    try:
+        choice = input(f"\nSelect 1-{total} (Enter to cancel): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return select(choice)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("conversation", type=Path, help="main conversation JSONL")
+    parser.add_argument("conversation", type=Path, nargs="?",
+                        help="main conversation JSONL; if omitted, pick from the projects folder")
+    parser.add_argument("--projects-dir", type=Path, default=default_projects_dir(),
+                        help="Claude projects folder to browse when no conversation is given")
+    parser.add_argument("--project", help="only list conversations whose project path matches this substring")
     parser.add_argument("--pricing", type=Path, help="USD/MTok pricing JSON that overrides built-in rates")
     parser.add_argument("--json", action="store_true", help="emit JSON output")
     parser.add_argument("--cold-summary-output", type=int, default=2000, help="assumed output tokens for the cold summary (default: 2000)")
     args = parser.parse_args()
+    if args.conversation is None:
+        args.conversation = pick_conversation(args.projects_dir, args.project)
+        if args.conversation is None:
+            return
     if not args.conversation.is_file():
         parser.error(f"does not exist: {args.conversation}")
     try:
