@@ -52,6 +52,64 @@ claude-opus-4-8 | 1.284.902 | 12.430 | 48.117 |             | 1.180.355  | 44.00
 Estimated cost: $2.9871
 ```
 
+## Overall usage (`--totals`)
+
+`--totals` ignores single conversations and aggregates everything in the
+projects folder (each session plus its subagents) in one pass, so you can see
+how much you have used Claude Code as a whole. Because it is not obvious how
+long these logs are kept, it reports the **time window** the data actually
+covers (span in days and first/last activity), and it also breaks down cost and
+tokens per model, tool usage, skills invoked, and cost per project. Respects
+`--project` and `--json`.
+
+```bash
+python3 claude_tokens.py --totals
+python3 claude_tokens.py --totals --project webfilter
+python3 claude_tokens.py --totals --json
+```
+
+Example (illustrative data — real paths/names are not shown here):
+
+```
+Overall usage (projects folder)
+  Time window : 31 days (2026-01-01 → 2026-01-31), 23 active days
+  Busiest day : 2026-01-14 (1.371 responses)
+  Volume      : 192 conversations across 14 projects, 127 subagents
+  Tokens      : 1.836.911.842 total, 8.172.167 generated (output)
+  Cache hits  : 97.7% of input tokens served from cache
+  Total cost  : $1989.12 ($10.3600 per conversation)
+
+Usage by model
+Model           | Total tokens  | % tokens | Cost     | % cost
+----------------+---------------+----------+----------+--------
+claude-fable-5  | 759.984.932   | 41.4%    | $1175.74 | 59.1%
+claude-opus-4-8 | 949.413.549   | 51.7%    | $772.53  | 38.8%
+claude-sonnet-5 | 105.567.607   | 5.7%     | $37.44   | 1.9%
+
+Top tools
+Tool | Calls | % of calls
+-----+-------+------------
+Bash | 1.155 | 48.8%
+Read | 606   | 25.6%
+Edit | 346   | 14.6%
+
+Skills used
+Skill           | Invocations
+----------------+------------
+explain-code    | 7
+code-review:pr  | 3
+
+Top projects by cost
+Project                       | Conversations | Total tokens | Cost
+------------------------------+---------------+--------------+---------
+/home/dev/projects/webfilter  | 32            | 910.166.272  | $775.22
+/home/dev/projects/api-gateway | 99           | 400.175.203  | $463.74
+```
+
+Metrics reported: time window (span, active days, busiest day), total cost and
+cost per conversation, tokens generated, cache-hit ratio, per-model token/cost
+share, tool-call distribution, skills invoked, and per-project cost.
+
 For each conversation it shows the task/reason (the `.meta.json` description
 when available, otherwise the first user message), usage by model and cache
 class, and estimated cost. Subagents are shown first, then the main

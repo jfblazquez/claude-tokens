@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -141,6 +141,14 @@ def load_prices(path):
     return prices
 
 
+def rate_of(prices, model):
+    """Look up a model rate, tolerating a trailing -YYYYMMDD release date."""
+    if model in prices:
+        return prices[model]
+    head, _, tail = model.rpartition("-")
+    return prices.get(head) if tail.isdigit() and len(tail) == 8 else None
+
+
 def estimated_cost(tokens, rate):
     if rate is None:
         return None
@@ -155,7 +163,7 @@ def report(conversations, prices, cold_summary_output):
         conversation["estimated_cost_usd"] = 0
         for model, tokens in conversation["models"].items():
             tokens["total_tokens"] = sum(tokens.values())
-            tokens["estimated_cost_usd"] = estimated_cost(tokens, prices.get(model))
+            tokens["estimated_cost_usd"] = estimated_cost(tokens, rate_of(prices, model))
             if tokens["estimated_cost_usd"] is None:
                 unknown.add(model)
                 conversation["estimated_cost_usd"] = None
@@ -168,12 +176,12 @@ def report(conversations, prices, cold_summary_output):
     by_model = []
     for model, tokens in sorted(totals.items()):
         tokens["total_tokens"] = sum(tokens.values())
-        tokens["estimated_cost_usd"] = estimated_cost(tokens, prices.get(model))
+        tokens["estimated_cost_usd"] = estimated_cost(tokens, rate_of(prices, model))
         by_model.append({"model": model, **tokens, "raw_output_tokens": raw_outputs[model]})
     main = next(row for row in conversations if row["kind"] == "main")
     cold_summaries = []
     for snapshot in main["context_snapshot"]:
-        rate = prices.get(snapshot["model"])
+        rate = rate_of(prices, snapshot["model"])
         cold_cost = None if rate is None else (snapshot["context_tokens"] * rate[0] + cold_summary_output * rate[1]) / 1_000_000
         cold_summaries.append({**snapshot, "assumed_summary_output_tokens": cold_summary_output,
                                "estimated_cold_summary_cost_usd": cold_cost})
@@ -363,17 +371,214 @@ def pick_conversation(projects_dir, project_filter, page_size=10):
     return select(choice)
 
 
+def parse_timestamp(value):
+    """ISO-8601 like 2026-07-16T19:23:21.369Z; seconds precision is enough."""
+    try:
+        return datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def accumulate_file(path, tools, skills, window, daily):
+    """Collect per-file token totals plus tool/skill/time metrics."""
+    models, seen = defaultdict(zero), set()
+    for event in lines(path):
+        stamp = parse_timestamp(event.get("timestamp"))
+        if stamp:
+            window[0] = stamp if window[0] is None or stamp < window[0] else window[0]
+            window[1] = stamp if window[1] is None or stamp > window[1] else window[1]
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        if event.get("type") == "assistant":
+            identity = message.get("id") or event.get("uuid")
+            if isinstance(identity, str):
+                if identity in seen:
+                    continue
+                seen.add(identity)
+            if stamp:
+                daily[stamp.strftime("%Y-%m-%d")] += 1
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    name = str(block.get("name") or "unknown")
+                    tools[name] += 1
+                    if name == "Skill" and isinstance(block.get("input"), dict):
+                        skill = block["input"].get("skill")
+                        if skill:
+                            skills[str(skill)] += 1
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        model = str(message.get("model") or "modelo-desconocido")
+        creation = usage.get("cache_creation") or {}
+        five = int(creation.get("ephemeral_5m_input_tokens") or 0)
+        hour = int(creation.get("ephemeral_1h_input_tokens") or 0)
+        five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
+        tokens = models[model]
+        tokens["input"] += int(usage.get("input_tokens") or 0)
+        tokens["output"] += int(usage.get("output_tokens") or 0)
+        tokens["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
+        tokens["cache_write_5m"] += five
+        tokens["cache_write_1h"] += hour
+    return models
+
+
+def scan_totals(projects_dir, project_filter=None):
+    """One pass over every session (and its subagents) in the projects folder."""
+    models = defaultdict(zero)
+    project_models = defaultdict(lambda: defaultdict(zero))
+    tools, skills, daily, project_convs = Counter(), Counter(), Counter(), Counter()
+    window, conversations, subagents = [None, None], 0, 0
+    for project in sorted(projects_dir.iterdir()) if projects_dir.is_dir() else []:
+        if not project.is_dir():
+            continue
+        for path in sorted(project.glob("*.jsonl")):
+            cwd = project_path_of(path)
+            if project_filter and project_filter.lower() not in cwd.lower():
+                continue
+            conversations += 1
+            project_convs[cwd] += 1
+            files = [path]
+            folder = path.parent / path.stem / "subagents"
+            if folder.is_dir():
+                subs = sorted(folder.glob("*.jsonl"))
+                subagents += len(subs)
+                files += subs
+            for source in files:
+                for model, tokens in accumulate_file(source, tools, skills, window, daily).items():
+                    for field in FIELDS:
+                        models[model][field] += tokens[field]
+                        project_models[cwd][model][field] += tokens[field]
+    return {"models": dict(models), "project_models": {k: dict(v) for k, v in project_models.items()},
+            "tools": dict(tools), "skills": dict(skills), "daily": dict(daily),
+            "project_convs": dict(project_convs), "window": window,
+            "conversations": conversations, "subagents": subagents}
+
+
+def totals_report(scan, prices):
+    """Turn a raw scan into cost/percentage figures ready to print or dump."""
+    by_model, total_cost, total_tokens, unknown = [], 0.0, 0, set()
+    for model, tokens in scan["models"].items():
+        tokens["total_tokens"] = sum(tokens[field] for field in FIELDS)
+        if not tokens["total_tokens"]:
+            continue
+        tokens["estimated_cost_usd"] = estimated_cost(tokens, rate_of(prices, model))
+        total_tokens += tokens["total_tokens"]
+        if tokens["estimated_cost_usd"] is None:
+            unknown.add(model)
+        else:
+            total_cost += tokens["estimated_cost_usd"]
+        by_model.append({"model": model, **tokens})
+    for row in by_model:
+        row["pct_tokens"] = row["total_tokens"] / total_tokens if total_tokens else 0
+        row["pct_cost"] = (row["estimated_cost_usd"] / total_cost
+                           if total_cost and row["estimated_cost_usd"] is not None else None)
+    by_model.sort(key=lambda row: row["estimated_cost_usd"] or 0, reverse=True)
+
+    projects = []
+    for cwd, models in scan["project_models"].items():
+        cost = sum(estimated_cost(t, rate_of(prices, m)) or 0 for m, t in models.items())
+        tokens = sum(sum(t[field] for field in FIELDS) for t in models.values())
+        projects.append({"project": cwd, "conversations": scan["project_convs"].get(cwd, 0),
+                         "total_tokens": tokens, "estimated_cost_usd": cost})
+    projects.sort(key=lambda row: row["estimated_cost_usd"], reverse=True)
+
+    tool_total = sum(scan["tools"].values())
+    start, end = scan["window"]
+    span_days = (end - start).days + 1 if start and end else 0
+    cache_read = sum(t["cache_read"] for t in scan["models"].values())
+    cache_write = sum(t["cache_write_5m"] + t["cache_write_1h"] for t in scan["models"].values())
+    fresh_input = sum(t["input"] for t in scan["models"].values())
+    context_input = cache_read + cache_write + fresh_input
+    busiest = max(scan["daily"].items(), key=lambda kv: kv[1]) if scan["daily"] else None
+    return {
+        "window": {"start": start.isoformat(sep=" ") if start else None,
+                   "end": end.isoformat(sep=" ") if end else None,
+                   "span_days": span_days, "active_days": len(scan["daily"]),
+                   "busiest_day": busiest[0] if busiest else None,
+                   "busiest_day_responses": busiest[1] if busiest else 0},
+        "conversations": scan["conversations"], "subagents": scan["subagents"],
+        "projects_count": len(scan["project_convs"]), "total_tokens": total_tokens,
+        "output_tokens": sum(t["output"] for t in scan["models"].values()),
+        "estimated_total_cost_usd": total_cost,
+        "cost_per_conversation_usd": total_cost / scan["conversations"] if scan["conversations"] else 0,
+        "cache_hit_ratio": cache_read / context_input if context_input else 0,
+        "by_model": by_model, "projects": projects,
+        "tools": scan["tools"], "tool_calls": tool_total, "skills": scan["skills"],
+        "unknown_price_models": sorted(unknown)}
+
+
+def totals_text(data, top=15):
+    window = data["window"]
+    print("Overall usage (projects folder)")
+    if window["start"]:
+        print(f"  Time window : {window['span_days']} days ({window['start'][:10]} → {window['end'][:10]}), "
+              f"{window['active_days']} active days")
+        print(f"  Busiest day : {window['busiest_day']} ({fmt(window['busiest_day_responses'])} responses)")
+    print(f"  Volume      : {fmt(data['conversations'])} conversations across "
+          f"{fmt(data['projects_count'])} projects, {fmt(data['subagents'])} subagents")
+    print(f"  Tokens      : {fmt(data['total_tokens'])} total, {fmt(data['output_tokens'])} generated (output)")
+    print(f"  Cache hits  : {data['cache_hit_ratio']:.1%} of input tokens served from cache")
+    print(f"  Total cost  : ${data['estimated_total_cost_usd']:.2f} "
+          f"(${data['cost_per_conversation_usd']:.4f} per conversation)")
+
+    print("\nUsage by model")
+    rows = []
+    for row in data["by_model"]:
+        cost = "N/D" if row["estimated_cost_usd"] is None else f"${row['estimated_cost_usd']:.2f}"
+        pct_cost = "N/D" if row["pct_cost"] is None else f"{row['pct_cost']:.1%}"
+        rows.append([row["model"], fmt(row["total_tokens"]), f"{row['pct_tokens']:.1%}", cost, pct_cost])
+    table(["Model", "Total tokens", "% tokens", "Cost", "% cost"], rows)
+
+    print("\nTop tools")
+    rows = []
+    for name, count in sorted(data["tools"].items(), key=lambda kv: kv[1], reverse=True)[:top]:
+        share = count / data["tool_calls"] if data["tool_calls"] else 0
+        rows.append([name, fmt(count), f"{share:.1%}"])
+    table(["Tool", "Calls", "% of calls"], rows)
+
+    print("\nSkills used")
+    if data["skills"]:
+        rows = [[name, fmt(count)] for name, count in sorted(data["skills"].items(), key=lambda kv: kv[1], reverse=True)]
+        table(["Skill", "Invocations"], rows)
+    else:
+        print("  (none)")
+
+    print("\nTop projects by cost")
+    rows = []
+    for row in sorted(data["projects"], key=lambda r: r["estimated_cost_usd"], reverse=True)[:top]:
+        rows.append([row["project"], fmt(row["conversations"]), fmt(row["total_tokens"]),
+                     f"${row['estimated_cost_usd']:.2f}"])
+    table(["Project", "Conversations", "Total tokens", "Cost"], rows)
+
+    if data["unknown_price_models"]:
+        print("\nModels without pricing: " + ", ".join(data["unknown_price_models"]))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("conversation", type=Path, nargs="?",
                         help="main conversation JSONL; if omitted, pick from the projects folder")
     parser.add_argument("--projects-dir", type=Path, default=default_projects_dir(),
                         help="Claude projects folder to browse when no conversation is given")
-    parser.add_argument("--project", help="only list conversations whose project path matches this substring")
+    parser.add_argument("--project", help="only list/aggregate conversations whose project path matches this substring")
+    parser.add_argument("--totals", action="store_true",
+                        help="aggregate usage across the whole projects folder instead of a single conversation")
     parser.add_argument("--pricing", type=Path, help="USD/MTok pricing JSON that overrides built-in rates")
     parser.add_argument("--json", action="store_true", help="emit JSON output")
     parser.add_argument("--cold-summary-output", type=int, default=2000, help="assumed output tokens for the cold summary (default: 2000)")
     args = parser.parse_args()
+    if args.totals:
+        try:
+            data = totals_report(scan_totals(args.projects_dir, args.project), load_prices(args.pricing))
+        except ValueError as error:
+            parser.error(str(error))
+        if not data["conversations"]:
+            parser.error(f"no conversations found in {args.projects_dir}")
+        print(json.dumps(data, ensure_ascii=False, indent=2)) if args.json else totals_text(data)
+        return
     if args.conversation is None:
         args.conversation = pick_conversation(args.projects_dir, args.project)
         if args.conversation is None:
