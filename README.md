@@ -6,13 +6,18 @@ Code JSONL conversation and the JSONL files in `<session>/subagents/`.
 ```bash
 python3 claude_tokens.py /path/to/conversation.jsonl
 python3 claude_tokens.py /path/to/conversation.jsonl --json
+python3 claude_tokens.py d91dbfb9-4ca2-495a-aa23-938757a38997   # by conversation id
 ```
+
+Instead of a path you can pass a bare **conversation id** (the JSONL filename
+without extension); it is located automatically under the projects folder.
 
 If you omit the conversation, it browses the Claude projects folder
 (`~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`) and shows an
-interactive picker with the most recent conversations first: size in KB, number
-of subagents used, project path, and the session title (its rename/`aiTitle`,
-blank when the session was never named). The list is paged 10 at a time: type a
+interactive picker with the most recent conversations first: the session GUID
+(the JSONL filename, i.e. the session id), size in KB, number of subagents used,
+project path, and the session title (its rename/`aiTitle`, blank when the
+session was never named). The list is paged 10 at a time: type a
 number to analyze that conversation, press Enter for the next 10, `a` to show
 them all, or `q` to quit. Filter by project with `--project`:
 
@@ -25,13 +30,13 @@ python3 claude_tokens.py --projects-dir /other/projects
 The picker looks like this (data below is illustrative):
 
 ```
- #  | Date             | Size KB | Subagents | Project                       | Title
-----+------------------+---------+-----------+-------------------------------+------------------------------------
- 1  | 2026-01-15 18:42 | 246     | 0         | /home/dev/projects/webfilter  | Add request-cache invalidation
- 2  | 2026-01-15 17:10 | 3.377   | 12        | /home/dev/projects/webfilter  | Migrate parser to streaming API
- 3  | 2026-01-15 09:58 | 152     | 1         | /home/dev/projects/api-gateway | Fix flaky auth integration test
- 4  | 2026-01-14 20:31 | 4       | 0         | /home/dev/projects/api-gateway |
- 5  | 2026-01-14 11:05 | 799     | 3         | /home/dev/projects/dashboard  | Redesign metrics landing page
+ #  | Date             | GUID                                 | Size KB | Subagents | Project                       | Title
+----+------------------+--------------------------------------+---------+-----------+-------------------------------+------------------------------------
+ 1  | 2026-01-15 18:42 | d91dbfb9-4ca2-495a-aa23-938757a38997 | 246     | 0         | /home/dev/projects/webfilter  | Add request-cache invalidation
+ 2  | 2026-01-15 17:10 | 4a2f8c1e-7b6d-4e9a-9f03-1c2d3e4f5a6b | 3.377   | 12        | /home/dev/projects/webfilter  | Migrate parser to streaming API
+ 3  | 2026-01-15 09:58 | 8e7d6c5b-4a39-4281-b0f1-2a3b4c5d6e7f | 152     | 1         | /home/dev/projects/api-gateway | Fix flaky auth integration test
+ 4  | 2026-01-14 20:31 | 1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9 | 4       | 0         | /home/dev/projects/api-gateway |
+ 5  | 2026-01-14 11:05 | f0e1d2c3-b4a5-4967-8879-0a1b2c3d4e5f | 799     | 3         | /home/dev/projects/dashboard  | Redesign metrics landing page
 
 Select 1-42, Enter for next 10, 'a' for all, 'q' to quit:
 ```
@@ -129,8 +134,32 @@ context. The cold summary assumes 2,000 output tokens; change this with:
 python3 claude_tokens.py CONVERSATION.jsonl --cold-summary-output 5000
 ```
 
+The JSONL does not record the context window a session ran with (200k is the
+default; 1M needs a beta flag). The context percentage is therefore computed
+against the smallest standard tier (200k or 1M) that fits the largest context
+actually observed — so a 200k session is no longer reported as if it were 1M.
+Set it explicitly when you know it:
+
+```bash
+python3 claude_tokens.py CONVERSATION.jsonl --context-window 200000
+```
+
 The JSONL does not break down the internal `System prompt`, tools, memory,
 skills, and messages categories, so those cannot be reconstructed reliably.
+
+## Inspecting a conversation
+
+Three flags print raw conversation material instead of the usage report (each
+works with a path or a bare id, and with `--json`):
+
+```bash
+python3 claude_tokens.py CONVERSATION --last-response   # final assistant turn, Markdown rendered for the terminal
+python3 claude_tokens.py CONVERSATION --bash            # every Bash command it ran, in order
+python3 claude_tokens.py CONVERSATION --files           # files touched by Read/Write/Edit, with per-tool counts
+```
+
+`--last-response` renders inline `code`, **bold**, and headings with ANSI when
+writing to a terminal, and falls back to plain text when piped.
 
 Built-in rates are USD per million tokens, checked on 2026-07-17 against the
 [official Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
