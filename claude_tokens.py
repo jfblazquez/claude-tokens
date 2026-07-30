@@ -13,13 +13,23 @@ from pathlib import Path
 # USD per million tokens. See README for source and overrides.
 PRICES = {
     "claude-fable-5": (10, 50), "claude-mythos-5": (10, 50),
+    "claude-mythos-preview": (10, 50),
+    "claude-opus-5": (5, 25),
     "claude-opus-4-8": (5, 25), "claude-opus-4-7": (5, 25),
     "claude-opus-4-6": (5, 25), "claude-opus-4-5": (5, 25),
     "claude-opus-4-1": (15, 75), "claude-opus-4": (15, 75),
+    "claude-3-opus": (15, 75),
+    # Sonnet 5 introductory rate; list price is 3/15 from 2026-09-01.
     "claude-sonnet-5": (2, 10), "claude-sonnet-4-6": (3, 15),
     "claude-sonnet-4-5": (3, 15), "claude-sonnet-4": (3, 15),
-    "claude-haiku-4-5": (1, 5), "claude-haiku-3-5": (.8, 4),
+    "claude-3-7-sonnet": (3, 15), "claude-3-5-sonnet": (3, 15),
+    "claude-haiku-4-5": (1, 5),
+    "claude-haiku-3-5": (.8, 4), "claude-3-5-haiku": (.8, 4),
+    "claude-3-haiku": (.25, 1.25),
 }
+# Known model families. Used to price unreleased versions (opus-6, fable-5-2,
+# ...) from the newest known sibling of the same family.
+FAMILIES = ("fable", "mythos", "opus", "sonnet", "haiku")
 FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 # The JSONL never records the context window a session ran with (200k is the
 # default; 1M needs a beta flag), so we infer the smallest standard tier that
@@ -157,29 +167,61 @@ def load_prices(path):
     return prices
 
 
+def parse_model(model):
+    """(family, version tuple) for a model id, or None when unrecognised.
+
+    Handles both id styles: claude-opus-4-8 and claude-3-5-sonnet-20241022.
+    """
+    parts = [part for part in model.split("-") if part]
+    family = next((part for part in parts if part in FAMILIES), None)
+    if family is None:
+        return None
+    return family, tuple(int(p) for p in parts if p.isdigit() and len(p) != 8)
+
+
 def rate_of(prices, model):
-    """Look up a model rate, tolerating a trailing -YYYYMMDD release date."""
-    if model in prices:
-        return prices[model]
+    """(input, output, estimated) rate for a model, or None when unpriceable.
+
+    Tolerates a trailing -YYYYMMDD release date. A model that is unknown but
+    belongs to a known family (claude-opus-6, claude-fable-5-2, ...) is priced
+    from the closest earlier sibling and flagged as estimated.
+    """
     head, _, tail = model.rpartition("-")
-    return prices.get(head) if tail.isdigit() and len(tail) == 8 else None
+    base = head if tail.isdigit() and len(tail) == 8 else model
+    if base in prices:
+        return (*prices[base], False)
+    parsed = parse_model(base)
+    if parsed is None:
+        return None
+    family, version = parsed
+    known = [(other[1], rate) for name, rate in prices.items()
+             for other in [parse_model(name)] if other and other[0] == family]
+    if not known:
+        return None
+    earlier = [entry for entry in known if entry[0] <= version]
+    _, rate = max(earlier, key=lambda e: e[0]) if earlier else min(known, key=lambda e: e[0])
+    return (*rate, True)
 
 
 def estimated_cost(tokens, rate):
     if rate is None:
         return None
-    input_rate, output_rate = rate
+    input_rate, output_rate = rate[0], rate[1]
     billable_input = tokens["input"] + .1 * tokens["cache_read"] + 1.25 * tokens["cache_write_5m"] + 2 * tokens["cache_write_1h"]
     return (billable_input * input_rate + tokens["output"] * output_rate) / 1_000_000
 
 
 def report(conversations, prices, cold_summary_output, context_window=None):
-    totals, raw_outputs, unknown = defaultdict(zero), defaultdict(int), set()
+    totals, raw_outputs, unknown, guessed = defaultdict(zero), defaultdict(int), set(), set()
     for conversation in conversations:
         conversation["estimated_cost_usd"] = 0
         for model, tokens in conversation["models"].items():
             tokens["total_tokens"] = sum(tokens.values())
-            tokens["estimated_cost_usd"] = estimated_cost(tokens, rate_of(prices, model))
+            rate = rate_of(prices, model)
+            tokens["price_estimated"] = bool(rate and rate[2])
+            if tokens["price_estimated"]:
+                guessed.add(model)
+            tokens["estimated_cost_usd"] = estimated_cost(tokens, rate)
             if tokens["estimated_cost_usd"] is None:
                 unknown.add(model)
                 conversation["estimated_cost_usd"] = None
@@ -192,7 +234,9 @@ def report(conversations, prices, cold_summary_output, context_window=None):
     by_model = []
     for model, tokens in sorted(totals.items()):
         tokens["total_tokens"] = sum(tokens.values())
-        tokens["estimated_cost_usd"] = estimated_cost(tokens, rate_of(prices, model))
+        rate = rate_of(prices, model)
+        tokens["price_estimated"] = bool(rate and rate[2])
+        tokens["estimated_cost_usd"] = estimated_cost(tokens, rate)
         by_model.append({"model": model, **tokens, "raw_output_tokens": raw_outputs[model]})
     main = next(row for row in conversations if row["kind"] == "main")
     for snapshot in main["context_snapshot"]:
@@ -203,15 +247,29 @@ def report(conversations, prices, cold_summary_output, context_window=None):
         rate = rate_of(prices, snapshot["model"])
         cold_cost = None if rate is None else (snapshot["context_tokens"] * rate[0] + cold_summary_output * rate[1]) / 1_000_000
         cold_summaries.append({**snapshot, "assumed_summary_output_tokens": cold_summary_output,
+                               "price_estimated": bool(rate and rate[2]),
                                "estimated_cold_summary_cost_usd": cold_cost})
     return {"conversations": conversations, "by_model": by_model, "main_context_snapshot": main["context_snapshot"],
             "cold_summary_estimate": cold_summaries,
             "estimated_total_cost_usd": sum(x["estimated_cost_usd"] or 0 for x in by_model),
-            "unknown_price_models": sorted(unknown)}
+            "unknown_price_models": sorted(unknown),
+            "guessed_price_models": sorted(guessed)}
 
 
 def fmt(number):
     return f"{number:,}".replace(",", ".")
+
+
+def money(amount, estimated=False, digits=4):
+    """Costs priced from a family fallback are prefixed with ~."""
+    if amount is None:
+        return "N/D"
+    return f"{'~' if estimated else ''}${amount:.{digits}f}"
+
+
+def guessed_notice(models):
+    return ("~ estimated price: no published rate for " + ", ".join(models) + "; priced from the "
+            "newest known model of the same family. Use --pricing to set the real rate.")
 
 
 def table(headers, rows):
@@ -233,7 +291,7 @@ def text(data):
     conversation_rows = []
     for row in data["conversations"]:
         for model, item in sorted(row["models"].items()):
-            price = "N/D" if item["estimated_cost_usd"] is None else f"${item['estimated_cost_usd']:.4f}"
+            price = money(item["estimated_cost_usd"], item.get("price_estimated"))
             conversation_rows.append([
                 row["kind"], row["id"], short(row["task"], 48), model, fmt(item["total_tokens"]),
                 fmt(item["input"]), fmt(item["output"]), fmt(item["cache_read"]),
@@ -247,7 +305,7 @@ def text(data):
     print("\nSummary by model")
     model_rows = []
     for row in data["by_model"]:
-        price = "N/D" if row["estimated_cost_usd"] is None else f"${row['estimated_cost_usd']:.4f}"
+        price = money(row["estimated_cost_usd"], row.get("price_estimated"))
         raw = "" if row["raw_output_tokens"] == row["output"] else fmt(row["raw_output_tokens"])
         model_rows.append([row["model"], fmt(row["total_tokens"]), fmt(row["input"]), fmt(row["output"]), raw,
                            fmt(row["cache_read"]), f"{fmt(row['cache_write_5m'])}/{fmt(row['cache_write_1h'])}", price])
@@ -268,12 +326,14 @@ def text(data):
     print("\nCold-summary estimate (without cache)")
     summary_rows = []
     for row in data["cold_summary_estimate"]:
-        price = "N/D" if row["estimated_cold_summary_cost_usd"] is None else f"${row['estimated_cold_summary_cost_usd']:.4f}"
+        price = money(row["estimated_cold_summary_cost_usd"], row.get("price_estimated"))
         summary_rows.append([row["model"], fmt(row["context_tokens"]), fmt(row["assumed_summary_output_tokens"]), price])
     table(["Model", "Cold input", "Assumed output", "Cost"], summary_rows)
     print(f"\nEstimated cost: ${data['estimated_total_cost_usd']:.4f}")
     if data["unknown_price_models"]:
         print("Models without pricing: " + ", ".join(data["unknown_price_models"]))
+    if data.get("guessed_price_models"):
+        print(guessed_notice(data["guessed_price_models"]))
 
 
 def default_projects_dir():
@@ -479,12 +539,16 @@ def scan_totals(projects_dir, project_filter=None):
 
 def totals_report(scan, prices):
     """Turn a raw scan into cost/percentage figures ready to print or dump."""
-    by_model, total_cost, total_tokens, unknown = [], 0.0, 0, set()
+    by_model, total_cost, total_tokens, unknown, guessed = [], 0.0, 0, set(), set()
     for model, tokens in scan["models"].items():
         tokens["total_tokens"] = sum(tokens[field] for field in FIELDS)
         if not tokens["total_tokens"]:
             continue
-        tokens["estimated_cost_usd"] = estimated_cost(tokens, rate_of(prices, model))
+        rate = rate_of(prices, model)
+        tokens["price_estimated"] = bool(rate and rate[2])
+        if tokens["price_estimated"]:
+            guessed.add(model)
+        tokens["estimated_cost_usd"] = estimated_cost(tokens, rate)
         total_tokens += tokens["total_tokens"]
         if tokens["estimated_cost_usd"] is None:
             unknown.add(model)
@@ -527,7 +591,8 @@ def totals_report(scan, prices):
         "cache_hit_ratio": cache_read / context_input if context_input else 0,
         "by_model": by_model, "projects": projects,
         "tools": scan["tools"], "tool_calls": tool_total, "skills": scan["skills"],
-        "unknown_price_models": sorted(unknown)}
+        "unknown_price_models": sorted(unknown),
+        "guessed_price_models": sorted(guessed)}
 
 
 def totals_text(data, top=15):
@@ -547,7 +612,7 @@ def totals_text(data, top=15):
     print("\nUsage by model")
     rows = []
     for row in data["by_model"]:
-        cost = "N/D" if row["estimated_cost_usd"] is None else f"${row['estimated_cost_usd']:.2f}"
+        cost = money(row["estimated_cost_usd"], row.get("price_estimated"), digits=2)
         pct_cost = "N/D" if row["pct_cost"] is None else f"{row['pct_cost']:.1%}"
         rows.append([row["model"], fmt(row["total_tokens"]), f"{row['pct_tokens']:.1%}", cost, pct_cost])
     table(["Model", "Total tokens", "% tokens", "Cost", "% cost"], rows)
@@ -575,6 +640,8 @@ def totals_text(data, top=15):
 
     if data["unknown_price_models"]:
         print("\nModels without pricing: " + ", ".join(data["unknown_price_models"]))
+    if data.get("guessed_price_models"):
+        print("\n" + guessed_notice(data["guessed_price_models"]))
 
 
 def resolve_conversation(reference, projects_dir):

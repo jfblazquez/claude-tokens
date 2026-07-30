@@ -161,12 +161,33 @@ python3 claude_tokens.py CONVERSATION --files           # files touched by Read/
 `--last-response` renders inline `code`, **bold**, and headings with ANSI when
 writing to a terminal, and falls back to plain text when piped.
 
-Built-in rates are USD per million tokens, checked on 2026-07-17 against the
+Built-in rates are USD per million tokens, checked on 2026-07-30 against the
 [official Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
 They include the published cache multipliers: `0.1x` for reads, `1.25x` for
 5-minute writes, and `2x` for 1-hour writes. The result is an API estimate; it
-does not include taxes, discounts, server-tool charges, or provider/region
-premiums.
+does not include taxes, discounts, server-tool charges, fast mode, or
+provider/region premiums.
+
+| Model | Input | Output |
+|---|---|---|
+| `claude-fable-5`, `claude-mythos-5` | 10 | 50 |
+| `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5` | 5 | 25 |
+| `claude-opus-4-1`, `claude-opus-4`, `claude-3-opus` | 15 | 75 |
+| `claude-sonnet-5` | 2 | 10 |
+| `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | 3 | 15 |
+| `claude-haiku-4-5` | 1 | 5 |
+| `claude-3-5-haiku` | 0.8 | 4 |
+| `claude-3-haiku` | 0.25 | 1.25 |
+
+`claude-sonnet-5` is at its introductory rate; the list price is `3`/`15` from
+2026-09-01. Fast mode on `claude-opus-5` bills at `10`/`50`, but the JSONL does
+not record it, so those responses are costed at the standard rate.
+
+A model that is not in the table but belongs to a known family — a future
+`claude-opus-6`, `claude-fable-5-2`, `claude-sonnet-6` — is priced from the
+newest known model of the same family. Those costs are printed with a leading
+`~` and the report ends with an estimated-price warning naming the models.
+Trailing `-YYYYMMDD` release dates are stripped before the lookup.
 
 Override or add model rates without changing the code:
 
