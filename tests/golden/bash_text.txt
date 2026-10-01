@@ -1,0 +1,10 @@
+--- exit 0
+--- stdout
+# Show working tree status
+$ git status --short
+
+# Run tests
+$ python3 -m unittest -v
+
+2 Bash command(s).
+--- stderr

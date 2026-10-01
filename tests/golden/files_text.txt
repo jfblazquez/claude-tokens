@@ -1,0 +1,8 @@
+--- exit 0
+--- stdout
+ File                                        | Read | Write | Edit 
+---------------------------------------------+------+-------+------
+ /home/dev/projects/api-gateway/src/cache.py | 2    | 0     | 1    
+
+1 distinct file(s).
+--- stderr

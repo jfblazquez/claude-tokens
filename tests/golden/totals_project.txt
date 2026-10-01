@@ -1,0 +1,34 @@
+--- exit 0
+--- stdout
+Overall usage (projects folder)
+  Time window : 4 days (2026-09-27 → 2026-09-30), 3 active days
+  Busiest day : 2026-09-29 (1 responses)
+  Volume      : 2 conversations across 1 projects, 0 subagents
+  Tokens      : 23.080 total, 1.120 generated (output)
+  Cache hits  : 91.1% of input tokens served from cache
+  Total cost  : $0.02 ($0.0080 per conversation)
+
+Usage by model
+ Model             | Total tokens | % tokens | Cost   | % cost 
+-------------------+--------------+----------+--------+--------
+ claude-sonnet-5-6 | 22.350       | 96.8%    | ~$0.02 | 99.3%  
+ claude-haiku-4-5  | 30           | 0.1%     | $0.00  | 0.7%   
+ acme-model-1      | 700          | 3.0%     | N/D    | N/D    
+
+Top tools
+ Tool | Calls | % of calls 
+------+-------+------------
+
+Skills used
+  (none)
+
+Top projects by cost
+ Project                            | Conversations | Total tokens | Cost  
+------------------------------------+---------------+--------------+-------
+ /home/dev/projects/billing-service | 2             | 23.080       | $0.02 
+
+Models without pricing: acme-model-1
+
+~ estimated price: no published rate for claude-sonnet-5-6; priced from the newest known model of the same family. Use --pricing to set the real rate.
+--- stderr
+warning: <FIXTURES>/projects/-home-dev-projects-billing-service/22222222-2222-4222-8222-222222222222.jsonl:3: Expecting property name enclosed in double quotes

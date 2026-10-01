@@ -1,0 +1,36 @@
+--- exit 0
+--- stdout
+Conversation usage
+ Scope | ID   | Task                            | Model             | Total  | Input | Output | Cache read | Cache write 5m/1h | Cost     
+-------+------+---------------------------------+-------------------+--------+-------+--------+------------+-------------------+----------
+ main  | main | Retry policy for ledger exports | acme-model-1      | 700    | 400   | 300    | 0          | 0/0               | N/D      
+ main  | main | Retry policy for ledger exports | claude-sonnet-5-6 | 22.350 | 50    | 800    | 20.000     | 1.500/0           | ~$0.0158 
+
+Duplicates skipped: main=1
+
+Summary by model
+ Model             | Total  | Input | Output | Raw output* | Cache read | Cache write 5m/1h | Cost     
+-------------------+--------+-------+--------+-------------+------------+-------------------+----------
+ acme-model-1      | 700    | 400   | 300    | 600         | 0          | 0/0               | N/D      
+ claude-sonnet-5-6 | 22.350 | 50    | 800    |             | 20.000     | 1.500/0           | ~$0.0158 
+* Raw output is shown only when persisted stream events differ from de-duplicated API responses.
+
+Last observed context (main conversation)
+ Model             | Context/window | Used  | New input | Cache read | Cache write | Last output 
+-------------------+----------------+-------+-----------+------------+-------------+-------------
+ claude-sonnet-5-6 | 21.550/200.000 | 10.8% | 50        | 20.000     | 1.500       | 800         
+ acme-model-1      | 400/200.000    | 0.2%  | 400       | 0          | 0           | 300         
+  System prompt/tools/memory/skills/messages categories are not broken down in the JSONL.
+  Window is inferred from the largest context seen (200k/1M tier); pass --context-window to set it.
+
+Cold-summary estimate (without cache)
+ Model             | Cold input | Assumed output | Cost     
+-------------------+------------+----------------+----------
+ claude-sonnet-5-6 | 21.550     | 2.000          | ~$0.0631 
+ acme-model-1      | 400        | 2.000          | N/D      
+
+Estimated cost: $0.0158
+Models without pricing: acme-model-1
+~ estimated price: no published rate for claude-sonnet-5-6; priced from the newest known model of the same family. Use --pricing to set the real rate.
+--- stderr
+warning: <FIXTURES>/projects/-home-dev-projects-billing-service/22222222-2222-4222-8222-222222222222.jsonl:3: Expecting property name enclosed in double quotes

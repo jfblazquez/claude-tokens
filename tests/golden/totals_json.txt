@@ -1,0 +1,118 @@
+--- exit 0
+--- stdout
+{
+  "window": {
+    "start": "2026-09-26 09:00:00",
+    "end": "2026-09-30 12:00:00",
+    "span_days": 5,
+    "active_days": 4,
+    "busiest_day": "2026-09-28",
+    "busiest_day_responses": 2
+  },
+  "conversations": 5,
+  "subagents": 2,
+  "projects_count": 2,
+  "total_tokens": 213854,
+  "output_tokens": 6740,
+  "estimated_total_cost_usd": 0.188846,
+  "cost_per_conversation_usd": 0.0377692,
+  "cache_hit_ratio": 0.9511669901600085,
+  "by_model": [
+    {
+      "model": "claude-opus-5-5",
+      "input": 144,
+      "output": 4400,
+      "cache_read": 153000,
+      "cache_write_5m": 800,
+      "cache_write_1h": 3000,
+      "total_tokens": 161344,
+      "price_estimated": false,
+      "estimated_cost_usd": 0.147176,
+      "pct_tokens": 0.7544586493589084,
+      "pct_cost": 0.7793440157588722
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "input": 200,
+      "output": 700,
+      "cache_read": 15000,
+      "cache_write_5m": 0,
+      "cache_write_1h": 2500,
+      "total_tokens": 18400,
+      "price_estimated": false,
+      "estimated_cost_usd": 0.0204,
+      "pct_tokens": 0.08604000860400086,
+      "pct_cost": 0.10802452792222234
+    },
+    {
+      "model": "claude-sonnet-5-6",
+      "input": 50,
+      "output": 800,
+      "cache_read": 20000,
+      "cache_write_5m": 1500,
+      "cache_write_1h": 0,
+      "total_tokens": 22350,
+      "price_estimated": true,
+      "estimated_cost_usd": 0.01585,
+      "pct_tokens": 0.10451055392931627,
+      "pct_cost": 0.0839308219395698
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "input": 320,
+      "output": 540,
+      "cache_read": 9000,
+      "cache_write_5m": 1200,
+      "cache_write_1h": 0,
+      "total_tokens": 11060,
+      "price_estimated": false,
+      "estimated_cost_usd": 0.00542,
+      "pct_tokens": 0.051717526910883126,
+      "pct_cost": 0.02870063437933554
+    },
+    {
+      "model": "acme-model-1",
+      "input": 400,
+      "output": 300,
+      "cache_read": 0,
+      "cache_write_5m": 0,
+      "cache_write_1h": 0,
+      "total_tokens": 700,
+      "price_estimated": false,
+      "estimated_cost_usd": null,
+      "pct_tokens": 0.003273261196891337,
+      "pct_cost": null
+    }
+  ],
+  "projects": [
+    {
+      "project": "/home/dev/projects/api-gateway",
+      "conversations": 3,
+      "total_tokens": 190774,
+      "estimated_cost_usd": 0.172886
+    },
+    {
+      "project": "/home/dev/projects/billing-service",
+      "conversations": 2,
+      "total_tokens": 23080,
+      "estimated_cost_usd": 0.01596
+    }
+  ],
+  "tools": {
+    "Read": 1,
+    "Skill": 1,
+    "Bash": 2
+  },
+  "tool_calls": 4,
+  "skills": {
+    "code-review": 1
+  },
+  "unknown_price_models": [
+    "acme-model-1"
+  ],
+  "guessed_price_models": [
+    "claude-sonnet-5-6"
+  ]
+}
+--- stderr
+warning: <FIXTURES>/projects/-home-dev-projects-billing-service/22222222-2222-4222-8222-222222222222.jsonl:3: Expecting property name enclosed in double quotes

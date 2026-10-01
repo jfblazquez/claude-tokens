@@ -1,0 +1,11 @@
+--- exit 0
+--- stdout
+{
+  "files": {
+    "/home/dev/projects/api-gateway/src/cache.py": {
+      "Read": 2,
+      "Edit": 1
+    }
+  }
+}
+--- stderr

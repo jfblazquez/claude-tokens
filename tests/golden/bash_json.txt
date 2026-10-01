@@ -1,0 +1,15 @@
+--- exit 0
+--- stdout
+{
+  "bash_commands": [
+    {
+      "command": "git status --short",
+      "description": "Show working tree status"
+    },
+    {
+      "command": "python3 -m unittest -v",
+      "description": "Run tests"
+    }
+  ]
+}
+--- stderr

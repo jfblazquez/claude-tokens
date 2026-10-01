@@ -1,0 +1,29 @@
+--- exit 0
+--- stdout
+usage: claude_tokens.py [-h] [--projects-dir PROJECTS_DIR] [--project PROJECT] [--totals] [--pricing PRICING] [--json]
+                        [--cold-summary-output COLD_SUMMARY_OUTPUT] [--context-window CONTEXT_WINDOW]
+                        [--last-response] [--bash] [--files]
+                        [conversation]
+
+Summarize a Claude Code JSONL conversation and its subagents.
+
+positional arguments:
+  conversation          conversation JSONL path or a bare conversation id (its filename stem); if omitted, pick from
+                        the projects folder
+
+options:
+  -h, --help            show this help message and exit
+  --projects-dir PROJECTS_DIR
+                        Claude projects folder to browse when no conversation is given
+  --project PROJECT     only list/aggregate conversations whose project path matches this substring
+  --totals              aggregate usage across the whole projects folder instead of a single conversation
+  --pricing PRICING     USD/MTok pricing JSON that overrides built-in rates
+  --json                emit JSON output
+  --cold-summary-output COLD_SUMMARY_OUTPUT
+                        assumed output tokens for the cold summary (default: 2000)
+  --context-window CONTEXT_WINDOW
+                        context window in tokens for percentages (default: inferred from usage)
+  --last-response       print the last assistant response instead of the usage report
+  --bash                print every Bash command the conversation ran
+  --files               print the files read or written by the conversation
+--- stderr
