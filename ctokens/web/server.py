@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import json
+import re
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple, Optional
+from urllib.parse import parse_qs
+
+from ..catalog import conversation_rows, find_conversation, project_path_of
+from ..content import bash_commands, last_response, touched_files
+from ..logs import discover
+from ..reports import report, scan_totals, totals_report
 
 HOST = "127.0.0.1"
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -21,6 +28,7 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 MAX_DISCARDED_BODY = 1 << 20
+CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files))?")
 
 
 class Config(NamedTuple):
@@ -96,7 +104,33 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, path, query):
         if path in STATIC_FILES:
             return self.static(STATIC_FILES[path])
+        config = self.server.config
+        project = parse_qs(query).get("project", [None])[0]
+        if path == "/api/conversations":
+            return json_response(200, {"projects_dir": str(config.projects_dir),
+                                       "conversations": conversation_rows(config.projects_dir, project)})
+        if path == "/api/totals":
+            return json_response(200, totals_report(scan_totals(config.projects_dir, project), config.prices))
+        match = CONVERSATION_ROUTE.fullmatch(path)
+        if match:
+            return self.conversation(config, *match.groups())
         return NOT_FOUND
+
+    @staticmethod
+    def conversation(config, conversation_id, view):
+        path, matches = find_conversation(conversation_id, config.projects_dir)
+        if path is None:
+            if len(matches) > 1:
+                return json_response(409, {"error": "ambiguous id", "projects": [project_path_of(m) for m in matches]})
+            return json_response(404, {"error": "conversation not found"})
+        if view == "last-response":
+            return json_response(200, {"last_response": last_response(path)})
+        if view == "bash":
+            return json_response(200, {"bash_commands": bash_commands(path)})
+        if view == "files":
+            return json_response(200, {"files": {name: dict(tools) for name, tools in touched_files(path).items()}})
+        return json_response(200, report(discover(path), config.prices, config.cold_summary_output,
+                                         config.context_window))
 
     def static(self, name):
         try:

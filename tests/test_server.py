@@ -1,15 +1,23 @@
+import contextlib
 import http.client
+import io
 import json
+import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from fixtures import build_projects
+from characterization import DATA, ENV, SCRIPT
+from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, build_projects
 
+from ctokens.catalog import conversation_rows
 from ctokens.pricing import load_prices
+from ctokens.reports import scan_totals, totals_report
 from ctokens.web.server import CSP, STATIC_FILES, Config, Handler, Server
 
 DEFAULT_HOST = object()
@@ -39,6 +47,28 @@ def write_static(root):
     return Path(root)
 
 
+def http_request(port, path, method="GET", host=DEFAULT_HOST, body=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        if host is DEFAULT_HOST:
+            host = f"127.0.0.1:{port}"
+        if host is not None:
+            connection.putheader("Host", host)
+        if body is not None:
+            connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders(body)
+        response = connection.getresponse()
+        return response.status, response.headers, response.read()
+    finally:
+        connection.close()
+
+
+def get_json(port, path):
+    status, _, body = http_request(port, path)
+    return status, json.loads(body.decode("utf-8"))
+
+
 class ServerTestCase(unittest.TestCase):
     """Real server on a free port in a thread, fixtures in a temporary projects folder."""
 
@@ -59,20 +89,7 @@ class ServerTestCase(unittest.TestCase):
         cls.quiet.stop()
 
     def request(self, path, method="GET", host=DEFAULT_HOST, body=None, port=None):
-        connection = http.client.HTTPConnection("127.0.0.1", port or self.port, timeout=30)
-        try:
-            connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
-            if host is DEFAULT_HOST:
-                host = f"127.0.0.1:{port or self.port}"
-            if host is not None:
-                connection.putheader("Host", host)
-            if body is not None:
-                connection.putheader("Content-Length", str(len(body)))
-            connection.endheaders(body)
-            response = connection.getresponse()
-            return response.status, response.headers, response.read()
-        finally:
-            connection.close()
+        return http_request(port or self.port, path, method, host, body)
 
     def get_json(self, path, port=None):
         status, headers, body = self.request(path, port=port)
@@ -189,6 +206,151 @@ class StaticFilesTest(ServerTestCase):
         finally:
             stop_server(server, thread)
         self.assertEqual((status, json.loads(body)), (404, {"error": "not found"}))
+
+
+def cli_json(*args):
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    env.update(ENV)
+    done = subprocess.run([sys.executable, str(SCRIPT), *args], stdin=subprocess.DEVNULL, capture_output=True,
+                          env=env, cwd=str(ROOT), timeout=60)
+    if done.returncode:
+        raise AssertionError(done.stderr.decode("utf-8"))
+    return json.loads(done.stdout.decode("utf-8"))
+
+
+BAD_IDS = ("../x", "..%2f..%2fetc%2fpasswd", "%2e%2e%2f%2e%2e%2fetc%2fpasswd", "%2Fetc%2Fpasswd", "*", "%2A",
+           CONV_A.replace("1", "A", 1), CONV_A[:-1], CONV_A + ".jsonl", CONV_A + "%00", "%31" + CONV_A[1:],
+           "99999999-9999-4999-8999-999999999999")
+
+
+class ApiParityTest(ServerTestCase):
+    """Every route returns the same JSON as the matching CLI --json run (D-005)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.custom_args = ("--pricing", str(DATA / "pricing.json"), "--cold-summary-output", "500",
+                           "--context-window", "1000000")
+        config = Config(cls.projects, load_prices(DATA / "pricing.json"), 500, 1000000)
+        cls.custom, cls.custom_thread = start_server(config)
+
+    @classmethod
+    def tearDownClass(cls):
+        stop_server(cls.custom, cls.custom_thread)
+        super().tearDownClass()
+
+    def assert_parity(self, route, *cli_args, port=None, custom=False):
+        status, data = self.get_json(route, port=self.custom.server_address[1] if custom else port)
+        self.assertEqual(status, 200)
+        extra = self.custom_args if custom else ()
+        self.assertEqual(data, cli_json(*cli_args, "--projects-dir", str(self.projects), *extra))
+
+    def test_report(self):
+        for conversation in (CONV_A, CONV_B, CONV_EMPTY):
+            with self.subTest(conversation=conversation):
+                self.assert_parity(f"/api/conversations/{conversation}", conversation, "--json")
+
+    def test_report_with_options(self):
+        for conversation in (CONV_A, CONV_B):
+            with self.subTest(conversation=conversation):
+                self.assert_parity(f"/api/conversations/{conversation}", conversation, "--json", custom=True)
+
+    def test_content_views(self):
+        for conversation in (CONV_A, CONV_B, CONV_EMPTY):
+            for view, flag in (("last-response", "--last-response"), ("bash", "--bash"), ("files", "--files")):
+                with self.subTest(conversation=conversation, view=view):
+                    self.assert_parity(f"/api/conversations/{conversation}/{view}", conversation, flag, "--json")
+
+    def test_totals(self):
+        self.assert_parity("/api/totals", "--totals", "--json")
+        self.assert_parity("/api/totals?project=billing", "--totals", "--json", "--project", "billing")
+        self.assert_parity("/api/totals?project=BILLING&ignored=1", "--totals", "--json", "--project", "billing")
+        self.assert_parity("/api/totals", "--totals", "--json", custom=True)
+
+    def test_conversations(self):
+        status, data = self.get_json("/api/conversations")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"projects_dir": str(self.projects), "conversations": conversation_rows(self.projects)})
+        self.assertEqual([row["id"] for row in data["conversations"]],
+                         [CONV_A, CONV_B, AMBIGUOUS, AMBIGUOUS, CONV_EMPTY])
+
+    def test_conversations_filter(self):
+        _, data = self.get_json("/api/conversations?project=Billing&x=y")
+        self.assertEqual([row["id"] for row in data["conversations"]], [CONV_B, AMBIGUOUS])
+        _, data = self.get_json("/api/conversations?project=")
+        self.assertEqual(len(data["conversations"]), 5)
+        _, data = self.get_json("/api/conversations?project=nothing-matches")
+        self.assertEqual(data["conversations"], [])
+
+    def test_head(self):
+        status, headers, body = self.request(f"/api/conversations/{CONV_A}", method="HEAD")
+        self.assertEqual((status, body), (200, b""))
+        self.assertGreater(int(headers["Content-Length"]), 0)
+
+
+class ApiErrorsTest(ServerTestCase):
+    def test_bad_ids(self):
+        for conversation_id in BAD_IDS:
+            for view in ("", "/last-response", "/bash", "/files"):
+                with self.subTest(id=conversation_id, view=view):
+                    status, data = self.get_json(f"/api/conversations/{conversation_id}{view}")
+                    message = "not found" if "/" in conversation_id else "conversation not found"
+                    self.assertEqual((status, data), (404, {"error": message}))
+
+    def test_bad_ids_touch_no_file(self):
+        with mock.patch.object(Path, "glob", side_effect=AssertionError("glob")) as glob:
+            for conversation_id in BAD_IDS[:-1]:
+                self.assertEqual(self.get_json(f"/api/conversations/{conversation_id}")[0], 404)
+        glob.assert_not_called()
+
+    def test_traversal_paths(self):
+        for path in ("/api/conversations/../../etc/passwd", "/api/conversations/x/../../../etc/passwd",
+                     f"/api/conversations/{CONV_A}/../../totals", f"/api/conversations/{CONV_A}/other",
+                     f"/api/conversations/{CONV_A}/bash/", "/api/conversations/%2F%2Fetc%2Fpasswd/files/x"):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path)[0], 404)
+
+    def test_ambiguous_id(self):
+        expected = {"error": "ambiguous id",
+                    "projects": ["/home/dev/projects/api-gateway", "/home/dev/projects/billing-service"]}
+        for view in ("", "/last-response", "/bash", "/files"):
+            with self.subTest(view=view):
+                self.assertEqual(self.get_json(f"/api/conversations/{AMBIGUOUS}{view}"), (409, expected))
+
+    def test_unexpected_exception(self):
+        stderr = io.StringIO()
+        with mock.patch("ctokens.web.server.conversation_rows", side_effect=RuntimeError("secret detail")), \
+                contextlib.redirect_stderr(stderr):
+            status, headers, body = self.request("/api/conversations")
+        self.assertEqual(status, 500)
+        self.assertEqual(json.loads(body), {"error": "internal error"})
+        self.assertNotIn(b"secret", body)
+        self.assertNotIn(b"Traceback", body)
+        self.assertIn("Traceback", stderr.getvalue())
+        self.assertIn("secret detail", stderr.getvalue())
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+
+class EmptyFolderTest(unittest.TestCase):
+    def test_empty_and_missing_folders(self):
+        with tempfile.TemporaryDirectory() as base, mock.patch.object(Handler, "log_message", lambda *a: None):
+            empty = Path(base) / "empty"
+            empty.mkdir()
+            for folder in (empty, Path(base) / "missing"):
+                with self.subTest(folder=folder.name):
+                    server, thread = start_server(Config(folder, load_prices(None)))
+                    try:
+                        port = server.server_address[1]
+                        status, data = get_json(port, "/api/conversations")
+                        self.assertEqual((status, data), (200, {"projects_dir": str(folder), "conversations": []}))
+                        status, data = get_json(port, "/api/totals")
+                        self.assertEqual(status, 200)
+                        self.assertEqual(data, json.loads(json.dumps(
+                            totals_report(scan_totals(folder), load_prices(None)))))
+                        self.assertEqual((data["conversations"], data["by_model"]), (0, []))
+                        self.assertEqual(get_json(port, f"/api/conversations/{CONV_A}")[0], 404)
+                    finally:
+                        stop_server(server, thread)
 
 
 if __name__ == "__main__":
