@@ -76,9 +76,12 @@ def show_bash_commands(path, as_json):
     if not commands:
         print("(no Bash commands run)", file=sys.stderr)
         return
-    for index, entry in enumerate(commands, 1):
-        if entry["description"]:
-            print(f"{ANSI['dim'] if sys.stdout.isatty() else ''}# {entry['description']}"
+    for entry in commands:
+        comment = entry["description"]
+        if entry["source"] != "main":
+            comment = f"[subagent {entry['source']}] {comment}".rstrip()
+        if comment:
+            print(f"{ANSI['dim'] if sys.stdout.isatty() else ''}# {comment}"
                   f"{ANSI['reset'] if sys.stdout.isatty() else ''}")
         print(f"$ {entry['command']}\n")
     print(f"{fmt(len(commands))} Bash command(s).")
@@ -87,8 +90,7 @@ def show_bash_commands(path, as_json):
 def show_touched_files(path, as_json):
     files = touched_files(path)
     if as_json:
-        print(json.dumps({"files": {name: dict(tools) for name, tools in files.items()}},
-                         ensure_ascii=False, indent=2))
+        print(json.dumps({"files": files}, ensure_ascii=False, indent=2))
         return
     if not files:
         print("(no files read, written or edited)", file=sys.stderr)
@@ -96,8 +98,8 @@ def show_touched_files(path, as_json):
     rows = []
     for name in sorted(files):
         tools = files[name]
-        rows.append([name, fmt(tools.get("Read", 0)), fmt(tools.get("Write", 0)), fmt(tools.get("Edit", 0))])
-    table(["File", "Read", "Write", "Edit"], rows)
+        rows.append([name, fmt(tools["Read"]), fmt(tools["Write"]), fmt(tools["Edit"]), ", ".join(tools["sources"])])
+    table(["File", "Read", "Write", "Edit", "Sources"], rows)
     print(f"\n{fmt(len(files))} distinct file(s).")
 
 
@@ -118,9 +120,16 @@ def main():
     parser.add_argument("--last-response", action="store_true", help="print the last assistant response instead of the usage report")
     parser.add_argument("--bash", action="store_true", help="print every Bash command the conversation ran")
     parser.add_argument("--files", action="store_true", help="print the files read or written by the conversation")
+    parser.add_argument("--serve", action="store_true",
+                        help="start the local web server (JSON API and browser UI) on 127.0.0.1")
+    parser.add_argument("--port", type=int, help="port for --serve (default: 8765)")
     args = parser.parse_args()
     if args.context_window is not None and args.context_window <= 0:
         parser.error("--context-window must be positive")
+    if args.serve:
+        start_server(parser, args)
+    if args.port is not None:
+        parser.error("--port requires --serve")
     if args.totals:
         try:
             data = totals_report(scan_totals(args.projects_dir, args.project), load_prices(args.pricing))
@@ -162,3 +171,27 @@ def main():
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         report_text(data)
+
+
+DEFAULT_PORT = 8765
+NOT_WITH_SERVE = (("conversation", "a conversation"), ("totals", "--totals"), ("json", "--json"),
+                  ("last_response", "--last-response"), ("bash", "--bash"), ("files", "--files"),
+                  ("project", "--project"))
+
+
+def start_server(parser, args):
+    for name, label in NOT_WITH_SERVE:
+        if getattr(args, name) not in (None, False):
+            parser.error(f"--serve cannot be combined with {label}")
+    port = DEFAULT_PORT if args.port is None else args.port
+    if not 1 <= port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if args.cold_summary_output < 0:
+        parser.error("--cold-summary-output must be non-negative")
+    try:
+        prices = load_prices(args.pricing)
+    except ValueError as error:
+        parser.error(str(error))
+    from .web import Config, serve as run_server
+
+    sys.exit(run_server(Config(args.projects_dir, prices, args.cold_summary_output, args.context_window), port))

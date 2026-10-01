@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 
 
@@ -106,52 +106,71 @@ def parse_log(path, kind, identifier, task):
             "context_snapshot": list(last_context.values()), "raw_output_tokens": dict(raw_outputs)}
 
 
-def discover(main):
-    main_conversation = parse_log(main, "main", "main", task_from_log(main))
-    result = []
+def conversation_sources(main):
+    """("main", main) followed by (subagent id, path) for each subagent log, sorted by path."""
     folder = main.parent / main.stem / "subagents"
-    if not folder.is_dir():
-        return [main_conversation]
-    for path in sorted(folder.glob("*.jsonl")):
-        description = ""
-        metadata = path.with_suffix(".meta.json")
-        try:
-            description = short(json.loads(metadata.read_text(encoding="utf-8")).get("description"))
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
-        result.append(parse_log(path, "subagent", path.stem.removeprefix("agent-"), description or task_from_log(path)))
+    subagents = sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+    return [("main", main)] + [(path.stem.removeprefix("agent-"), path) for path in subagents]
+
+
+def subagent_task(path):
+    description = ""
+    try:
+        description = short(json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8")).get("description"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return description or task_from_log(path)
+
+
+def discover(main, parse=parse_log):
+    _, *subagents = conversation_sources(main)
+    main_conversation = parse(main, "main", "main", task_from_log(main))
+    result = [parse(path, "subagent", identifier, subagent_task(path)) for identifier, path in subagents]
     return result + [main_conversation]
 
 
-def accumulate_file(path, tools, skills, window, daily):
-    """Collect per-file token totals plus tool/skill/time metrics."""
-    models, seen = defaultdict(zero), set()
+def tool_uses(message, seen):
+    """tool_use blocks of a message whose id is not in seen (which is updated); blocks without an id always count."""
+    content = message.get("content")
+    for block in content if isinstance(content, list) else []:
+        if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+            continue
+        identity = block.get("id")
+        if isinstance(identity, str):
+            if identity in seen:
+                continue
+            seen.add(identity)
+        yield block
+
+
+def file_stats(path):
+    """Token totals plus tool/skill/time metrics of one log; pure, so the result can be cached per file."""
+    models, daily_models, seen, seen_tools = defaultdict(zero), defaultdict(lambda: defaultdict(zero)), set(), set()
+    tools, skills, responses, window = Counter(), Counter(), Counter(), None
     for event in lines(path):
         stamp = parse_timestamp(event.get("timestamp"))
         if stamp:
-            window[0] = stamp if window[0] is None or stamp < window[0] else window[0]
-            window[1] = stamp if window[1] is None or stamp > window[1] else window[1]
+            window = [min(window[0], stamp), max(window[1], stamp)] if window else [stamp, stamp]
         message = event.get("message")
         if not isinstance(message, dict):
             continue
+        # Tool calls are counted before the message.id dedup: each event of a response carries other blocks.
+        for block in tool_uses(message, seen_tools):
+            name = str(block.get("name") or "unknown")
+            tools[name] += 1
+            if name == "Skill" and isinstance(block.get("input"), dict):
+                skill = block["input"].get("skill")
+                if skill:
+                    skills[str(skill)] += 1
+        day = stamp.strftime("%Y-%m-%d") if stamp else None
         if event.get("type") == "assistant":
             identity = message.get("id") or event.get("uuid")
             if isinstance(identity, str):
                 if identity in seen:
                     continue
                 seen.add(identity)
-            if stamp:
-                daily[stamp.strftime("%Y-%m-%d")] += 1
-        content = message.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    name = str(block.get("name") or "unknown")
-                    tools[name] += 1
-                    if name == "Skill" and isinstance(block.get("input"), dict):
-                        skill = block["input"].get("skill")
-                        if skill:
-                            skills[str(skill)] += 1
+            if day:
+                responses[day] += 1
         usage = message.get("usage")
         if not isinstance(usage, dict):
             continue
@@ -160,10 +179,11 @@ def accumulate_file(path, tools, skills, window, daily):
         five = int(creation.get("ephemeral_5m_input_tokens") or 0)
         hour = int(creation.get("ephemeral_1h_input_tokens") or 0)
         five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
-        tokens = models[model]
-        tokens["input"] += int(usage.get("input_tokens") or 0)
-        tokens["output"] += int(usage.get("output_tokens") or 0)
-        tokens["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
-        tokens["cache_write_5m"] += five
-        tokens["cache_write_1h"] += hour
-    return models
+        record = {"input": int(usage.get("input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
+                  "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+                  "cache_write_5m": five, "cache_write_1h": hour}
+        for tokens in (models[model], daily_models[day][model]):
+            for field in FIELDS:
+                tokens[field] += record[field]
+    return {"models": dict(models), "tools": tools, "skills": skills, "window": window, "responses": responses,
+            "daily_models": {day: dict(by_model) for day, by_model in daily_models.items()}}
