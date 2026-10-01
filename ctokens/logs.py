@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 
 
@@ -129,25 +129,26 @@ def discover(main, parse=parse_log):
     return result + [main_conversation]
 
 
-def accumulate_file(path, tools, skills, window, daily):
-    """Collect per-file token totals plus tool/skill/time metrics."""
-    models, seen = defaultdict(zero), set()
+def file_stats(path):
+    """Token totals plus tool/skill/time metrics of one log; pure, so the result can be cached per file."""
+    models, daily_models, seen = defaultdict(zero), defaultdict(lambda: defaultdict(zero)), set()
+    tools, skills, responses, window = Counter(), Counter(), Counter(), None
     for event in lines(path):
         stamp = parse_timestamp(event.get("timestamp"))
         if stamp:
-            window[0] = stamp if window[0] is None or stamp < window[0] else window[0]
-            window[1] = stamp if window[1] is None or stamp > window[1] else window[1]
+            window = [min(window[0], stamp), max(window[1], stamp)] if window else [stamp, stamp]
         message = event.get("message")
         if not isinstance(message, dict):
             continue
+        day = stamp.strftime("%Y-%m-%d") if stamp else None
         if event.get("type") == "assistant":
             identity = message.get("id") or event.get("uuid")
             if isinstance(identity, str):
                 if identity in seen:
                     continue
                 seen.add(identity)
-            if stamp:
-                daily[stamp.strftime("%Y-%m-%d")] += 1
+            if day:
+                responses[day] += 1
         content = message.get("content")
         if isinstance(content, list):
             for block in content:
@@ -166,10 +167,11 @@ def accumulate_file(path, tools, skills, window, daily):
         five = int(creation.get("ephemeral_5m_input_tokens") or 0)
         hour = int(creation.get("ephemeral_1h_input_tokens") or 0)
         five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
-        tokens = models[model]
-        tokens["input"] += int(usage.get("input_tokens") or 0)
-        tokens["output"] += int(usage.get("output_tokens") or 0)
-        tokens["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
-        tokens["cache_write_5m"] += five
-        tokens["cache_write_1h"] += hour
-    return models
+        record = {"input": int(usage.get("input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
+                  "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+                  "cache_write_5m": five, "cache_write_1h": hour}
+        for tokens in (models[model], daily_models[day][model]):
+            for field in FIELDS:
+                tokens[field] += record[field]
+    return {"models": dict(models), "tools": tools, "skills": skills, "window": window, "responses": responses,
+            "daily_models": {day: dict(by_model) for day, by_model in daily_models.items()}}
