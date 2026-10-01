@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 
 from .catalog import project_path_of
-from .logs import FIELDS, accumulate_file, zero
+from .logs import FIELDS, conversation_sources, file_stats, zero
 from .pricing import estimated_cost, rate_of
 
 
@@ -71,10 +71,11 @@ def report(conversations, prices, cold_summary_output, context_window=None):
             "guessed_price_models": sorted(guessed)}
 
 
-def scan_totals(projects_dir, project_filter=None):
-    """One pass over every session (and its subagents) in the projects folder."""
+def scan_totals(projects_dir, project_filter=None, stats=file_stats):
+    """One pass over every session (and its subagents) in the projects folder; stats(path) reads one log."""
     models = defaultdict(zero)
     project_models = defaultdict(lambda: defaultdict(zero))
+    daily_models = defaultdict(lambda: defaultdict(zero))
     tools, skills, daily, project_convs = Counter(), Counter(), Counter(), Counter()
     window, conversations, subagents = [None, None], 0, 0
     for project in sorted(projects_dir.iterdir()) if projects_dir.is_dir() else []:
@@ -86,21 +87,50 @@ def scan_totals(projects_dir, project_filter=None):
                 continue
             conversations += 1
             project_convs[cwd] += 1
-            files = [path]
-            folder = path.parent / path.stem / "subagents"
-            if folder.is_dir():
-                subs = sorted(folder.glob("*.jsonl"))
-                subagents += len(subs)
-                files += subs
-            for source in files:
-                for model, tokens in accumulate_file(source, tools, skills, window, daily).items():
+            sources = conversation_sources(path)
+            subagents += len(sources) - 1
+            for _, source in sources:
+                result = stats(source)
+                for model, tokens in result["models"].items():
                     for field in FIELDS:
                         models[model][field] += tokens[field]
                         project_models[cwd][model][field] += tokens[field]
+                for day, by_model in result["daily_models"].items():
+                    for model, tokens in by_model.items():
+                        for field in FIELDS:
+                            daily_models[day][model][field] += tokens[field]
+                tools.update(result["tools"])
+                skills.update(result["skills"])
+                daily.update(result["responses"])
+                if result["window"]:
+                    first, last = result["window"]
+                    window = [first if window[0] is None else min(window[0], first),
+                              last if window[1] is None else max(window[1], last)]
     return {"models": dict(models), "project_models": {k: dict(v) for k, v in project_models.items()},
             "tools": dict(tools), "skills": dict(skills), "daily": dict(daily),
+            "daily_models": {k: dict(v) for k, v in daily_models.items()},
             "project_convs": dict(project_convs), "window": window,
             "conversations": conversations, "subagents": subagents}
+
+
+def daily_series(daily_models, responses, prices):
+    """Tokens and cost per Day and model, days ascending; records without a timestamp go last under day None."""
+    series = []
+    for day in sorted(set(daily_models) | set(responses), key=lambda d: (d is None, d or "")):
+        models, day_tokens, day_cost = {}, 0, 0.0
+        for model, tokens in sorted(daily_models.get(day, {}).items()):
+            row = {field: tokens[field] for field in FIELDS}
+            row["total_tokens"] = sum(row.values())
+            if not row["total_tokens"]:
+                continue
+            row["estimated_cost_usd"] = estimated_cost(row, rate_of(prices, model))
+            day_tokens += row["total_tokens"]
+            day_cost += row["estimated_cost_usd"] or 0
+            models[model] = row
+        if models or responses.get(day):
+            series.append({"day": day, "responses": responses.get(day, 0), "total_tokens": day_tokens,
+                           "estimated_cost_usd": day_cost, "models": models})
+    return series
 
 
 def totals_report(scan, prices):
@@ -158,4 +188,5 @@ def totals_report(scan, prices):
         "by_model": by_model, "projects": projects,
         "tools": scan["tools"], "tool_calls": tool_total, "skills": scan["skills"],
         "unknown_price_models": sorted(unknown),
-        "guessed_price_models": sorted(guessed)}
+        "guessed_price_models": sorted(guessed),
+        "daily": daily_series(scan["daily_models"], scan["daily"], prices)}
