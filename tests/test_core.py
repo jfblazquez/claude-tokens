@@ -6,9 +6,11 @@ from collections import Counter
 from pathlib import Path
 from unittest import mock
 
-from fixtures import (API, BILLING, CONV_A, CONV_B, SUB_EXPLORE, SUB_REVIEW, assistant, build_projects, text, tool,
-                      usage, write_jsonl)
+from fixtures import (API, BILLING, CONV_A, CONV_B, LAST_RESPONSE, SUB_EXPLORE, SUB_REVIEW, assistant, build_projects,
+                      text, tool, usage, write_jsonl)
 
+from ctokens.cli import show_bash_commands
+from ctokens.content import bash_commands, last_response, touched_files
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
 from ctokens.pricing import load_prices
 from ctokens.reports import scan_totals, totals_report
@@ -194,6 +196,77 @@ class DailySeriesTest(CoreTest):
         empty = Path(self.tmp.name) / "empty"
         empty.mkdir(exist_ok=True)
         self.assertEqual(totals_report(scan_totals(empty), load_prices(None))["daily"], [])
+
+
+class ContentTest(CoreTest):
+    def conversation(self, name, main, subagents):
+        path = Path(self.tmp.name) / "content" / f"{name}.jsonl"
+        write_jsonl(path, main, 0)
+        for identifier, events in subagents.items():
+            write_jsonl(path.parent / name / "subagents" / f"agent-{identifier}.jsonl", events, 0)
+        return path
+
+    def test_bash_interleaves_sources_chronologically_with_undated_last(self):
+        commands = bash_commands(self.conv_a)
+        self.assertEqual([(c["source"], c["command"]) for c in commands], [
+            ("main", "git status --short"),
+            (SUB_EXPLORE, "grep -rn 'invalidate(' src/"),
+            ("main", "python3 -m unittest -v"),
+            (SUB_REVIEW, "python3 -m unittest tests.test_cache"),
+        ])
+        self.assertEqual(commands[0], {"command": "git status --short", "description": "Show working tree status",
+                                       "source": "main", "timestamp": "2026-09-28T10:00:05.100Z"})
+        self.assertIsNone(commands[-1]["timestamp"])
+
+    def test_bash_orders_within_the_same_second_and_keeps_log_order_when_undated(self):
+        use = usage(1, 1)
+        path = self.conversation("order", [
+            assistant("m1", "claude-opus-5-5", None, "e1", [tool("t1", "Bash", command="undated main")], use),
+            assistant("m2", "claude-opus-5-5", "2026-09-28T10:00:00.900Z", "e2", [tool("t2", "Bash", command="late")], use),
+            assistant("m3", "claude-opus-5-5", None, "e3", [tool("t3", "Bash", command="undated main 2")], use),
+        ], {"zz": [
+            assistant("s1", "claude-haiku-4-5", "2026-09-28T10:00:00.200Z", "s1", [tool("t4", "Bash", command="early")], use),
+            assistant("s2", "claude-haiku-4-5", None, "s2", [tool("t5", "Bash", command="undated sub")], use),
+        ]})
+        self.assertEqual([c["command"] for c in bash_commands(path)],
+                         ["early", "late", "undated main", "undated main 2", "undated sub"])
+
+    def test_repeated_block_is_listed_and_counted_once(self):
+        use, stamp = usage(1, 1), "2026-09-28T10:00:00.000Z"
+        bash = tool("t1", "Bash", command="make", description="Build")
+        edit = tool("t2", "Edit", file_path="/src/a.py", old_string="a", new_string="b")
+        path = self.conversation("repeated", [
+            assistant("m1", "claude-opus-5-5", stamp, "e1", [bash], use),
+            assistant("m1", "claude-opus-5-5", stamp, "e2", [bash, edit], use),
+            assistant("m1", "claude-opus-5-5", stamp, "e3", [edit], use),
+        ], {})
+        self.assertEqual([c["command"] for c in bash_commands(path)], ["make"])
+        self.assertEqual(touched_files(path), {"/src/a.py": {"Read": 0, "Write": 0, "Edit": 1, "sources": ["main"]}})
+
+    def test_touched_files_one_row_per_file_with_summed_counts_and_sources(self):
+        self.assertEqual(touched_files(self.conv_a), {
+            "/home/dev/projects/api-gateway/src/cache.py": {"Read": 2, "Write": 0, "Edit": 1,
+                                                            "sources": ["main", SUB_EXPLORE]},
+            "/home/dev/projects/api-gateway/tests/test_reload.py": {"Read": 0, "Write": 1, "Edit": 0,
+                                                                    "sources": [SUB_REVIEW]},
+        })
+
+    def test_bash_text_names_the_subagent_even_without_description(self):
+        use = usage(1, 1)
+        path = self.conversation("nodesc", [
+            assistant("m1", "claude-opus-5-5", None, "e1", [tool("t1", "Bash", command="ls")], use),
+        ], {"zz": [assistant("s1", "claude-haiku-4-5", None, "s1", [tool("t2", "Bash", command="pwd")], use)]})
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            show_bash_commands(path, as_json=False)
+        self.assertEqual(out.getvalue(), "$ ls\n\n# [subagent zz]\n$ pwd\n\n2 Bash command(s).\n")
+
+    def test_last_response_reads_the_main_log_only(self):
+        use = usage(1, 1)
+        path = self.conversation("last", [
+            assistant("m1", "claude-opus-5-5", "2026-09-28T10:00:00.000Z", "e1", [text("From main.")], use),
+        ], {"zz": [assistant("s1", "claude-haiku-4-5", "2026-09-28T11:00:00.000Z", "s1", [text("From sub.")], use)]})
+        self.assertEqual(last_response(path), "From main.")
+        self.assertEqual(last_response(self.conv_a), LAST_RESPONSE)
 
 
 if __name__ == "__main__":

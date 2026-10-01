@@ -76,9 +76,12 @@ def show_bash_commands(path, as_json):
     if not commands:
         print("(no Bash commands run)", file=sys.stderr)
         return
-    for index, entry in enumerate(commands, 1):
-        if entry["description"]:
-            print(f"{ANSI['dim'] if sys.stdout.isatty() else ''}# {entry['description']}"
+    for entry in commands:
+        comment = entry["description"]
+        if entry["source"] != "main":
+            comment = f"[subagent {entry['source']}] {comment}".rstrip()
+        if comment:
+            print(f"{ANSI['dim'] if sys.stdout.isatty() else ''}# {comment}"
                   f"{ANSI['reset'] if sys.stdout.isatty() else ''}")
         print(f"$ {entry['command']}\n")
     print(f"{fmt(len(commands))} Bash command(s).")
@@ -87,8 +90,7 @@ def show_bash_commands(path, as_json):
 def show_touched_files(path, as_json):
     files = touched_files(path)
     if as_json:
-        print(json.dumps({"files": {name: dict(tools) for name, tools in files.items()}},
-                         ensure_ascii=False, indent=2))
+        print(json.dumps({"files": files}, ensure_ascii=False, indent=2))
         return
     if not files:
         print("(no files read, written or edited)", file=sys.stderr)
@@ -96,8 +98,8 @@ def show_touched_files(path, as_json):
     rows = []
     for name in sorted(files):
         tools = files[name]
-        rows.append([name, fmt(tools.get("Read", 0)), fmt(tools.get("Write", 0)), fmt(tools.get("Edit", 0))])
-    table(["File", "Read", "Write", "Edit"], rows)
+        rows.append([name, fmt(tools["Read"]), fmt(tools["Write"]), fmt(tools["Edit"]), ", ".join(tools["sources"])])
+    table(["File", "Read", "Write", "Edit", "Sources"], rows)
     print(f"\n{fmt(len(files))} distinct file(s).")
 
 
