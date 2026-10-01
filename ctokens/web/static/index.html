@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>claude-tokens</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/vendor/hljs-light.css" media="not all and (prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/static/vendor/hljs-dark.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/vendor/chart.umd.min.js" defer></script>
+<script src="/static/vendor/marked.min.js" defer></script>
+<script src="/static/vendor/purify.min.js" defer></script>
+<script src="/static/vendor/highlight.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="appbar">
+  <div class="appbar-in">
+    <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true">$</span>claude-tokens</a>
+    <nav class="nav" aria-label="Main">
+      <a id="nav-list" href="#/">Conversations</a>
+      <a id="nav-totals" href="#/totals">Totals</a>
+    </nav>
+    <div class="bar-right">
+      <span class="loaded" id="loaded" aria-live="polite">Loaded at --:--:-- UTC</span>
+      <button class="btn" id="refresh" type="button">Refresh</button>
+      <label class="switch"><input type="checkbox" id="auto" role="switch" autocomplete="off"> Auto-refresh 30 s</label>
+    </div>
+  </div>
+</header>
+<main id="main"><noscript>This page needs JavaScript.</noscript></main>
+</body>
+</html>
