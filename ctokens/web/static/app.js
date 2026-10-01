@@ -204,18 +204,92 @@ const VIEWS = {
   },
 };
 
-const modelCell = (model) => model;
+// ---------- model colours (R11.1, design §8.4) ----------
+const FAMILY_SLOT = { opus: 0, sonnet: 1, haiku: 2, fable: 3, mythos: 4 };
+const FIRST_FREE_SLOT = 5, LAST_SLOT = 7;
+
+const familyOf = (model) => Object.keys(FAMILY_SLOT).find((f) => String(model).toLowerCase().includes(f)) || null;
+const versionOf = (model) => String(model).split("-").filter((p) => /^\d+$/.test(p)).map(Number);
+
+function compareVersionsDesc(a, b) {
+  const va = versionOf(a), vb = versionOf(b);
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    const d = (vb[i] || 0) - (va[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+function mixHex(a, b, weight) {
+  const parse = (x) => [1, 3, 5].map((i) => parseInt(x.slice(i, i + 2), 16));
+  const [p, q] = [parse(a), parse(b)];
+  return `#${p.map((v, i) => Math.round(v * (1 - weight) + q[i] * weight).toString(16).padStart(2, "0")).join("")}`;
+}
+
+// models: every model seen this session, in order of first appearance; palette: the 8 --mN colours.
+function assignColors(models, palette, surface) {
+  const colors = {}, perFamily = {};
+  for (const m of models.filter(familyOf).sort(compareVersionsDesc)) {
+    const fam = familyOf(m), n = (perFamily[fam] = (perFamily[fam] || 0) + 1);
+    const base = palette[FAMILY_SLOT[fam]];
+    colors[m] = n === 1 ? base : mixHex(base, surface, n === 2 ? 0.38 : 0.55);
+  }
+  let slot = FIRST_FREE_SLOT;
+  for (const m of models) if (!familyOf(m)) colors[m] = palette[Math.min(slot++, LAST_SLOT)];
+  return colors;
+}
+
+const seenModels = [];
+const colorState = { palette: null, surface: null, size: -1, colors: {} };
+
+// Registers every model of a response before rendering, so one render never sees the assignment change midway.
+function noteModels(value) {
+  const add = (m) => { if (!seenModels.includes(m)) seenModels.push(m); };
+  const visit = (v) => {
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (typeof v.model === "string") add(v.model);
+    if (v.models && typeof v.models === "object" && !Array.isArray(v.models)) Object.keys(v.models).forEach(add);
+    Object.values(v).forEach(visit);
+  };
+  visit(value);
+}
+
+function readPalette() {
+  colorState.palette = Array.from({ length: LAST_SLOT + 1 }, (_, i) => cssVar(`--m${i}`));
+  colorState.surface = cssVar("--surface");
+  colorState.size = -1;
+}
+
+function colorOf(model) {
+  if (!seenModels.includes(model)) seenModels.push(model);
+  if (!colorState.palette) readPalette();
+  if (colorState.size !== seenModels.length) {
+    colorState.colors = assignColors(seenModels, colorState.palette, colorState.surface);
+    colorState.size = seenModels.length;
+  }
+  return colorState.colors[model];
+}
+
+const swatch = (model) => h("span", { class: "sw", "aria-hidden": "true", css: { background: colorOf(model) } });
+const modelCell = (model) => [swatch(model), model];
 
 // ---------- conversation list (R3) ----------
 const convRows = new Map();
 const convTasks = new Map();
 const convCounts = new Map();
 
+let projectsDir = null;
+
 function listRows(body) {
   const rows = Array.isArray(body) ? body : (body && body.conversations) || [];
+  if (body && typeof body.projects_dir === "string") projectsDir = body.projects_dir;
   for (const row of [...rows].reverse()) convRows.set(row.id, row);
   return rows;
 }
+
+const folderLabel = () => (projectsDir ? h("b", { class: "mono" }, projectsDir) : "the projects folder");
+const folderText = () => projectsDir || "the projects folder";
 
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
@@ -225,11 +299,12 @@ VIEWS.list = {
   title: () => "Conversations",
   load: async () => listRows(await api("/api/conversations")),
   head: () => h("div", { class: "page-head" }, h("h1", {}, "Conversations"),
-    h("div", { class: "meta" }, h("span", {}, "Most recent first · times in UTC"))),
+    h("div", { class: "meta" }, projectsDir ? h("span", {}, "Projects folder ", folderLabel()) : null,
+      h("span", {}, "Most recent first · times in UTC"))),
   render(rows) {
     if (!rows.length) {
-      return emptyState("No conversations found", "There are no conversation logs in the projects folder yet (the one given "
-        + "by --projects-dir, ~/.claude/projects by default). Conversations appear here after you use Claude Code.");
+      return emptyState("No conversations found", `No conversations were found in ${folderText()}. `
+        + "Conversations appear here after you use Claude Code.");
     }
     const count = h("span", { class: "count" });
     const holder = h("div", { class: "section" });
@@ -257,7 +332,7 @@ VIEWS.list = {
 // ---------- conversation header and tabs (R4.5) ----------
 const TABS = [["report", "Usage"], ["response", "Last response"], ["bash", "Bash commands"], ["files", "Files"]];
 
-async function refreshConvRow(id) {
+async function refreshList() {
   try {
     listRows(await api("/api/conversations"));
   } catch (_) {
@@ -266,7 +341,7 @@ async function refreshConvRow(id) {
 }
 
 async function loadConversation(route, path) {
-  const [data] = await Promise.all([api(`/api/conversations/${encodeURIComponent(route.id)}${path}`), refreshConvRow(route.id)]);
+  const [data] = await Promise.all([api(`/api/conversations/${encodeURIComponent(route.id)}${path}`), refreshList()]);
   return data;
 }
 
@@ -518,6 +593,232 @@ VIEWS.files = {
   },
 };
 
+// ---------- totals (R5, R8) ----------
+let totalsFilter = "";
+let totalsDraft = "";
+
+function compact(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} B`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} M`;
+  return fmt(n);
+}
+
+const hasGuessed = (T, day) => Object.keys(day.models || {}).some((m) => (T.guessed_price_models || []).includes(m));
+const moneyShort = (v, estimated) => money(v, estimated, v && Math.abs(v) < 0.01 ? 4 : 2);
+const DAY_MS = 864e5, MAX_FILLED_DAYS = 1000;
+
+// Days without usage are added as zeros so the day axis keeps its real spacing.
+function fillDays(daily) {
+  const dated = (daily || []).filter((d) => d.day).sort((a, b) => compareValues(a.day, b.day));
+  if (!dated.length) return [];
+  const start = Date.parse(`${dated[0].day}T00:00:00Z`), end = Date.parse(`${dated[dated.length - 1].day}T00:00:00Z`);
+  if (Number.isNaN(start) || Number.isNaN(end) || (end - start) / DAY_MS > MAX_FILLED_DAYS) return dated;
+  const byDay = new Map(dated.map((d) => [d.day, d]));
+  const out = [];
+  for (let t = start; t <= end; t += DAY_MS) {
+    const day = new Date(t).toISOString().slice(0, 10);
+    out.push(byDay.get(day) || { day, responses: 0, total_tokens: 0, estimated_cost_usd: 0, models: {} });
+  }
+  return out;
+}
+
+function topEntries(counts, n = 15) {
+  return Object.entries(counts || {}).sort((a, b) => b[1] - a[1] || compareValues(a[0], b[0])).slice(0, n);
+}
+
+function applyTotalsFilter(value) {
+  const next = value.trim();
+  if (next === totalsFilter) return;
+  totalsFilter = next;
+  totalsDraft = next;
+  load({ refresh: false });
+}
+
+function chartBox(id, label, cls) {
+  return h("div", { class: cls ? `chart-box ${cls}` : "chart-box" }, h("canvas", { id, role: "img", "aria-label": label }));
+}
+
+function chartCard(title, sub, body, wide) {
+  return h("div", { class: wide ? "card chart-card chart-wide" : "card chart-card" }, h("h3", {}, title), sub ? h("div", { class: "sub" }, sub) : null, body);
+}
+
+VIEWS.totals = {
+  title: () => "Totals",
+  load: async () => (await Promise.all([api(withProject("/api/totals", totalsFilter)), projectsDir ? null : refreshList()]))[0],
+  head() {
+    const hint = h("span", { class: "count" });
+    const setHint = () => {
+      hint.textContent = totalsDraft.trim() !== totalsFilter ? "Press Enter to apply the filter"
+        : totalsFilter ? `Filtered by project “${totalsFilter}”` : "All projects";
+    };
+    const input = h("input", {
+      id: "totals-filter", type: "search", placeholder: "Filter by project path", value: totalsDraft, "aria-label": "Filter by project",
+      oninput: (e) => { totalsDraft = e.target.value; setHint(); },
+      onchange: (e) => applyTotalsFilter(e.target.value),
+      onsearch: (e) => applyTotalsFilter(e.target.value),
+    });
+    setHint();
+    return [h("div", { class: "page-head" }, h("h1", {}, "Overall usage"),
+      h("div", { class: "meta" }, h("span", {}, "Every conversation and subagent in ", folderLabel()), h("span", {}, "Days are UTC"))),
+    h("div", { class: "toolbar" }, h("label", { class: "field" }, "Project", input), hint)];
+  },
+  loading: () => skeleton(10, "Scanning the conversation logs. The first load after start-up takes a few seconds; "
+    + "later loads only re-read logs that changed."),
+  render(T) {
+    if (!T.conversations) {
+      return emptyState("Nothing to total yet", totalsFilter ? `No conversation has a project matching “${totalsFilter}”.`
+        : `There are no conversation logs in ${folderText()}, so there is no usage to aggregate.`);
+    }
+    const guessed = (T.guessed_price_models || []).length > 0;
+    const w = T.window || {};
+    const stats = h("div", { class: "stats" },
+      stat("Total cost", money(T.estimated_total_cost_usd, guessed, 2), `${money(T.cost_per_conversation_usd, false, 4)} per conversation`),
+      stat("Tokens", compact(T.total_tokens), `${fmt(T.total_tokens)} total · ${fmt(T.output_tokens)} generated`),
+      stat("Volume", fmt(T.conversations), `conversations · ${fmt(T.subagents)} subagents · ${fmt(T.projects_count)} projects`),
+      stat("Cache hits", pct(T.cache_hit_ratio), "of input tokens served from cache"),
+      stat("Time window", w.start ? `${fmt(w.span_days)} days` : "—", w.start
+        ? `${w.start.slice(0, 10)} → ${w.end.slice(0, 10)} · ${fmt(w.active_days)} active · busiest ${w.busiest_day} (${fmt(w.busiest_day_responses)} responses)`
+        : "no dated usage"));
+
+    const undated = (T.daily || []).find((d) => d.day == null);
+    const models = (T.by_model || []).map((r) => r.model);
+    const legend = h("div", { class: "legend" }, models.map((m) => h("span", {}, swatch(m), m)));
+    const charts = h("div", { class: "charts" },
+      chartCard("Daily cost by model", undated
+        ? `Undated records (no timestamp, not plotted): ${moneyShort(undated.estimated_cost_usd, hasGuessed(T, undated))} · ${fmt(undated.total_tokens)} tokens`
+        : "Stacked by model · days in UTC",
+      h("div", { class: "chart-stack" }, legend, chartBox("c-daily", "Daily cost by model", "tall")), true),
+      chartCard("Model share", "Percentage of cost and of tokens per model",
+        h("div", { class: "pair" }, chartBox("c-share-cost", "Percentage of cost per model"), chartBox("c-share-tok", "Percentage of tokens per model"))),
+      chartCard("Projects by cost", "Top 15", chartBox("c-projects", "Projects by cost")),
+      chartCard("Daily activity", "Assistant responses per day (UTC)", chartBox("c-activity", "Assistant responses per day")),
+      chartCard("Tools and skills", "Top 15 tool calls · skill invocations",
+        h("div", { class: "pair" }, chartBox("c-tools", "Tool calls"), chartBox("c-skills", "Skill invocations"))));
+
+    const modelTable = h("section", { class: "section" }, sectionHead("Usage by model"), renderTable([
+      { key: "model", label: "Model", render: (r) => modelCell(r.model) },
+      { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
+      { key: "pct_tokens", label: "% tokens", num: true, render: (r) => pct(r.pct_tokens) },
+      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated, 2) },
+      { key: "pct_cost", label: "% cost", num: true, render: (r) => pct(r.pct_cost) },
+    ], T.by_model || [], { id: "totals-models", sortKey: "estimated_cost_usd" }));
+    const projectTable = h("section", { class: "section" }, sectionHead("Projects by cost"), renderTable([
+      { key: "project", label: "Project", render: (r) => h("span", { class: "mono" }, r.project) },
+      { key: "conversations", label: "Conversations", num: true, render: (r) => fmt(r.conversations) },
+      { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
+      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false, 2) },
+    ], T.projects || [], { id: "totals-projects", sortKey: "estimated_cost_usd" }));
+    const toolRows = topEntries(T.tools, Infinity).map(([tool, calls]) => ({ tool, calls, share: T.tool_calls ? calls / T.tool_calls : 0 }));
+    const skillRows = topEntries(T.skills, Infinity).map(([skill, n]) => ({ skill, n }));
+    const usageTables = h("div", { class: "charts" },
+      h("section", { class: "section" }, sectionHead("Top tools"), toolRows.length ? renderTable([
+        { key: "tool", label: "Tool" },
+        { key: "calls", label: "Calls", num: true, render: (r) => fmt(r.calls) },
+        { key: "share", label: "% of calls", num: true, render: (r) => pct(r.share) },
+      ], toolRows, { id: "totals-tools", sortKey: "calls" }) : emptyState("No tool calls", "No conversation called a tool.")),
+      h("section", { class: "section" }, sectionHead("Skills used"), skillRows.length ? renderTable([
+        { key: "skill", label: "Skill", render: (r) => h("span", { class: "mono" }, r.skill) },
+        { key: "n", label: "Invocations", num: true, render: (r) => fmt(r.n) },
+      ], skillRows, { id: "totals-skills", sortKey: "n" }) : emptyState("No skills used", "No conversation invoked a skill.")));
+
+    return [stats, ...pricingNotices(T), charts, modelTable, projectTable, usageTables];
+  },
+  after: (T) => (T.conversations ? drawCharts(T) : null),
+};
+
+function drawCharts(T) {
+  if (typeof Chart === "undefined") return null;
+  const fg = cssVar("--muted"), grid = cssVar("--grid"), accent = cssVar("--accent"), surface = cssVar("--surface");
+  Chart.defaults.font.family = cssVar("--font");
+  Chart.defaults.font.size = 12;
+  Chart.defaults.color = fg;
+  const charts = [];
+  const guessed = new Set(T.guessed_price_models || []);
+  const axis = (title, extra = {}) => ({
+    grid: { color: grid, drawTicks: false }, border: { color: grid }, ticks: { color: fg, padding: 6 },
+    title: { display: !!title, text: title, color: fg }, ...extra,
+  });
+  const base = { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } } };
+  const place = (id, config, empty) => {
+    const canvas = $(id);
+    if (!canvas) return;
+    if (empty) {
+      canvas.replaceWith(h("div", { class: "empty" }, empty));
+      return;
+    }
+    charts.push(new Chart(canvas, config));
+  };
+
+  const days = fillDays(T.daily);
+  const multiYear = days.length && days[0].day.slice(0, 4) !== days[days.length - 1].day.slice(0, 4);
+  const labels = days.map((d) => (multiYear ? d.day : d.day.slice(5)));
+  const dayTitle = (items) => `${days[items[0].dataIndex].day} (UTC)`;
+  const models = (T.by_model || []).map((r) => r.model);
+
+  place("c-daily", {
+    type: "bar",
+    data: { labels, datasets: models.map((m) => ({
+      label: m, data: days.map((d) => (d.models[m] ? d.models[m].estimated_cost_usd || 0 : 0)),
+      backgroundColor: colorOf(m), borderRadius: 2, maxBarThickness: 22,
+    })) },
+    options: { ...base,
+      scales: { x: axis("Day (UTC)", { stacked: true, ticks: { color: fg, maxRotation: 0, autoSkipPadding: 10 } }),
+        y: axis(null, { stacked: true, border: { display: false }, ticks: { color: fg, padding: 6, callback: (v) => `$${v}` } }) },
+      plugins: { legend: { display: false }, tooltip: { mode: "index", filter: (i) => i.raw > 0, callbacks: {
+        title: dayTitle,
+        label: (i) => {
+          const entry = days[i.dataIndex].models[i.dataset.label];
+          return ` ${i.dataset.label}: ${entry && entry.estimated_cost_usd == null ? "N/D" : moneyShort(i.raw, guessed.has(i.dataset.label))}`;
+        },
+        footer: (items) => `Day total: ${moneyShort(days[items[0].dataIndex].estimated_cost_usd, hasGuessed(T, days[items[0].dataIndex]))}`,
+      } } } },
+  }, days.length ? null : "No dated usage");
+
+  const share = (id, key, title) => place(id, {
+    type: "bar",
+    data: { labels: models.map((m) => m.replace(/^claude-/, "")), datasets: [{
+      data: (T.by_model || []).map((r) => (r[key] == null ? null : r[key] * 100)),
+      backgroundColor: models.map((m) => colorOf(m)), borderRadius: 3, maxBarThickness: 18,
+    }] },
+    options: { ...base, indexAxis: "y",
+      scales: { x: axis(title, { min: 0, max: 100, ticks: { color: fg, callback: (v) => `${v}%` } }),
+        y: { grid: { display: false }, border: { display: false }, ticks: { color: fg } } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { title: (items) => models[items[0].dataIndex], label: (i) => ` ${i.raw.toFixed(1)}%` } } } },
+  }, models.length ? null : "No usage");
+  share("c-share-cost", "pct_cost", "% of cost");
+  share("c-share-tok", "pct_tokens", "% of tokens");
+
+  const hbar = (id, names, values, color, format, title, fullNames, empty) => place(id, {
+    type: "bar",
+    data: { labels: names, datasets: [{ data: values, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
+    options: { ...base, indexAxis: "y",
+      scales: { x: axis(title), y: { grid: { display: false }, border: { display: false }, ticks: { color: fg } } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: {
+        title: (items) => (fullNames || names)[items[0].dataIndex], label: (i) => ` ${format(i.raw)}` } } } },
+  }, values.length ? null : empty);
+
+  const projects = [...(T.projects || [])].sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd).slice(0, 15);
+  hbar("c-projects", projects.map((p) => String(p.project).split("/").filter(Boolean).pop() || p.project),
+    projects.map((p) => p.estimated_cost_usd), accent, (v) => moneyShort(v, false), "Cost (USD)", projects.map((p) => p.project), "No projects");
+  const tools = topEntries(T.tools), skills = topEntries(T.skills);
+  hbar("c-tools", tools.map((t) => t[0]), tools.map((t) => t[1]), accent, fmt, "Tool calls", null, "No tool calls");
+  hbar("c-skills", skills.map((t) => t[0]), skills.map((t) => t[1]), cssVar("--m5"), fmt, "Invocations", null, "No skills used");
+
+  place("c-activity", {
+    type: "line",
+    data: { labels, datasets: [{
+      data: days.map((d) => d.responses || 0), borderColor: accent, backgroundColor: mixHex(accent, surface, 0.82), fill: true,
+      tension: 0.3, pointRadius: days.map((_, i) => (i === days.length - 1 ? 4 : 0)), pointBackgroundColor: accent, borderWidth: 2,
+    }] },
+    options: { ...base,
+      scales: { x: axis("Day (UTC)", { ticks: { color: fg, maxRotation: 0, autoSkipPadding: 10 } }),
+        y: axis(null, { beginAtZero: true, border: { display: false }, ticks: { color: fg, padding: 6, precision: 0, callback: (v) => fmt(v) } }) },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { title: dayTitle, label: (i) => ` ${fmt(i.raw)} responses` } } } },
+  }, days.length ? null : "No dated usage");
+
+  return () => charts.forEach((c) => c.destroy());
+}
+
 // ---------- shell: app bar, loading, refresh (R9.4, R9.5) ----------
 const app = { route: null, seq: 0, busy: false, phase: "loading", data: null, error: null, loadedAt: null, failedAt: null, timer: null, after: [] };
 
@@ -545,6 +846,8 @@ function show({ keepScroll = false } = {}) {
   const y = window.scrollY;
   const focused = document.activeElement && document.activeElement.id ? document.activeElement : null;
   runCleanups();
+  readPalette();
+  if (app.phase === "ready") noteModels(app.data);
   const head = view.head ? view.head(route, app.data) : [];
   let body;
   if (app.phase === "loading") body = view.loading ? view.loading(route) : skeleton(8);
