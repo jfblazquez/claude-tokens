@@ -106,20 +106,26 @@ def parse_log(path, kind, identifier, task):
             "context_snapshot": list(last_context.values()), "raw_output_tokens": dict(raw_outputs)}
 
 
-def discover(main):
-    main_conversation = parse_log(main, "main", "main", task_from_log(main))
-    result = []
+def conversation_sources(main):
+    """("main", main) followed by (subagent id, path) for each subagent log, sorted by path."""
     folder = main.parent / main.stem / "subagents"
-    if not folder.is_dir():
-        return [main_conversation]
-    for path in sorted(folder.glob("*.jsonl")):
-        description = ""
-        metadata = path.with_suffix(".meta.json")
-        try:
-            description = short(json.loads(metadata.read_text(encoding="utf-8")).get("description"))
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
-        result.append(parse_log(path, "subagent", path.stem.removeprefix("agent-"), description or task_from_log(path)))
+    subagents = sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+    return [("main", main)] + [(path.stem.removeprefix("agent-"), path) for path in subagents]
+
+
+def subagent_task(path):
+    description = ""
+    try:
+        description = short(json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8")).get("description"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return description or task_from_log(path)
+
+
+def discover(main, parse=parse_log):
+    _, *subagents = conversation_sources(main)
+    main_conversation = parse(main, "main", "main", task_from_log(main))
+    result = [parse(path, "subagent", identifier, subagent_task(path)) for identifier, path in subagents]
     return result + [main_conversation]
 
 
