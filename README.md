@@ -115,6 +115,17 @@ Metrics reported: time window (span, active days, busiest day), total cost and
 cost per conversation, tokens generated, cache-hit ratio, per-model token/cost
 share, tool-call distribution, skills invoked, and per-project cost.
 
+Each tool call (and skill invocation) is counted once by its `tool_use` id. Claude
+Code writes one event per content block of a response, all with the same
+`message.id`, so counting only the first event of each response would miss most
+tool calls.
+
+`--totals --json` also includes a `daily` series: for each Day (a UTC calendar
+day) the assistant responses, tokens and estimated cost, broken down by model.
+Records without a timestamp go to a last entry with `"day": null`. The daily
+costs add up to `estimated_total_cost_usd`; the text output does not show the
+series.
+
 For each conversation it shows the task/reason (the `.meta.json` description
 when available, otherwise the first user message), usage by model and cache
 class, and estimated cost. Subagents are shown first, then the main
@@ -154,12 +165,19 @@ works with a path or a bare id, and with `--json`):
 
 ```bash
 python3 claude_tokens.py CONVERSATION --last-response   # final assistant turn, Markdown rendered for the terminal
-python3 claude_tokens.py CONVERSATION --bash            # every Bash command it ran, in order
+python3 claude_tokens.py CONVERSATION --bash            # every Bash command it and its subagents ran, by time
 python3 claude_tokens.py CONVERSATION --files           # files touched by Read/Write/Edit, with per-tool counts
 ```
 
 `--last-response` renders inline `code`, **bold**, and headings with ANSI when
-writing to a terminal, and falls back to plain text when piped.
+writing to a terminal, and falls back to plain text when piped. It shows the
+main conversation's last response only.
+
+`--bash` and `--files` cover the main conversation and its subagents. A Bash
+command run by a subagent is headed `# [subagent <id>]`. The files table has one
+row per file with the counts added across sources and a `Sources` column. With
+`--json`, each command has `source` (`main` or the subagent id) and `timestamp`,
+and each file has `sources`. A block repeated in the log is counted once.
 
 Built-in rates are USD per million tokens, checked on 2026-10-01 against the
 [official Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
@@ -202,3 +220,61 @@ Override or add model rates without changing the code:
 ```bash
 python3 claude_tokens.py CONVERSATION.jsonl --pricing prices.json
 ```
+
+## Web UI (`--serve`)
+
+`--serve` starts a local web server with the same data as the CLI: the
+conversation list, the usage report, the last response, Bash commands, files
+and the totals, plus charts (daily cost by model, model share, projects by cost,
+daily activity, tools and skills).
+
+```bash
+python3 claude_tokens.py --serve               # http://127.0.0.1:8765
+python3 claude_tokens.py --serve --port 9000 --pricing prices.json
+```
+
+It only listens on `127.0.0.1` and has no authentication. It rejects requests
+whose `Host` is not `localhost` or `127.0.0.1`, and anything but `GET`/`HEAD`.
+It never writes to the projects folder.
+`--serve` accepts `--port`, `--projects-dir`, `--pricing`,
+`--cold-summary-output` and `--context-window`; the project filter is chosen in
+the UI. A port that is already in use is an error.
+
+When the tool runs on a remote machine, open an SSH tunnel and browse
+`http://localhost:8765` on your own machine (any local port works):
+
+```bash
+ssh -N -L 8765:localhost:8765 <remote-host>
+```
+
+Every request re-reads the logs that changed since the previous one, so the data
+is always current. The first totals load parses everything (about as long as
+`--totals`); later loads take a fraction of a second when nothing changed.
+
+The browser libraries (Chart.js, marked, DOMPurify, highlight.js) are bundled in
+`ctokens/web/static/vendor/`, so the UI works offline and loads nothing from
+other sites. `tools/vendor.py` refreshes them.
+
+The JSON API behind the UI returns the same objects as the CLI's `--json`:
+
+| Route | Same as |
+|---|---|
+| `GET /api/conversations?project=` | the picker list, as `{"projects_dir", "conversations": [...]}` |
+| `GET /api/conversations/<id>` | `<id> --json` |
+| `GET /api/conversations/<id>/last-response` | `<id> --last-response --json` |
+| `GET /api/conversations/<id>/bash` | `<id> --bash --json` |
+| `GET /api/conversations/<id>/files` | `<id> --files --json` |
+| `GET /api/totals?project=` | `--totals --json` |
+
+## Development
+
+The code lives in the `ctokens/` package; `claude_tokens.py` is the entry point.
+Tests use only the standard library and synthetic fixtures (never your real
+logs):
+
+```bash
+python3 -m unittest discover -s tests
+python3 tests/coverage.py              # line coverage of the CLI characterization cases
+python3 tests/golden/refresh.py CASE   # regenerate a golden after a deliberate output change
+```
+
