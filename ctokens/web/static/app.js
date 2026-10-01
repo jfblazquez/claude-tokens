@@ -139,7 +139,8 @@ function errorState(err, retry) {
   return h("div", { class: "card state error", role: "alert" },
     h("div", { class: "title" }, "Couldn't load this view"),
     h("div", { class: "body" }, err && err.message ? err.message : String(err)),
-    projects ? h("div", { class: "body" }, "Matching projects: ", projects.map((p, i) => [i ? ", " : "", h("span", { class: "mono" }, p)])) : null,
+    projects ? h("div", { class: "body" }, "This conversation id exists in more than one project, so the server cannot tell which "
+      + "one to show. Matching projects: ", projects.map((p, i) => [i ? ", " : "", h("span", { class: "mono" }, p)])) : null,
     h("button", { class: "btn", type: "button", onclick: retry }, "Retry"));
 }
 
@@ -828,11 +829,11 @@ function updateBar() {
   else if (app.failedAt) loaded.textContent = `Load failed at ${utcTime(app.failedAt)} UTC`;
   else loaded.textContent = app.loadedAt ? `Loaded at ${utcTime(app.loadedAt)} UTC` : "Loaded at --:--:-- UTC";
   $("refresh").disabled = app.busy;
-  const totals = app.route && app.route.view === "totals";
-  $("nav-list").toggleAttribute("aria-current", !totals);
-  $("nav-totals").toggleAttribute("aria-current", !!totals);
-  if (!totals) $("nav-list").setAttribute("aria-current", "page");
-  else $("nav-totals").setAttribute("aria-current", "page");
+  const totals = !!app.route && app.route.view === "totals";
+  for (const [id, on] of [["nav-list", !totals], ["nav-totals", totals]]) {
+    if (on) $(id).setAttribute("aria-current", "page");
+    else $(id).removeAttribute("aria-current");
+  }
 }
 
 function runCleanups() {
