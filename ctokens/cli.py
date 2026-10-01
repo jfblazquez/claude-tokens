@@ -118,9 +118,16 @@ def main():
     parser.add_argument("--last-response", action="store_true", help="print the last assistant response instead of the usage report")
     parser.add_argument("--bash", action="store_true", help="print every Bash command the conversation ran")
     parser.add_argument("--files", action="store_true", help="print the files read or written by the conversation")
+    parser.add_argument("--serve", action="store_true",
+                        help="start the local web server (JSON API and browser UI) on 127.0.0.1")
+    parser.add_argument("--port", type=int, help="port for --serve (default: 8765)")
     args = parser.parse_args()
     if args.context_window is not None and args.context_window <= 0:
         parser.error("--context-window must be positive")
+    if args.serve:
+        start_server(parser, args)
+    if args.port is not None:
+        parser.error("--port requires --serve")
     if args.totals:
         try:
             data = totals_report(scan_totals(args.projects_dir, args.project), load_prices(args.pricing))
@@ -162,3 +169,27 @@ def main():
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         report_text(data)
+
+
+DEFAULT_PORT = 8765
+NOT_WITH_SERVE = (("conversation", "a conversation"), ("totals", "--totals"), ("json", "--json"),
+                  ("last_response", "--last-response"), ("bash", "--bash"), ("files", "--files"),
+                  ("project", "--project"))
+
+
+def start_server(parser, args):
+    for name, label in NOT_WITH_SERVE:
+        if getattr(args, name) not in (None, False):
+            parser.error(f"--serve cannot be combined with {label}")
+    port = DEFAULT_PORT if args.port is None else args.port
+    if not 1 <= port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if args.cold_summary_output < 0:
+        parser.error("--cold-summary-output must be non-negative")
+    try:
+        prices = load_prices(args.pricing)
+    except ValueError as error:
+        parser.error(str(error))
+    from .web import Config, serve as run_server
+
+    sys.exit(run_server(Config(args.projects_dir, prices, args.cold_summary_output, args.context_window), port))
