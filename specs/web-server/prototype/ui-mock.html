@@ -1,0 +1,693 @@
+<title>claude-tokens UI prototype</title>
+<!-- PROTOTYPE, throwaway: mock data only. One faithful rendering of every screen in design.md §8 for visual review. -->
+<style>
+/* Layout: sticky app bar + single centred column (max 1200px); cards only for tables/charts; prototype bar floats at the bottom. */
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --surface-2: #eef1f5; --fg: #17202b; --muted: #5a6575; --border: #dce1e8;
+  --accent: #2253b8; --accent-fg: #ffffff; --accent-soft: #e6edfb; --grid: #e7eaf0;
+  --warn-bg: #fff4df; --warn-fg: #6e4300; --err-bg: #fdecec; --err-fg: #8f1d1d; --code-bg: #f2f4f8;
+  --proto-bg: #14171c; --proto-fg: #f3f4f6; --proto-muted: #9aa3ae; --skeleton: #e8ebf0;
+  --m0: #d9480f; --m1: #1c6fd1; --m2: #2b8a3e; --m3: #a33cc2; --m4: #c2255c; --m5: #0b7f94; --m6: #5c8a0b; --m7: #6b7480;
+  --hl-kw: #a6266a; --hl-str: #2a7a2f; --hl-fn: #1c5fb8; --hl-com: #7b8494; --hl-num: #9a5b00;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --r: 8px; --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --t-xs: 12px; --t-sm: 13px; --t-md: 14px; --t-lg: 17px; --t-xl: 22px; --t-num: 26px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e1319; --surface: #151c25; --surface-2: #1c2531; --fg: #e3e8ef; --muted: #96a2b2; --border: #283241;
+  --accent: #7ea6ff; --accent-fg: #0e1319; --accent-soft: #1d2b47; --grid: #222c3a;
+  --warn-bg: #362709; --warn-fg: #ffd592; --err-bg: #3a1616; --err-fg: #ffb4b4; --code-bg: #0b1015;
+  --proto-bg: #f3f4f6; --proto-fg: #14171c; --proto-muted: #5d6672; --skeleton: #1f2935;
+  --m0: #ff8a4c; --m1: #5aa9ff; --m2: #5ccf74; --m3: #d68af0; --m4: #f584ad; --m5: #3fc6dc; --m6: #a8d94e; --m7: #a3acb8;
+  --hl-kw: #ff8fc6; --hl-str: #8fdc8c; --hl-fn: #8cbcff; --hl-com: #7f8a9a; --hl-num: #ffc46b;
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #0e1319; --surface: #151c25; --surface-2: #1c2531; --fg: #e3e8ef; --muted: #96a2b2; --border: #283241;
+  --accent: #7ea6ff; --accent-fg: #0e1319; --accent-soft: #1d2b47; --grid: #222c3a;
+  --warn-bg: #362709; --warn-fg: #ffd592; --err-bg: #3a1616; --err-fg: #ffb4b4; --code-bg: #0b1015;
+  --proto-bg: #f3f4f6; --proto-fg: #14171c; --proto-muted: #5d6672; --skeleton: #1f2935;
+  --m0: #ff8a4c; --m1: #5aa9ff; --m2: #5ccf74; --m3: #d68af0; --m4: #f584ad; --m5: #3fc6dc; --m6: #a8d94e; --m7: #a3acb8;
+  --hl-kw: #ff8fc6; --hl-str: #8fdc8c; --hl-fn: #8cbcff; --hl-com: #7f8a9a; --hl-num: #ffc46b;
+  color-scheme: dark;
+}
+html, body { background: var(--bg); color: var(--fg); }
+body { font-family: var(--font); font-size: var(--t-md); line-height: 1.5; }
+* { box-sizing: border-box; }
+a { color: var(--accent); }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+
+/* App bar */
+.appbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--surface);
+  border-bottom: 1px solid var(--border); }
+.appbar-in { max-width: 1200px; margin: 0 auto; padding-block: var(--s3); padding-inline: var(--s4);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s5); }
+.brand { display: flex; align-items: center; gap: var(--s2); font-weight: 650; font-size: var(--t-lg); letter-spacing: -0.01em; }
+.brand-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--fg); color: var(--bg);
+  display: grid; place-items: center; font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.nav { display: flex; gap: var(--s1); }
+.nav button { border: 0; background: none; padding: 6px 10px; border-radius: 6px; cursor: pointer; color: var(--muted); font-weight: 550; }
+.nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+.nav button:hover { color: var(--fg); }
+.bar-right { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); color: var(--muted); font-size: var(--t-sm); }
+.loaded { font-variant-numeric: tabular-nums; }
+.btn { border: 1px solid var(--border); background: var(--surface); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-weight: 550; color: var(--fg); }
+.btn:hover { background: var(--surface-2); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn-primary:hover { background: var(--accent); filter: brightness(1.08); }
+.switch { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; user-select: none; }
+.switch input { appearance: none; width: 30px; height: 18px; border-radius: 9px; background: var(--border); position: relative; margin: 0; cursor: pointer; transition: background .15s; }
+.switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface); transition: transform .15s; }
+.switch input:checked { background: var(--accent); }
+.switch input:checked::after { transform: translateX(12px); }
+
+/* Page */
+main { max-width: 1200px; margin: 0 auto; padding-block: var(--s5) 120px; padding-inline: var(--s4); display: grid; gap: var(--s5); }
+.page-head { display: grid; gap: var(--s2); }
+.crumb { font-size: var(--t-sm); }
+.crumb button { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; }
+h1 { font-size: var(--t-xl); line-height: 1.25; margin: 0; letter-spacing: -0.015em; text-wrap: balance; }
+h2 { font-size: var(--t-lg); margin: 0; letter-spacing: -0.01em; }
+.meta { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); color: var(--muted); font-size: var(--t-sm); }
+.meta b { color: var(--fg); font-weight: 550; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); justify-content: space-between; }
+.field { display: flex; align-items: center; gap: var(--s2); font-size: var(--t-sm); color: var(--muted); }
+.field input { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; width: 240px; max-width: 60vw; }
+.count { color: var(--muted); font-size: var(--t-sm); font-variant-numeric: tabular-nums; }
+
+/* Tabs */
+.tabs { display: flex; gap: var(--s1); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tabs button { border: 0; background: none; padding: 8px 12px; cursor: pointer; color: var(--muted); font-weight: 550;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tabs .n { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 400; margin-left: 4px; }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s3); }
+.stat { padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); min-width: 0; }
+.stat .k { font-size: var(--t-xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.stat .v { font-size: var(--t-num); font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.2; }
+.stat .d { font-size: var(--t-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Sections, cards, tables */
+.section { display: grid; gap: var(--s3); min-width: 0; }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s3); }
+.section-head .hint { color: var(--muted); font-size: var(--t-sm); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); min-width: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: var(--t-sm); }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+th { font-weight: 600; color: var(--muted); font-size: var(--t-xs); text-transform: uppercase; letter-spacing: 0.05em; background: var(--surface-2); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--fg); }
+th .ind { display: inline-block; width: 1em; color: var(--accent); }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.wrap { white-space: normal; min-width: 220px; }
+tbody tr.link { cursor: pointer; }
+tbody tr.link:hover td { background: var(--accent-soft); }
+tr.total td { font-weight: 650; background: var(--surface-2); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: 0; }
+.chip { display: inline-block; font-family: var(--mono); font-size: 11.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); margin-right: 4px; }
+.chip.main { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.muted { color: var(--muted); }
+.meter { display: inline-block; width: 90px; height: 6px; border-radius: 3px; background: var(--grid); vertical-align: middle; margin-right: 8px; overflow: hidden; }
+.meter > i { display: block; height: 100%; background: var(--accent); }
+
+/* Notices and states */
+.notice { padding: var(--s3) var(--s4); border-radius: var(--r); background: var(--warn-bg); color: var(--warn-fg); font-size: var(--t-sm); }
+.state { padding: var(--s6) var(--s5); text-align: center; display: grid; gap: var(--s2); justify-items: center; }
+.state .title { font-weight: 650; font-size: var(--t-lg); }
+.state .body { color: var(--muted); max-width: 60ch; }
+.state.error { background: var(--err-bg); color: var(--err-fg); border-color: transparent; }
+.state.error .body { color: var(--err-fg); }
+.skel { display: grid; gap: var(--s3); padding: var(--s4); }
+.skel i { display: block; height: 14px; border-radius: 4px; background: var(--skeleton); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .skel i { animation: none; } }
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Charts */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: var(--s4); }
+.chart-card { padding: var(--s4); display: grid; gap: var(--s2); }
+.chart-card h3 { margin: 0; font-size: var(--t-md); }
+.chart-card .sub { color: var(--muted); font-size: var(--t-xs); }
+.chart-box { position: relative; height: 260px; }
+.chart-box.tall { height: 300px; }
+.chart-wide { grid-column: 1 / -1; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--s4); }
+.legend { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); font-size: var(--t-sm); }
+.legend span { display: inline-flex; align-items: center; }
+
+/* Markdown */
+.md { padding: var(--s5); max-width: 82ch; line-height: 1.65; min-width: 0; }
+.md h2 { margin: 0 0 var(--s3); font-size: var(--t-lg); }
+.md h3 { margin: var(--s5) 0 var(--s2); font-size: var(--t-md); }
+.md p, .md ul { margin: var(--s3) 0; }
+.md code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+.md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s3) var(--s4); overflow-x: auto; }
+.md pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.md table { width: auto; margin: var(--s3) 0; border: 1px solid var(--border); }
+.md th { text-transform: none; letter-spacing: 0; font-size: var(--t-sm); }
+.hljs-keyword, .hljs-built_in { color: var(--hl-kw); }
+.hljs-string { color: var(--hl-str); }
+.hljs-title, .hljs-function .hljs-title { color: var(--hl-fn); }
+.hljs-comment { color: var(--hl-com); font-style: italic; }
+.hljs-number, .hljs-literal { color: var(--hl-num); }
+
+/* Bash list */
+.cmds { list-style: none; margin: 0; padding: 0; }
+.cmds li { display: grid; grid-template-columns: 76px 1fr; gap: var(--s1) var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--border); min-width: 0; }
+.cmds li:last-child { border-bottom: 0; }
+.cmds time { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
+.cmds .desc { color: var(--muted); font-size: var(--t-sm); display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.cmds pre { grid-column: 2; margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; background: var(--code-bg); border-radius: 6px; padding: 6px 10px; min-width: 0; }
+.cmds pre::before { content: "$ "; color: var(--muted); }
+
+/* Prototype annotation + floating bar (not part of the product) */
+.proto-note { border: 1px dashed var(--muted); border-radius: var(--r); padding: var(--s2) var(--s3); font-size: var(--t-xs); color: var(--muted); }
+.proto-note b { color: var(--fg); }
+.proto { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(14px + env(safe-area-inset-bottom, 0px)); z-index: 20;
+  background: var(--proto-bg); color: var(--proto-fg); border-radius: 14px; padding: 8px 10px; box-shadow: 0 8px 28px rgba(0,0,0,.28);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 14px; font-size: 12.5px; max-width: calc(100vw - 24px); }
+.proto .tag { font-weight: 700; letter-spacing: .08em; font-size: 10.5px; color: var(--proto-muted); }
+.proto .nav-v { display: flex; align-items: center; gap: 6px; }
+.proto .arrow { border: 0; background: rgba(127,127,127,.22); color: inherit; width: 26px; height: 26px; border-radius: 7px; cursor: pointer; font-size: 14px; }
+.proto .label { min-width: 150px; text-align: center; font-weight: 600; }
+.proto .label small { display: block; font-family: var(--mono); font-weight: 400; color: var(--proto-muted); font-size: 10.5px; }
+.proto .seg { display: inline-flex; background: rgba(127,127,127,.18); border-radius: 8px; padding: 2px; }
+.proto .seg button { border: 0; background: none; color: inherit; padding: 3px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.proto .seg button[aria-pressed="true"] { background: var(--proto-fg); color: var(--proto-bg); }
+.proto .grp { display: flex; align-items: center; gap: 6px; }
+.proto .grp > span { color: var(--proto-muted); }
+</style>
+
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">$</span>claude-tokens</div>
+    <nav class="nav" aria-label="Main">
+      <button id="nav-list" type="button">Conversations</button>
+      <button id="nav-totals" type="button">Totals</button>
+    </nav>
+    <div class="bar-right">
+      <span class="loaded" id="loaded">Loaded at --:--:-- UTC</span>
+      <button class="btn" id="refresh" type="button">Refresh</button>
+      <label class="switch"><input type="checkbox" id="auto" role="switch"> Auto-refresh 30 s</label>
+    </div>
+  </div>
+</header>
+
+<main id="main"></main>
+
+<div class="proto" role="region" aria-label="Prototype controls">
+  <span class="tag">PROTOTYPE · MOCK DATA</span>
+  <div class="nav-v">
+    <button class="arrow" id="prev" type="button" aria-label="Previous screen">‹</button>
+    <div class="label" id="screen-label"></div>
+    <button class="arrow" id="next" type="button" aria-label="Next screen">›</button>
+  </div>
+  <div class="grp"><span>State</span><div class="seg" id="state-seg"></div></div>
+  <div class="grp"><span>Theme</span><div class="seg" id="theme-seg"></div></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+"use strict";
+// ---------- helpers ----------
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "style") Object.assign(el.style, v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+const fmt = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+const money = (a, est, d = 4) => (a == null ? "N/D" : `${est ? "~" : ""}$${a.toFixed(d)}`);
+const pct = (x) => (x == null ? "N/D" : `${(x * 100).toFixed(1)}%`);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const utcTime = (d) => d.toISOString().slice(11, 19);
+function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+// ---------- pricing (mirrors claude_tokens.py PRICES / estimated_cost) ----------
+const PRICES = { "claude-opus-5-5": [4, 20, 0.05], "claude-sonnet-5-5": [2, 10, 0.1], "claude-haiku-4-5": [1, 5, 0.1], "claude-fable-5-1": [10, 50, 0.025] };
+const GUESSED = { "claude-sonnet-5-6": "claude-sonnet-5-5" };
+function rate(model) { if (PRICES[model]) return { r: PRICES[model], est: false }; if (GUESSED[model]) return { r: PRICES[GUESSED[model]], est: true }; return null; }
+function cost(t, model) { const p = rate(model); if (!p) return null; const [i, o, cr] = p.r;
+  return ((t.input + cr * t.cache_read + 1.25 * t.cache_write_5m + 2 * t.cache_write_1h) * i + t.output * o) / 1e6; }
+const FIELDS = ["input", "output", "cache_read", "cache_write_5m", "cache_write_1h"];
+const zero = () => Object.fromEntries(FIELDS.map((f) => [f, 0]));
+const total = (t) => FIELDS.reduce((s, f) => s + t[f], 0);
+const add = (a, b) => { for (const f of FIELDS) a[f] += b[f]; return a; };
+
+// ---------- model colours (design §8.4 + family-shade rule found while prototyping) ----------
+const FAMILY_SLOT = { opus: 0, sonnet: 1, haiku: 2, fable: 3, mythos: 4 };
+const MODELS = ["claude-opus-5-5", "claude-sonnet-5-6", "claude-sonnet-5-5", "claude-haiku-4-5", "claude-fable-5-1", "modelo-desconocido"];
+let colorOf = {};
+function mixHex(a, b, w) { const p = (x) => [1, 3, 5].map((i) => parseInt(x.slice(i, i + 2), 16));
+  const [r1, g1, b1] = p(a), [r2, g2, b2] = p(b); const m = (x, y) => Math.round(x * (1 - w) + y * w).toString(16).padStart(2, "0");
+  return `#${m(r1, r2)}${m(g1, g2)}${m(b1, b2)}`; }
+function assignColors() {
+  colorOf = {}; const seen = {}; let extra = 5; const bg = css("--surface");
+  const ver = (m) => m.split("-").filter((p) => /^\d+$/.test(p)).map(Number);
+  const sorted = [...MODELS].sort((a, b) => { const va = ver(a), vb = ver(b); for (let i = 0; i < 3; i++) if ((vb[i] || 0) !== (va[i] || 0)) return (vb[i] || 0) - (va[i] || 0); return 0; });
+  for (const m of sorted) {
+    const fam = Object.keys(FAMILY_SLOT).find((f) => m.includes(f));
+    if (fam) { const n = seen[fam] = (seen[fam] || 0) + 1; const base = css(`--m${FAMILY_SLOT[fam]}`); colorOf[m] = n === 1 ? base : mixHex(base, bg, Math.min(0.55, 0.38 * (n - 1))); }
+    else colorOf[m] = css(`--m${Math.min(extra++, 7)}`);
+  }
+}
+const swatch = (m) => h("span", { class: "sw", style: { background: colorOf[m] }, "aria-hidden": "true" });
+
+// ---------- mock data ----------
+const PROJECTS_DIR = "/home/dev/.claude/projects";
+const PROJECTS = [["/home/dev/projects/api-gateway", 0.34, 41], ["/home/dev/projects/billing-service", 0.27, 33],
+  ["/home/dev/projects/dashboard", 0.18, 22], ["/home/dev/tools/claude-tokens", 0.13, 17], ["/home/dev/projects/docs-site", 0.08, 9]];
+const R = rng(20261001);
+const DAYS = [];
+for (let i = 0; i < 30; i++) {
+  const d = new Date(Date.UTC(2026, 8, 2) + i * 864e5), wd = d.getUTCDay(), weekend = wd === 0 || wd === 6;
+  const base = weekend ? (R() < 0.5 ? 0 : 0.22) : 0.55 + R() * 0.85;
+  const models = {};
+  const put = (m, t) => { if (total(t) > 0) models[m] = t; };
+  const k = () => 0.75 + R() * 0.5;
+  put("claude-opus-5-5", { input: base * 900 * k(), output: base * 42000 * k(), cache_read: base * 6.5e6 * k(), cache_write_5m: 0, cache_write_1h: base * 210000 * k() });
+  put("claude-sonnet-5-5", { input: base * 700 * k(), output: base * 18000 * k(), cache_read: base * 2.2e6 * k(), cache_write_5m: 0, cache_write_1h: base * 90000 * k() });
+  put("claude-haiku-4-5", { input: base * 2400 * k(), output: base * 9000 * k(), cache_read: base * 0.8e6 * k(), cache_write_5m: base * 40000 * k(), cache_write_1h: 0 });
+  if (base > 0 && R() < 0.22) put("claude-fable-5-1", { input: 300, output: 15000 * k(), cache_read: 1.2e6 * k(), cache_write_5m: 0, cache_write_1h: 60000 * k() });
+  if (i >= 25 && base > 0) put("claude-sonnet-5-6", { input: 500, output: 14000 * k(), cache_read: 1.6e6 * k(), cache_write_5m: 0, cache_write_1h: 70000 * k() });
+  if (i === 9 || i === 17) put("modelo-desconocido", { input: 1200, output: 3400, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 });
+  for (const t of Object.values(models)) for (const f of FIELDS) t[f] = Math.round(t[f]);
+  DAYS.push({ day: d.toISOString().slice(0, 10), responses: Math.round(base * 380 * (0.8 + R() * 0.4)), models });
+}
+const UNDATED = { day: null, responses: 0, models: { "claude-opus-5-5": { input: 0, output: 2100, cache_read: 118000, cache_write_5m: 0, cache_write_1h: 0 } } };
+const TOOLS = { Bash: 1840, Read: 1422, Edit: 903, Grep: 611, TodoWrite: 210, Write: 188, Agent: 97, Glob: 85, WebFetch: 41, Skill: 36, WebSearch: 22 };
+const SKILLS = { "code-review": 14, simplify: 9, tdd: 6, "security-review": 4, run: 3 };
+
+function buildTotals(filter) {
+  const share = filter ? PROJECTS.filter((p) => p[0].toLowerCase().includes(filter.toLowerCase())).reduce((s, p) => s + p[1], 0) : 1;
+  const projects = PROJECTS.filter((p) => !filter || p[0].toLowerCase().includes(filter.toLowerCase()));
+  const scaleT = (t) => Object.fromEntries(FIELDS.map((f) => [f, Math.round(t[f] * share)]));
+  const daily = [...DAYS, UNDATED].map((d) => {
+    const models = {}; let c = 0, tt = 0;
+    for (const [m, t0] of Object.entries(d.models)) { const t = scaleT(t0), mc = cost(t, m); models[m] = { ...t, total_tokens: total(t), estimated_cost_usd: mc }; tt += total(t); if (mc != null) c += mc; }
+    return { day: d.day, responses: Math.round(d.responses * share), total_tokens: tt, estimated_cost_usd: c, models };
+  }).filter((d) => d.day || d.total_tokens > 0);
+  const byModel = {};
+  for (const d of daily) for (const [m, t] of Object.entries(d.models)) add(byModel[m] = byModel[m] || zero(), t);
+  const rows = Object.entries(byModel).map(([m, t]) => ({ model: m, ...t, total_tokens: total(t), estimated_cost_usd: cost(t, m), price_estimated: !!(rate(m) || {}).est }));
+  const tokens = rows.reduce((s, r) => s + r.total_tokens, 0), money_ = rows.reduce((s, r) => s + (r.estimated_cost_usd || 0), 0);
+  rows.forEach((r) => { r.pct_tokens = tokens ? r.total_tokens / tokens : 0; r.pct_cost = r.estimated_cost_usd == null ? null : r.estimated_cost_usd / money_; });
+  rows.sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0));
+  const convs = projects.reduce((s, p) => s + p[2], 0);
+  const cacheRead = rows.reduce((s, r) => s + r.cache_read, 0), cacheWrite = rows.reduce((s, r) => s + r.cache_write_5m + r.cache_write_1h, 0), fresh = rows.reduce((s, r) => s + r.input, 0);
+  const dated = daily.filter((d) => d.day), active = dated.filter((d) => d.responses > 0);
+  const busiest = active.reduce((a, b) => (b.responses > a.responses ? b : a), active[0] || { day: null, responses: 0 });
+  const scale = share / 1;
+  return {
+    window: { start: "2026-09-02 07:41:12", end: "2026-10-01 09:38:02", span_days: 30, active_days: active.length, busiest_day: busiest.day, busiest_day_responses: busiest.responses },
+    conversations: convs, subagents: Math.round(286 * scale), projects_count: projects.length, total_tokens: tokens,
+    output_tokens: rows.reduce((s, r) => s + r.output, 0), estimated_total_cost_usd: money_, cost_per_conversation_usd: convs ? money_ / convs : 0,
+    cache_hit_ratio: cacheRead / (cacheRead + cacheWrite + fresh || 1), by_model: rows,
+    projects: projects.map((p) => ({ project: p[0], conversations: p[2], total_tokens: Math.round(tokens * p[1] / share), estimated_cost_usd: money_ * p[1] / share })),
+    tools: Object.fromEntries(Object.entries(TOOLS).map(([k, v]) => [k, Math.round(v * scale)])), skills: Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [k, Math.max(1, Math.round(v * scale))])),
+    tool_calls: Math.round(Object.values(TOOLS).reduce((s, v) => s + v, 0) * scale),
+    unknown_price_models: rows.some((r) => r.model === "modelo-desconocido") ? ["modelo-desconocido"] : [],
+    guessed_price_models: rows.some((r) => r.model === "claude-sonnet-5-6") ? ["claude-sonnet-5-6"] : [], daily,
+  };
+}
+
+const CONVERSATIONS = [
+  ["2026-10-01T09:38:02Z", "d91dbfb9-4ca2-495a-aa23-938757a38997", 246, 2, 0, "Add request-cache invalidation"],
+  ["2026-10-01T08:12:47Z", "4a2f8c1e-7b6d-4e9a-9f03-1c2d3e4f5a6b", 3377, 12, 1, "Migrate invoice parser to streaming API"],
+  ["2026-09-30T17:55:20Z", "8e7d6c5b-4a39-4281-b0f1-2a3b4c5d6e7f", 152, 1, 2, "Fix flaky chart tooltip test"],
+  ["2026-09-30T15:03:09Z", "1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9", 4, 0, 0, ""],
+  ["2026-09-30T10:41:56Z", "f0e1d2c3-b4a5-4967-8879-0a1b2c3d4e5f", 799, 3, 2, "Redesign metrics landing page"],
+  ["2026-09-29T19:20:33Z", "2c4e6a80-1357-49bd-a2c4-e6f8091a3b5c", 1210, 6, 3, "Daily cost series for --totals"],
+  ["2026-09-29T11:07:14Z", "9a8b7c6d-5e4f-4321-9abc-def012345678", 88, 0, 4, "Fix broken links in API reference"],
+  ["2026-09-28T16:44:51Z", "5d6e7f80-9a1b-4c2d-8e3f-4a5b6c7d8e9f", 534, 4, 1, "Retry policy for ledger exports"],
+  ["2026-09-26T13:29:05Z", "7f6e5d4c-3b2a-4190-8a7b-6c5d4e3f2a1b", 2045, 9, 0, "Rate limiter per API key"],
+  ["2026-09-25T09:15:40Z", "3e5d7c9b-1a2f-4e6d-8c0b-9a7e5d3c1b2a", 61, 0, 3, "Explain picker pagination"],
+  ["2026-09-24T18:02:27Z", "6b8d0f2a-4c6e-4a8c-9e0b-2d4f6a8c0e1f", 970, 5, 2, "Dark theme for the dashboard"],
+  ["2026-09-22T08:50:11Z", "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", 17, 0, 1, ""],
+].map(([modified, id, size_kb, subagents, p, title]) => ({ modified, id, size_kb, subagents, project: PROJECTS[p][0], title }));
+
+const SUB1 = "a3f19c07b2e84d61e", SUB2 = "a7d2e50c1b9f43a88";
+const REPORT_SCOPES = [
+  { kind: "subagent", id: SUB1, task: "Explore cache invalidation call sites", models: { "claude-haiku-4-5": { input: 2210, output: 6840, cache_read: 412300, cache_write_5m: 38900, cache_write_1h: 0 } } },
+  { kind: "subagent", id: SUB2, task: "Review cache tests", models: { "claude-sonnet-5-6": { input: 940, output: 11250, cache_read: 698400, cache_write_5m: 0, cache_write_1h: 52100 } } },
+  { kind: "main", id: "main", task: "Add request-cache invalidation when the config is reloaded", models: { "claude-opus-5-5": { input: 118, output: 48117, cache_read: 1180355, cache_write_5m: 0, cache_write_1h: 44000 } } },
+];
+const CONTEXT = { model: "claude-opus-5-5", context_tokens: 161806, context_window_tokens: 200000, input_tokens: 118, cache_read_tokens: 158230, cache_write_tokens: 3458, last_output_tokens: 1204 };
+
+const LAST_RESPONSE = `## Request cache now invalidates on config reload
+
+The cache kept serving entries built with the previous configuration after a hot reload. Entries are now keyed by the **config generation**, and \`reload()\` bumps it.
+
+### What changed
+
+- \`RequestCache.get()\` ignores entries from an older generation.
+- \`reload()\` increments \`config.generation\` after the new settings are applied.
+- Two tests cover the stale-entry and the concurrent-reload cases.
+
+| File | Change |
+|------|--------|
+| \`src/cache/request_cache.py\` | generation check in \`get()\` |
+| \`src/config/reload.py\` | bump the generation |
+| \`tests/test_reload.py\` | new |
+
+\`\`\`python
+def get(self, key):
+    entry = self._entries.get(key)
+    # Entries built before the last reload are stale.
+    if entry is None or entry.generation != config.generation:
+        return None
+    return entry.value
+\`\`\`
+
+<script>alert("xss")<\/script>Run \`python3 -m unittest discover -s tests\` to check it locally, or see the <a href="javascript:alert(1)">cache notes</a>.`;
+
+const BASH = [
+  ["09:02:11", "main", "Show working tree status", "git status --short"],
+  ["09:03:40", SUB1, "Find cache invalidation call sites", 'grep -rn "invalidate(" src/ | head -50'],
+  ["09:03:52", SUB1, "List cache modules", "ls src/cache/"],
+  ["09:10:05", "main", "Run cache unit tests", "python3 -m unittest tests.test_cache -v"],
+  ["09:14:27", SUB2, "Run the full test suite", "python3 -m unittest discover -s tests"],
+  ["09:15:02", SUB2, "Check reload tests against the old cache key", "git stash && python3 -m unittest tests.test_reload; git stash pop"],
+  ["09:21:48", "main", "Show diff summary of the cache change", "git diff --stat"],
+  ["09:22:30", "main", "Commit the invalidation fix", 'git commit -m "Invalidate request cache on config reload"'],
+];
+const FILES = [
+  ["src/cache/request_cache.py", 4, 0, 3, ["main", SUB1]], ["src/cache/keys.py", 2, 0, 0, [SUB1]], ["src/config/reload.py", 2, 0, 1, ["main"]],
+  ["tests/test_cache.py", 3, 0, 2, ["main", SUB2]], ["tests/test_reload.py", 0, 1, 0, ["main"]], ["README.md", 1, 0, 0, ["main"]], ["docs/cache.md", 1, 0, 1, [SUB2]],
+];
+
+// ---------- table ----------
+function renderTable(columns, rows, opts = {}) {
+  let sortKey = opts.sortKey || null, dir = opts.dir || -1;
+  const wrap = h("div", { class: "card scroll" });
+  function draw() {
+    const data = [...rows];
+    if (sortKey) { const col = columns.find((c) => c.key === sortKey); const v = col.sortValue || ((r) => r[sortKey]);
+      data.sort((a, b) => { const x = v(a), y = v(b); if (x == null) return 1; if (y == null) return -1; return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * dir; }); }
+    const head = h("tr", {}, columns.map((c) => h("th", {
+      class: [c.num ? "num" : "", "sortable"].join(" "), scope: "col", "aria-sort": sortKey === c.key ? (dir > 0 ? "ascending" : "descending") : null,
+      onclick: () => { if (sortKey === c.key) dir = -dir; else { sortKey = c.key; dir = c.num ? -1 : 1; } draw(); },
+    }, c.label, h("span", { class: "ind" }, sortKey === c.key ? (dir > 0 ? " ▲" : " ▼") : ""))));
+    const body = data.map((r) => h("tr", { class: opts.onRow ? "link" : null, onclick: opts.onRow ? () => opts.onRow(r) : null },
+      columns.map((c) => h("td", { class: [c.num ? "num" : "", c.wrap ? "wrap" : ""].join(" ") }, c.render ? c.render(r) : r[c.key]))));
+    const foot = opts.footer ? [h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: columns[i] && columns[i].num ? "num" : "" }, cell)))] : [];
+    wrap.replaceChildren(h("table", {}, h("thead", {}, head), h("tbody", {}, body, foot)));
+  }
+  draw();
+  return wrap;
+}
+
+// ---------- states ----------
+const STATES = ["normal", "loading", "empty", "error"];
+let state = "normal", loadedAt = new Date(Date.UTC(2026, 9, 1, 9, 41, 7));
+function skeleton(lines = 6, note) {
+  return h("div", { class: "card" }, note ? h("div", { class: "state", style: { paddingBottom: "0" } }, h("div", { class: "spinner", role: "status", "aria-label": "Loading" }), h("div", { class: "body" }, note)) : null,
+    h("div", { class: "skel" }, Array.from({ length: lines }, (_, i) => h("i", { style: { width: `${92 - (i * 13) % 40}%` } }))));
+}
+const emptyState = (title, body) => h("div", { class: "card state" }, h("div", { class: "title" }, title), h("div", { class: "body" }, body));
+const errorState = (msg) => h("div", { class: "card state error", role: "alert" }, h("div", { class: "title" }, "Couldn't load this view"),
+  h("div", { class: "body" }, msg), h("button", { class: "btn", type: "button", onclick: () => { state = "normal"; render(); } }, "Retry"));
+
+// ---------- screens ----------
+const CONV = CONVERSATIONS[0];
+const SCREENS = [
+  { key: "list", name: "Conversation list", route: "#/" },
+  { key: "report", name: "Usage report", route: `#/c/${CONV.id}` },
+  { key: "response", name: "Last response", route: `#/c/${CONV.id}/response` },
+  { key: "bash", name: "Bash commands", route: `#/c/${CONV.id}/bash` },
+  { key: "files", name: "Files", route: `#/c/${CONV.id}/files` },
+  { key: "totals", name: "Totals", route: "#/totals" },
+];
+let screen = "list", listFilter = "", totalsFilter = "", charts = [];
+
+function viewList() {
+  const rows = CONVERSATIONS.filter((c) => !listFilter || c.project.toLowerCase().includes(listFilter.toLowerCase()));
+  const head = h("div", { class: "page-head" }, h("h1", {}, "Conversations"),
+    h("div", { class: "meta" }, h("span", {}, "Projects folder ", h("b", { class: "mono" }, PROJECTS_DIR)), h("span", {}, "Most recent first · times in UTC")));
+  const filter = h("label", { class: "field" }, "Project", h("input", { id: "list-filter", type: "search", placeholder: "Filter by project path", value: listFilter,
+    oninput: (e) => { listFilter = e.target.value; const pos = e.target.selectionStart; render(); const el = $("list-filter"); el.focus(); el.setSelectionRange(pos, pos); } }));
+  const toolbar = h("div", { class: "toolbar" }, filter, h("span", { class: "count" }, state === "normal" ? `${rows.length} of ${CONVERSATIONS.length} conversations` : ""));
+  if (state === "loading") return [head, toolbar, skeleton(8)];
+  if (state === "error") return [head, toolbar, errorState(`The projects folder ${PROJECTS_DIR} could not be read: permission denied. Start the server with --projects-dir pointing to a readable folder.`)];
+  if (state === "empty" || !rows.length) return [head, toolbar, emptyState("No conversations found", listFilter && state !== "empty" ? `No conversation in ${PROJECTS_DIR} has a project matching “${listFilter}”.` : `There are no conversation logs in ${PROJECTS_DIR} yet. Conversations appear here after you use Claude Code.`)];
+  const table = renderTable([
+    { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, r.modified.slice(0, 16).replace("T", " ")) },
+    { key: "title", label: "Title", wrap: true, render: (r) => r.title || h("span", { class: "muted" }, "Untitled") },
+    { key: "project", label: "Project", render: (r) => h("span", { class: "mono" }, r.project) },
+    { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
+    { key: "subagents", label: "Subagents", num: true },
+    { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
+  ], rows, { sortKey: "modified", dir: -1, onRow: () => go("report") });
+  return [head, toolbar, table];
+}
+
+function convHeader(active) {
+  const tabs = [["report", "Usage"], ["response", "Last response"], ["bash", "Bash commands", BASH.length], ["files", "Files", FILES.length]];
+  return [h("div", { class: "page-head" },
+    h("div", { class: "crumb" }, h("button", { type: "button", onclick: () => go("list") }, "← Conversations")),
+    h("h1", {}, CONV.title),
+    h("div", { class: "meta" }, h("span", { class: "mono" }, CONV.id), h("span", {}, h("b", { class: "mono" }, CONV.project)),
+      h("span", {}, `Modified ${CONV.modified.slice(0, 16).replace("T", " ")} UTC`), h("span", {}, `${fmt(CONV.size_kb)} KB · ${CONV.subagents} subagents`))),
+    h("div", { class: "tabs", role: "tablist" }, tabs.map(([k, label, n]) => h("button", { type: "button", role: "tab", "aria-selected": String(active === k), onclick: () => go(k) }, label, n != null && state === "normal" ? h("span", { class: "n" }, n) : null)))];
+}
+
+function viewReport() {
+  const headParts = convHeader("report");
+  if (state === "loading") return [...headParts, skeleton(10)];
+  if (state === "error") return [...headParts, errorState(`Conversation ${CONV.id} was not found in ${PROJECTS_DIR}. It may have been deleted; go back to the list and pick another one.`)];
+  if (state === "empty") return [...headParts, emptyState("No usage recorded yet", "This conversation has no assistant responses with token usage. It may have just started; refresh in a moment.")];
+  const scopes = REPORT_SCOPES.map((s) => { const [m, t] = Object.entries(s.models)[0]; return { ...s, model: m, ...t, total_tokens: total(t), cost: cost(t, m), est: rate(m).est }; });
+  const byModel = scopes.map((s) => ({ model: s.model, input: s.input, output: s.output, cache_read: s.cache_read, cw: `${fmt(s.cache_write_5m)}/${fmt(s.cache_write_1h)}`, total_tokens: s.total_tokens, cost: s.cost, est: s.est }));
+  const sum = scopes.reduce((a, s) => a + s.cost, 0), tokens = scopes.reduce((a, s) => a + s.total_tokens, 0), cacheRead = scopes.reduce((a, s) => a + s.cache_read, 0);
+  const cr = rate(CONTEXT.model).r, cold = (CONTEXT.context_tokens * cr[0] + 2000 * cr[1]) / 1e6;
+  const cw = (r) => `${fmt(r.cache_write_5m)}/${fmt(r.cache_write_1h)}`;
+  const stats = h("div", { class: "stats" },
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Estimated cost"), h("div", { class: "v" }, money(sum, true)), h("div", { class: "d" }, "~ includes one model with a guessed price")),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Total tokens"), h("div", { class: "v" }, fmt(tokens)), h("div", { class: "d" }, `${fmt(scopes.reduce((a, s) => a + s.output, 0))} output`)),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Scopes"), h("div", { class: "v" }, "1 + 2"), h("div", { class: "d" }, "main + subagents")),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Served from cache"), h("div", { class: "v" }, pct(cacheRead / tokens)), h("div", { class: "d" }, "of all tokens")));
+  const usage = h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, "Usage per scope"), h("span", { class: "hint" }, "Main conversation and each subagent")),
+    renderTable([
+      { key: "kind", label: "Scope", render: (r) => h("span", { class: r.kind === "main" ? "chip main" : "chip" }, r.kind) },
+      { key: "id", label: "ID", render: (r) => h("span", { class: "mono" }, r.id) },
+      { key: "task", label: "Task", wrap: true },
+      { key: "model", label: "Model", render: (r) => [swatch(r.model), r.model] },
+      { key: "total_tokens", label: "Total", num: true, render: (r) => fmt(r.total_tokens) },
+      { key: "input", label: "Input", num: true, render: (r) => fmt(r.input) },
+      { key: "output", label: "Output", num: true, render: (r) => fmt(r.output) },
+      { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
+      { key: "cache_write_1h", label: "Cache write 5m/1h", num: true, render: cw },
+      { key: "cost", label: "Cost", num: true, render: (r) => money(r.cost, r.est) },
+    ], scopes));
+  const models = h("section", { class: "section" }, h("h2", {}, "Summary by model"),
+    renderTable([
+      { key: "model", label: "Model", render: (r) => [swatch(r.model), r.model] },
+      { key: "total_tokens", label: "Total", num: true, render: (r) => fmt(r.total_tokens) },
+      { key: "input", label: "Input", num: true, render: (r) => fmt(r.input) },
+      { key: "output", label: "Output", num: true, render: (r) => fmt(r.output) },
+      { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
+      { key: "cw", label: "Cache write 5m/1h", num: true },
+      { key: "cost", label: "Cost", num: true, render: (r) => money(r.cost, r.est) },
+    ], byModel, { sortKey: "cost", footer: ["Total", fmt(tokens), "", "", "", "", money(sum, true)] }));
+  const ratio = CONTEXT.context_tokens / CONTEXT.context_window_tokens;
+  const context = h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, "Last observed context"), h("span", { class: "hint" }, "Main conversation · window inferred from the largest context seen")),
+    renderTable([
+      { key: "model", label: "Model", render: (r) => [swatch(r.model), r.model] },
+      { key: "ratio", label: "Context / window", render: () => [h("span", { class: "meter", "aria-hidden": "true" }, h("i", { style: { width: `${ratio * 100}%` } })), h("span", { class: "mono" }, `${fmt(CONTEXT.context_tokens)} / ${fmt(CONTEXT.context_window_tokens)}`)] },
+      { key: "used", label: "Used", num: true, render: () => pct(ratio) },
+      { key: "input_tokens", label: "New input", num: true, render: (r) => fmt(r.input_tokens) },
+      { key: "cache_read_tokens", label: "Cache read", num: true, render: (r) => fmt(r.cache_read_tokens) },
+      { key: "cache_write_tokens", label: "Cache write", num: true, render: (r) => fmt(r.cache_write_tokens) },
+      { key: "last_output_tokens", label: "Last output", num: true, render: (r) => fmt(r.last_output_tokens) },
+    ], [CONTEXT]));
+  const coldSec = h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, "Cold-summary estimate"), h("span", { class: "hint" }, "What summarizing this context would cost without cache")),
+    renderTable([
+      { key: "model", label: "Model", render: (r) => [swatch(r.model), r.model] },
+      { key: "cold", label: "Cold input", num: true, render: () => fmt(CONTEXT.context_tokens) },
+      { key: "out", label: "Assumed output", num: true, render: () => fmt(2000) },
+      { key: "cost", label: "Cost", num: true, render: () => money(cold) },
+    ], [CONTEXT]));
+  const notice = h("div", { class: "notice", role: "note" }, "~ estimated price: no published rate for claude-sonnet-5-6; priced from the newest known model of the same family. Use --pricing to set the real rate.");
+  return [...headParts, stats, notice, usage, models, context, coldSec];
+}
+
+function viewResponse() {
+  const headParts = convHeader("response");
+  if (state === "loading") return [...headParts, skeleton(9)];
+  if (state === "error") return [...headParts, errorState("The server stopped responding. Check that claude_tokens.py --serve is still running, then retry.")];
+  if (state === "empty") return [...headParts, emptyState("No text response", "The main conversation has no assistant text response yet. Responses from subagents are not shown here.")];
+  const box = h("article", { class: "card md" });
+  box.innerHTML = DOMPurify.sanitize(marked.parse(LAST_RESPONSE));
+  box.querySelectorAll("pre code").forEach((el) => hljs.highlightElement(el));
+  const note = h("div", { class: "proto-note" }, h("b", {}, "Prototype note: "), "the sample response contains a <script> and a javascript: link. DOMPurify removed both, so the link shows as plain text and nothing runs (R2.7).");
+  return [...headParts, h("div", { class: "meta" }, "Last assistant text response of the main conversation · rendered Markdown"), box, note];
+}
+
+const sourceChip = (s) => h("span", { class: s === "main" ? "chip main" : "chip", title: s === "main" ? "Main conversation" : `Subagent ${s}` }, s === "main" ? "main" : `subagent ${s.slice(0, 8)}`);
+function viewBash() {
+  const headParts = convHeader("bash");
+  if (state === "loading") return [...headParts, skeleton(8)];
+  if (state === "error") return [...headParts, errorState("The server stopped responding. Check that claude_tokens.py --serve is still running, then retry.")];
+  if (state === "empty") return [...headParts, emptyState("No Bash commands", "Neither the main conversation nor its subagents ran any Bash command.")];
+  const list = h("ol", { class: "cmds card" }, BASH.map(([t, src, desc, cmd]) => h("li", {},
+    h("time", { datetime: `2026-10-01T${t}Z` }, t), h("div", { class: "desc" }, sourceChip(src), desc), h("pre", {}, cmd))));
+  return [...headParts, h("div", { class: "toolbar" }, h("div", { class: "meta" }, "Chronological across the main conversation and its subagents · times in UTC"),
+    h("div", { class: "legend" }, h("span", {}, sourceChip("main")), h("span", {}, sourceChip(SUB1)), h("span", {}, sourceChip(SUB2)))), list,
+    h("div", { class: "count" }, `${BASH.length} Bash commands · ${BASH.filter((b) => b[1] === "main").length} from main, ${BASH.filter((b) => b[1] !== "main").length} from subagents`)];
+}
+
+function viewFiles() {
+  const headParts = convHeader("files");
+  if (state === "loading") return [...headParts, skeleton(8)];
+  if (state === "error") return [...headParts, errorState("The server stopped responding. Check that claude_tokens.py --serve is still running, then retry.")];
+  if (state === "empty") return [...headParts, emptyState("No files touched", "Neither the main conversation nor its subagents read, wrote or edited a file.")];
+  const rows = FILES.map(([file, Read, Write, Edit, sources]) => ({ file, Read, Write, Edit, sources, total: Read + Write + Edit }));
+  return [...headParts, h("div", { class: "meta" }, "One row per file · counts add up every source that touched it"),
+    renderTable([
+      { key: "file", label: "File", render: (r) => h("span", { class: "mono" }, r.file) },
+      { key: "Read", label: "Read", num: true }, { key: "Write", label: "Write", num: true }, { key: "Edit", label: "Edit", num: true },
+      { key: "sources", label: "Sources", sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
+    ], rows, { sortKey: "file", dir: 1 }), h("div", { class: "count" }, `${rows.length} distinct files`)];
+}
+
+function viewTotals() {
+  const head = h("div", { class: "page-head" }, h("h1", {}, "Overall usage"),
+    h("div", { class: "meta" }, h("span", {}, "Every conversation and subagent in ", h("b", { class: "mono" }, PROJECTS_DIR)), h("span", {}, "Days are UTC")));
+  const filter = h("label", { class: "field" }, "Project", h("input", { id: "totals-filter", type: "search", placeholder: "Filter by project path", value: totalsFilter,
+    onchange: (e) => { totalsFilter = e.target.value; render(); } }));
+  const toolbar = h("div", { class: "toolbar" }, filter, h("span", { class: "count" }, totalsFilter ? "Press Enter to apply the filter" : "All projects"));
+  if (state === "loading") return [head, toolbar, skeleton(10, "Scanning 725 conversation logs. The first load after start-up takes a few seconds; later loads only re-read logs that changed.")];
+  if (state === "error") return [head, toolbar, errorState("The server stopped responding while scanning the logs. Check that claude_tokens.py --serve is still running, then retry.")];
+  const T = buildTotals(totalsFilter);
+  if (state === "empty" || !T.conversations) return [head, toolbar, emptyState("Nothing to total yet", totalsFilter && state !== "empty" ? `No project matches “${totalsFilter}”.` : `There are no conversation logs in ${PROJECTS_DIR}, so there is no usage to aggregate.`)];
+  const w = T.window;
+  const stats = h("div", { class: "stats" },
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Total cost"), h("div", { class: "v" }, money(T.estimated_total_cost_usd, true, 2)), h("div", { class: "d" }, `${money(T.cost_per_conversation_usd, false, 2)} per conversation`)),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Tokens"), h("div", { class: "v" }, `${(T.total_tokens / 1e6).toFixed(1)} M`), h("div", { class: "d" }, `${fmt(T.output_tokens)} generated`)),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Volume"), h("div", { class: "v" }, fmt(T.conversations)), h("div", { class: "d" }, `conversations · ${fmt(T.subagents)} subagents · ${T.projects_count} projects`)),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Cache hits"), h("div", { class: "v" }, pct(T.cache_hit_ratio)), h("div", { class: "d" }, "of input tokens served from cache")),
+    h("div", { class: "stat" }, h("div", { class: "k" }, "Time window"), h("div", { class: "v" }, `${w.span_days} days`), h("div", { class: "d" }, `${w.start.slice(0, 10)} → ${w.end.slice(0, 10)} · ${w.active_days} active · busiest ${w.busiest_day}`)));
+  const notices = [];
+  if (T.guessed_price_models.length) notices.push(h("div", { class: "notice", role: "note" }, `~ estimated price: no published rate for ${T.guessed_price_models.join(", ")}; priced from the newest known model of the same family. Use --pricing to set the real rate.`));
+  if (T.unknown_price_models.length) notices.push(h("div", { class: "notice", role: "note" }, `Models without pricing: ${T.unknown_price_models.join(", ")}. Their tokens are counted but their cost shows as N/D.`));
+  const undated = T.daily.find((d) => !d.day);
+  const models = T.by_model.map((r) => r.model);
+  const legend = h("div", { class: "legend" }, models.map((m) => h("span", {}, swatch(m), m)));
+  const card = (title, sub, box, extra) => h("div", { class: "card chart-card" + (extra || "") }, h("h3", {}, title), sub ? h("div", { class: "sub" }, sub) : null, box);
+  const box = (id, cls = "") => h("div", { class: "chart-box " + cls }, h("canvas", { id, role: "img", "aria-label": id }));
+  const chartsEl = h("div", { class: "charts" },
+    card("Daily cost by model", undated ? `Undated records (no timestamp, not plotted): ${money(undated.estimated_cost_usd, false, 2)} · ${fmt(undated.total_tokens)} tokens` : null,
+      h("div", { style: { display: "grid", gap: "8px" } }, legend, box("c-daily", "tall")), " chart-wide"),
+    card("Model share", "Percentage of cost and of tokens per model", h("div", { class: "pair" }, box("c-share-cost"), box("c-share-tok"))),
+    card("Projects by cost", "Top 15", box("c-projects")),
+    card("Daily activity", "Assistant responses per day (UTC)", box("c-activity")),
+    card("Tools and skills", "Top 15 tool calls · skill invocations", h("div", { class: "pair" }, box("c-tools"), box("c-skills"))));
+  const modelTable = h("section", { class: "section" }, h("h2", {}, "Usage by model"), renderTable([
+    { key: "model", label: "Model", render: (r) => [swatch(r.model), r.model] },
+    { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
+    { key: "pct_tokens", label: "% tokens", num: true, render: (r) => pct(r.pct_tokens) },
+    { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated, 2) },
+    { key: "pct_cost", label: "% cost", num: true, render: (r) => pct(r.pct_cost) },
+  ], T.by_model, { sortKey: "estimated_cost_usd" }));
+  const projTable = h("section", { class: "section" }, h("h2", {}, "Projects by cost"), renderTable([
+    { key: "project", label: "Project", render: (r) => h("span", { class: "mono" }, r.project) },
+    { key: "conversations", label: "Conversations", num: true },
+    { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
+    { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false, 2) },
+  ], T.projects, { sortKey: "estimated_cost_usd" }));
+  const toolRows = Object.entries(T.tools).map(([tool, calls]) => ({ tool, calls, pct: calls / T.tool_calls }));
+  const skillRows = Object.entries(T.skills).map(([skill, n]) => ({ skill, n }));
+  const twoTables = h("div", { class: "charts" },
+    h("section", { class: "section" }, h("h2", {}, "Top tools"), renderTable([{ key: "tool", label: "Tool" }, { key: "calls", label: "Calls", num: true, render: (r) => fmt(r.calls) }, { key: "pct", label: "% of calls", num: true, render: (r) => pct(r.pct) }], toolRows, { sortKey: "calls" })),
+    h("section", { class: "section" }, h("h2", {}, "Skills used"), renderTable([{ key: "skill", label: "Skill", render: (r) => h("span", { class: "mono" }, r.skill) }, { key: "n", label: "Invocations", num: true }], skillRows, { sortKey: "n" })));
+  queueMicrotask(() => drawCharts(T));
+  return [head, toolbar, stats, ...notices, chartsEl, modelTable, projTable, twoTables];
+}
+
+// ---------- charts ----------
+function drawCharts(T) {
+  charts.forEach((c) => c.destroy()); charts = [];
+  if (!window.Chart || !$("c-daily")) return;
+  const fg = css("--muted"), grid = css("--grid"), accent = css("--accent");
+  Chart.defaults.font.family = css("--font"); Chart.defaults.font.size = 12; Chart.defaults.color = fg;
+  const axes = (xTitle, yFmt, stacked) => ({
+    x: { stacked, grid: { color: grid, drawTicks: false }, border: { color: grid }, ticks: { color: fg, maxRotation: 0, autoSkipPadding: 10 }, title: { display: !!xTitle, text: xTitle, color: fg } },
+    y: { stacked, grid: { color: grid, drawTicks: false }, border: { display: false }, ticks: { color: fg, padding: 6, callback: yFmt } } });
+  const base = { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } } };
+  const dated = T.daily.filter((d) => d.day), labels = dated.map((d) => d.day.slice(5));
+  const models = T.by_model.map((r) => r.model);
+  charts.push(new Chart($("c-daily"), { type: "bar",
+    data: { labels, datasets: models.map((m) => ({ label: m, data: dated.map((d) => (d.models[m] ? d.models[m].estimated_cost_usd || 0 : 0)), backgroundColor: colorOf[m], borderRadius: 2, maxBarThickness: 22 })) },
+    options: { ...base, scales: axes("Day (UTC)", (v) => `$${v}`, true),
+      plugins: { legend: { display: false }, tooltip: { mode: "index", filter: (i) => i.raw > 0, callbacks: { title: (i) => `${dated[i[0].dataIndex].day} (UTC)`, label: (i) => ` ${i.dataset.label}: ${money(i.raw, i.dataset.label === "claude-sonnet-5-6", 2)}`,
+        footer: (i) => `Day total: ${money(dated[i[0].dataIndex].estimated_cost_usd, false, 2)}` } } } } }));
+  const shareChart = (id, key, title) => charts.push(new Chart($(id), { type: "bar",
+    data: { labels: models, datasets: [{ data: T.by_model.map((r) => (r[key] == null ? 0 : r[key] * 100)), backgroundColor: models.map((m) => colorOf[m]), borderRadius: 3, maxBarThickness: 18 }] },
+    options: { ...base, indexAxis: "y", scales: { ...axes(title, null, false), x: { ...axes(title).x, max: 100, ticks: { color: fg, callback: (v) => `${v}%` } }, y: { grid: { display: false }, border: { display: false }, ticks: { color: fg, callback: (_, i) => models[i].replace("claude-", "") } } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => ` ${i.raw.toFixed(1)}%` } } } } }));
+  shareChart("c-share-cost", "pct_cost", "% of cost"); shareChart("c-share-tok", "pct_tokens", "% of tokens");
+  const hbar = (id, labelsH, data, color, fmtV, title) => charts.push(new Chart($(id), { type: "bar",
+    data: { labels: labelsH, datasets: [{ data, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
+    options: { ...base, indexAxis: "y", scales: { x: axes(title).x, y: { grid: { display: false }, border: { display: false }, ticks: { color: fg } } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (i) => ` ${fmtV(i.raw)}` } } } } }));
+  const proj = T.projects.slice(0, 15);
+  hbar("c-projects", proj.map((p) => p.project.split("/").pop()), proj.map((p) => p.estimated_cost_usd), accent, (v) => money(v, false, 2), "Cost (USD)");
+  const tools = Object.entries(T.tools).sort((a, b) => b[1] - a[1]).slice(0, 15), skills = Object.entries(T.skills).sort((a, b) => b[1] - a[1]).slice(0, 15);
+  hbar("c-tools", tools.map((t) => t[0]), tools.map((t) => t[1]), accent, fmt, "Tool calls");
+  hbar("c-skills", skills.map((t) => t[0]), skills.map((t) => t[1]), css("--m5"), fmt, "Invocations");
+  charts.push(new Chart($("c-activity"), { type: "line",
+    data: { labels, datasets: [{ data: dated.map((d) => d.responses), borderColor: accent, backgroundColor: mixHex(accent, css("--surface"), 0.82), fill: true, tension: 0.3, pointRadius: dated.map((_, i) => (i === dated.length - 1 ? 4 : 0)), pointBackgroundColor: accent, borderWidth: 2 }] },
+    options: { ...base, scales: axes("Day (UTC)", (v) => fmt(v), false), plugins: { legend: { display: false }, tooltip: { callbacks: { title: (i) => `${dated[i[0].dataIndex].day} (UTC)`, label: (i) => ` ${fmt(i.raw)} responses` } } } } }));
+}
+
+// ---------- shell ----------
+const VIEWS = { list: viewList, report: viewReport, response: viewResponse, bash: viewBash, files: viewFiles, totals: viewTotals };
+function render() {
+  assignColors();
+  $("main").replaceChildren(...VIEWS[screen]());
+  const sc = SCREENS.find((s) => s.key === screen);
+  $("screen-label").replaceChildren(document.createTextNode(`${SCREENS.indexOf(sc) + 1}/${SCREENS.length} · ${sc.name}`), h("small", {}, sc.route));
+  $("nav-list").toggleAttribute("aria-current", screen !== "totals"); if (screen !== "totals") $("nav-list").setAttribute("aria-current", "page");
+  $("nav-totals").toggleAttribute("aria-current", screen === "totals"); if (screen === "totals") $("nav-totals").setAttribute("aria-current", "page");
+  $("loaded").textContent = state === "loading" ? "Loading…" : `Loaded at ${utcTime(loadedAt)} UTC`;
+  document.querySelectorAll("#state-seg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === state)));
+}
+function go(key) { screen = key; state = "normal"; render(); window.scrollTo(0, 0); }
+function cycle(step) { const i = SCREENS.findIndex((s) => s.key === screen); go(SCREENS[(i + step + SCREENS.length) % SCREENS.length].key); }
+$("prev").addEventListener("click", () => cycle(-1));
+$("next").addEventListener("click", () => cycle(1));
+$("nav-list").addEventListener("click", () => go("list"));
+$("nav-totals").addEventListener("click", () => go("totals"));
+document.addEventListener("keydown", (e) => { const t = e.target; if (t.closest && t.closest("input, textarea, [contenteditable]")) return;
+  if (e.key === "ArrowLeft") cycle(-1); if (e.key === "ArrowRight") cycle(1); });
+$("state-seg").append(...STATES.map((s) => h("button", { type: "button", "data-v": s, onclick: () => { state = s; render(); } }, s[0].toUpperCase() + s.slice(1))));
+let theme = "system";
+$("theme-seg").append(...["system", "light", "dark"].map((t) => h("button", { type: "button", "data-v": t, "aria-pressed": String(t === theme),
+  onclick: () => { theme = t; if (t === "system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t);
+    document.querySelectorAll("#theme-seg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === theme))); render(); } }, t[0].toUpperCase() + t.slice(1))));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (theme === "system") render(); });
+function refresh() { state = "loading"; render(); setTimeout(() => { loadedAt = new Date(); state = "normal"; render(); }, 900); }
+$("refresh").addEventListener("click", refresh);
+let timer = null;
+$("auto").addEventListener("change", (e) => { clearInterval(timer); timer = e.target.checked ? setInterval(refresh, 30000) : null; });
+render();
+</script>
