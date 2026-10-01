@@ -99,11 +99,13 @@
     }
   ],
   "tools": {
-    "Read": 1,
+    "Bash": 4,
+    "Read": 2,
+    "Edit": 1,
     "Skill": 1,
-    "Bash": 2
+    "Write": 1
   },
-  "tool_calls": 4,
+  "tool_calls": 9,
   "skills": {
     "code-review": 1
   },

@@ -129,9 +129,23 @@ def discover(main, parse=parse_log):
     return result + [main_conversation]
 
 
+def tool_uses(message, seen):
+    """tool_use blocks of a message whose id is not in seen (which is updated); blocks without an id always count."""
+    content = message.get("content")
+    for block in content if isinstance(content, list) else []:
+        if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+            continue
+        identity = block.get("id")
+        if isinstance(identity, str):
+            if identity in seen:
+                continue
+            seen.add(identity)
+        yield block
+
+
 def file_stats(path):
     """Token totals plus tool/skill/time metrics of one log; pure, so the result can be cached per file."""
-    models, daily_models, seen = defaultdict(zero), defaultdict(lambda: defaultdict(zero)), set()
+    models, daily_models, seen, seen_tools = defaultdict(zero), defaultdict(lambda: defaultdict(zero)), set(), set()
     tools, skills, responses, window = Counter(), Counter(), Counter(), None
     for event in lines(path):
         stamp = parse_timestamp(event.get("timestamp"))
@@ -140,6 +154,14 @@ def file_stats(path):
         message = event.get("message")
         if not isinstance(message, dict):
             continue
+        # Tool calls are counted before the message.id dedup: each event of a response carries other blocks.
+        for block in tool_uses(message, seen_tools):
+            name = str(block.get("name") or "unknown")
+            tools[name] += 1
+            if name == "Skill" and isinstance(block.get("input"), dict):
+                skill = block["input"].get("skill")
+                if skill:
+                    skills[str(skill)] += 1
         day = stamp.strftime("%Y-%m-%d") if stamp else None
         if event.get("type") == "assistant":
             identity = message.get("id") or event.get("uuid")
@@ -149,16 +171,6 @@ def file_stats(path):
                 seen.add(identity)
             if day:
                 responses[day] += 1
-        content = message.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    name = str(block.get("name") or "unknown")
-                    tools[name] += 1
-                    if name == "Skill" and isinstance(block.get("input"), dict):
-                        skill = block["input"].get("skill")
-                        if skill:
-                            skills[str(skill)] += 1
         usage = message.get("usage")
         if not isinstance(usage, dict):
             continue

@@ -6,7 +6,8 @@ from collections import Counter
 from pathlib import Path
 from unittest import mock
 
-from fixtures import API, BILLING, CONV_A, CONV_B, SUB_EXPLORE, SUB_REVIEW, build_projects
+from fixtures import (API, BILLING, CONV_A, CONV_B, SUB_EXPLORE, SUB_REVIEW, assistant, build_projects, text, tool,
+                      usage, write_jsonl)
 
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
 from ctokens.reports import scan_totals
@@ -83,6 +84,42 @@ class FileStatsTest(CoreTest):
         self.assertEqual(list(stats["daily_models"]), [None])
         self.assertEqual(stats["daily_models"][None]["claude-sonnet-5-5"]["output"], 700)
         self.assertEqual(stats["responses"], Counter())
+
+    def write(self, name, events):
+        path = Path(self.tmp.name) / name
+        write_jsonl(path, events, 0)
+        return path
+
+    def test_tool_calls_split_over_events_count_once_each(self):
+        use, stamp = usage(1, 1), "2026-09-28T10:00:00.000Z"
+        path = self.write("split.jsonl", [
+            assistant("m1", "claude-opus-5-5", stamp, "e1", [text("Two calls.")], use),
+            assistant("m1", "claude-opus-5-5", stamp, "e2", [tool("t1", "Bash", command="ls")], use),
+            assistant("m1", "claude-opus-5-5", stamp, "e3", [tool("t2", "Read", file_path="/x")], use),
+            assistant("m1", "claude-opus-5-5", stamp, "e4", [tool("t2", "Read", file_path="/x")], use),
+        ])
+        stats = file_stats(path)
+        self.assertEqual(stats["tools"], Counter({"Bash": 1, "Read": 1}))
+        self.assertEqual(stats["models"]["claude-opus-5-5"]["input"], 1)
+        self.assertEqual(stats["responses"], Counter({"2026-09-28": 1}))
+
+    def test_skills_follow_the_same_rule(self):
+        use = usage(1, 1)
+        path = self.write("skills.jsonl", [
+            assistant("m1", "claude-opus-5-5", None, "e1", [text("Loading.")], use),
+            assistant("m1", "claude-opus-5-5", None, "e2", [tool("t1", "Skill", skill="tdd")], use),
+            assistant("m1", "claude-opus-5-5", None, "e3", [tool("t1", "Skill", skill="tdd")], use),
+            assistant("m2", "claude-opus-5-5", None, "e4", [tool("t2", "Skill", skill="tdd")], use),
+        ])
+        stats = file_stats(path)
+        self.assertEqual(stats["tools"], Counter({"Skill": 2}))
+        self.assertEqual(stats["skills"], Counter({"tdd": 2}))
+
+    def test_tool_use_without_id_always_counts(self):
+        block = {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}
+        path = self.write("no-id.jsonl", [assistant("m1", "claude-opus-5-5", None, "e1", [block], usage(1, 1)),
+                                          assistant("m1", "claude-opus-5-5", None, "e2", [block], usage(1, 1))])
+        self.assertEqual(file_stats(path)["tools"], Counter({"Bash": 2}))
 
     def test_no_timestamps_means_no_window(self):
         path = Path(self.tmp.name) / "no-stamps.jsonl"

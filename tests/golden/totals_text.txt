@@ -20,9 +20,11 @@ Usage by model
 Top tools
  Tool  | Calls | % of calls 
 -------+-------+------------
- Bash  | 2     | 50.0%      
- Read  | 1     | 25.0%      
- Skill | 1     | 25.0%      
+ Bash  | 4     | 44.4%      
+ Read  | 2     | 22.2%      
+ Edit  | 1     | 11.1%      
+ Skill | 1     | 11.1%      
+ Write | 1     | 11.1%      
 
 Skills used
  Skill       | Invocations 
