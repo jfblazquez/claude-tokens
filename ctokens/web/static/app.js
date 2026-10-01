@@ -400,6 +400,124 @@ VIEWS.report = {
   },
 };
 
+// ---------- content views (R7) ----------
+function setCount(id, key, n) {
+  convCounts.set(id, { ...(convCounts.get(id) || {}), [key]: n });
+}
+
+// Tags and attributes that the 'self'-only CSP would block anyway (inline styles, remote media) are dropped up front.
+const SANITIZE = {
+  FORBID_TAGS: ["style", "img", "picture", "video", "audio", "source", "track", "form", "input", "button", "textarea", "select"],
+  FORBID_ATTR: ["style"],
+};
+
+function renderMarkdown(markdown) {
+  const box = h("article", { class: "card md" });
+  if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+    box.append(h("pre", {}, markdown));
+    return box;
+  }
+  box.innerHTML = DOMPurify.sanitize(marked.parse(markdown), SANITIZE);
+  for (const a of box.querySelectorAll("a[href]")) {
+    if (/^(https?:|mailto:)/i.test(a.getAttribute("href"))) {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    }
+  }
+  if (typeof hljs !== "undefined") {
+    for (const code of box.querySelectorAll("pre code")) {
+      const lang = [...code.classList].find((c) => c.startsWith("language-"));
+      if (lang && !hljs.getLanguage(lang.slice(9))) {
+        code.classList.remove(lang);
+        code.classList.add("language-plaintext");
+      }
+      hljs.highlightElement(code);
+    }
+  }
+  return box;
+}
+
+VIEWS.response = {
+  title: (route) => `Last response · ${convTitle(route)}`,
+  load: (route) => loadConversation(route, "/last-response"),
+  head: convHead,
+  render(data) {
+    if (!data.last_response) {
+      return emptyState("No text response", "The main conversation has no assistant text response yet. "
+        + "Responses from subagents are not shown here.");
+    }
+    return [h("div", { class: "meta" }, "Last assistant text response of the main conversation · rendered Markdown"),
+      renderMarkdown(data.last_response)];
+  },
+};
+
+const sourceChip = (source) => h("span", { class: source === "main" ? "chip main" : "chip", title: source === "main" ? "Main conversation" : `Subagent ${source}` },
+  source === "main" ? "main" : `subagent ${source.slice(0, 8)}`);
+
+function parseStamp(stamp) {
+  const d = stamp ? new Date(stamp) : null;
+  return d && !Number.isNaN(d.getTime()) ? d : null;
+}
+
+VIEWS.bash = {
+  title: (route) => `Bash commands · ${convTitle(route)}`,
+  load: async (route) => {
+    const data = await loadConversation(route, "/bash");
+    setCount(route.id, "bash", (data.bash_commands || []).length);
+    return data;
+  },
+  head: convHead,
+  render(data) {
+    const commands = (data.bash_commands || []).map((c) => ({ ...c, source: c.source || "main", when: parseStamp(c.timestamp) }));
+    if (!commands.length) return emptyState("No Bash commands", "Neither the main conversation nor its subagents ran any Bash command.");
+    const items = [];
+    let day = null;
+    for (const c of commands) {
+      const today = c.when ? c.when.toISOString().slice(0, 10) : "undated";
+      if (today !== day) {
+        items.push(h("li", { class: "day" }, today === "undated" ? "No timestamp" : `${today} (UTC)`));
+        day = today;
+      }
+      items.push(h("li", {},
+        c.when ? h("time", { datetime: c.when.toISOString(), title: `${c.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(c.when))
+          : h("span", { class: "notime" }, "—"),
+        h("div", { class: "desc" }, sourceChip(c.source), c.description ? c.description : h("span", { class: "muted" }, "No description")),
+        h("pre", {}, c.command)));
+    }
+    const sources = [...new Set(commands.map((c) => c.source))];
+    const fromMain = commands.filter((c) => c.source === "main").length;
+    return [h("div", { class: "toolbar" }, h("div", { class: "meta" }, "Chronological across the main conversation and its subagents · times in UTC"),
+      h("div", { class: "legend" }, sources.map((s) => h("span", {}, sourceChip(s))))),
+    h("ol", { class: "cmds card" }, items),
+    h("div", { class: "count" }, `${fmt(commands.length)} Bash commands · ${fmt(fromMain)} from main, ${fmt(commands.length - fromMain)} from subagents`)];
+  },
+};
+
+VIEWS.files = {
+  title: (route) => `Files · ${convTitle(route)}`,
+  load: async (route) => {
+    const data = await loadConversation(route, "/files");
+    setCount(route.id, "files", Object.keys(data.files || {}).length);
+    return data;
+  },
+  head: convHead,
+  render(data) {
+    const rows = Object.entries(data.files || {}).map(([file, t]) => ({
+      file, Read: t.Read || 0, Write: t.Write || 0, Edit: t.Edit || 0, sources: Array.isArray(t.sources) ? t.sources : [],
+    }));
+    if (!rows.length) return emptyState("No files touched", "Neither the main conversation nor its subagents read, wrote or edited a file.");
+    return [h("div", { class: "meta" }, "One row per file · counts add up every source that touched it"),
+      renderTable([
+        { key: "file", label: "File", render: (r) => h("span", { class: "mono" }, r.file) },
+        { key: "Read", label: "Read", num: true, render: (r) => fmt(r.Read) },
+        { key: "Write", label: "Write", num: true, render: (r) => fmt(r.Write) },
+        { key: "Edit", label: "Edit", num: true, render: (r) => fmt(r.Edit) },
+        { key: "sources", label: "Sources", sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
+      ], rows, { id: "files", sortKey: "file", dir: 1 }),
+      h("div", { class: "count" }, `${fmt(rows.length)} distinct file${rows.length === 1 ? "" : "s"}`)];
+  },
+};
+
 // ---------- shell: app bar, loading, refresh (R9.4, R9.5) ----------
 const app = { route: null, seq: 0, busy: false, phase: "loading", data: null, error: null, loadedAt: null, failedAt: null, timer: null, after: [] };
 
