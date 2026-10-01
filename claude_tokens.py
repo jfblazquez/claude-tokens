@@ -10,16 +10,19 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-# USD per million tokens. See README for source and overrides.
+# USD per million tokens, plus an optional cache-read multiplier (default 0.1x).
+# See README for source and overrides.
 PRICES = {
+    "claude-fable-5-1": (10, 50, .025), "claude-mythos-5-1": (10, 50, .025),
     "claude-fable-5": (10, 50), "claude-mythos-5": (10, 50),
     "claude-mythos-preview": (10, 50),
+    "claude-opus-5-5": (4, 20, .05),
     "claude-opus-5": (5, 25),
     "claude-opus-4-8": (5, 25), "claude-opus-4-7": (5, 25),
     "claude-opus-4-6": (5, 25), "claude-opus-4-5": (5, 25),
     "claude-opus-4-1": (15, 75), "claude-opus-4": (15, 75),
     "claude-3-opus": (15, 75),
-    # Sonnet 5 introductory rate; list price is 3/15 from 2026-09-01.
+    "claude-sonnet-5-5": (2, 10),
     "claude-sonnet-5": (2, 10), "claude-sonnet-4-6": (3, 15),
     "claude-sonnet-4-5": (3, 15), "claude-sonnet-4": (3, 15),
     "claude-3-7-sonnet": (3, 15), "claude-3-5-sonnet": (3, 15),
@@ -161,7 +164,8 @@ def load_prices(path):
     try:
         custom = json.loads(path.read_text(encoding="utf-8"))
         for model, value in custom.items():
-            prices[model] = (float(value["input"]), float(value["output"]))
+            rate = (float(value["input"]), float(value["output"]))
+            prices[model] = rate + (float(value["cache_read"]),) if "cache_read" in value else rate
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise ValueError(f"archivo de precios inválido: {error}") from error
     return prices
@@ -179,8 +183,13 @@ def parse_model(model):
     return family, tuple(int(p) for p in parts if p.isdigit() and len(p) != 8)
 
 
+def priced(rate, estimated):
+    input_rate, output_rate, *cache_read = rate
+    return input_rate, output_rate, estimated, cache_read[0] if cache_read else .1
+
+
 def rate_of(prices, model):
-    """(input, output, estimated) rate for a model, or None when unpriceable.
+    """(input, output, estimated, cache_read multiplier) for a model, or None when unpriceable.
 
     Tolerates a trailing -YYYYMMDD release date. A model that is unknown but
     belongs to a known family (claude-opus-6, claude-fable-5-2, ...) is priced
@@ -189,7 +198,7 @@ def rate_of(prices, model):
     head, _, tail = model.rpartition("-")
     base = head if tail.isdigit() and len(tail) == 8 else model
     if base in prices:
-        return (*prices[base], False)
+        return priced(prices[base], False)
     parsed = parse_model(base)
     if parsed is None:
         return None
@@ -200,14 +209,14 @@ def rate_of(prices, model):
         return None
     earlier = [entry for entry in known if entry[0] <= version]
     _, rate = max(earlier, key=lambda e: e[0]) if earlier else min(known, key=lambda e: e[0])
-    return (*rate, True)
+    return priced(rate, True)
 
 
 def estimated_cost(tokens, rate):
     if rate is None:
         return None
-    input_rate, output_rate = rate[0], rate[1]
-    billable_input = tokens["input"] + .1 * tokens["cache_read"] + 1.25 * tokens["cache_write_5m"] + 2 * tokens["cache_write_1h"]
+    input_rate, output_rate, _, cache_read = rate
+    billable_input = tokens["input"] + cache_read * tokens["cache_read"] + 1.25 * tokens["cache_write_5m"] + 2 * tokens["cache_write_1h"]
     return (billable_input * input_rate + tokens["output"] * output_rate) / 1_000_000
 
 
