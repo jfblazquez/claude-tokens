@@ -113,6 +113,26 @@ def scan_totals(projects_dir, project_filter=None, stats=file_stats):
             "conversations": conversations, "subagents": subagents}
 
 
+def daily_series(daily_models, responses, prices):
+    """Tokens and cost per Day and model, days ascending; records without a timestamp go last under day None."""
+    series = []
+    for day in sorted(set(daily_models) | set(responses), key=lambda d: (d is None, d or "")):
+        models, day_tokens, day_cost = {}, 0, 0.0
+        for model, tokens in sorted(daily_models.get(day, {}).items()):
+            row = {field: tokens[field] for field in FIELDS}
+            row["total_tokens"] = sum(row.values())
+            if not row["total_tokens"]:
+                continue
+            row["estimated_cost_usd"] = estimated_cost(row, rate_of(prices, model))
+            day_tokens += row["total_tokens"]
+            day_cost += row["estimated_cost_usd"] or 0
+            models[model] = row
+        if models or responses.get(day):
+            series.append({"day": day, "responses": responses.get(day, 0), "total_tokens": day_tokens,
+                           "estimated_cost_usd": day_cost, "models": models})
+    return series
+
+
 def totals_report(scan, prices):
     """Turn a raw scan into cost/percentage figures ready to print or dump."""
     by_model, total_cost, total_tokens, unknown, guessed = [], 0.0, 0, set(), set()
@@ -168,4 +188,5 @@ def totals_report(scan, prices):
         "by_model": by_model, "projects": projects,
         "tools": scan["tools"], "tool_calls": tool_total, "skills": scan["skills"],
         "unknown_price_models": sorted(unknown),
-        "guessed_price_models": sorted(guessed)}
+        "guessed_price_models": sorted(guessed),
+        "daily": daily_series(scan["daily_models"], scan["daily"], prices)}

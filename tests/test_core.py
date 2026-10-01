@@ -10,7 +10,8 @@ from fixtures import (API, BILLING, CONV_A, CONV_B, SUB_EXPLORE, SUB_REVIEW, ass
                       usage, write_jsonl)
 
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
-from ctokens.reports import scan_totals
+from ctokens.pricing import load_prices
+from ctokens.reports import scan_totals, totals_report
 
 
 class CoreTest(unittest.TestCase):
@@ -150,6 +151,49 @@ class ScanTotalsTest(CoreTest):
         scan_totals(self.projects, stats=cache.__getitem__)
         self.assertEqual(cache, snapshot)
         self.assertEqual(cache, {path: file_stats(path) for path in cache})
+
+
+class DailySeriesTest(CoreTest):
+    def totals(self, project=None):
+        return totals_report(scan_totals(self.projects, project), load_prices(None))
+
+    def test_daily_costs_add_up_to_the_total(self):
+        data = self.totals()
+        self.assertAlmostEqual(sum(d["estimated_cost_usd"] for d in data["daily"]),
+                               data["estimated_total_cost_usd"], places=4)
+        self.assertEqual(sum(d["total_tokens"] for d in data["daily"]), data["total_tokens"])
+        for day in data["daily"]:
+            self.assertAlmostEqual(sum(m["estimated_cost_usd"] or 0 for m in day["models"].values()),
+                                   day["estimated_cost_usd"], places=10)
+
+    def test_days_ascending_in_utc_with_undated_last(self):
+        days = [d["day"] for d in self.totals()["daily"]]
+        self.assertEqual(days, ["2026-09-27", "2026-09-28", "2026-09-29", "2026-09-30", None])
+        by_day = {d["day"]: d for d in self.totals()["daily"]}
+        # msg_A2 is stamped 23:59:50Z and msg_A3 00:00:10Z the next Day.
+        self.assertEqual(by_day["2026-09-29"]["models"]["claude-opus-5-5"]["output"], 1400)
+        self.assertEqual(by_day["2026-09-30"]["models"]["claude-opus-5-5"]["output"], 2100)
+        self.assertEqual(by_day[None]["models"]["claude-sonnet-5-5"]["output"], 700)
+        self.assertEqual(by_day[None]["responses"], 0)
+
+    def test_undated_bucket_only_when_non_empty(self):
+        self.assertNotIn(None, [d["day"] for d in self.totals("billing")["daily"]])
+
+    def test_unpriced_model_has_null_cost(self):
+        day = next(d for d in self.totals()["daily"] if d["day"] == "2026-09-30")
+        self.assertIsNone(day["models"]["acme-model-1"]["estimated_cost_usd"])
+        self.assertEqual(day["models"]["acme-model-1"]["total_tokens"], 700)
+        self.assertEqual(day["estimated_cost_usd"], day["models"]["claude-opus-5-5"]["estimated_cost_usd"])
+
+    def test_responses_per_day_match_the_window(self):
+        data = self.totals()
+        self.assertEqual(sum(d["responses"] for d in data["daily"]), 8)
+        self.assertEqual(len([d for d in data["daily"] if d["responses"]]), data["window"]["active_days"])
+
+    def test_empty_projects_folder(self):
+        empty = Path(self.tmp.name) / "empty"
+        empty.mkdir(exist_ok=True)
+        self.assertEqual(totals_report(scan_totals(empty), load_prices(None))["daily"], [])
 
 
 if __name__ == "__main__":

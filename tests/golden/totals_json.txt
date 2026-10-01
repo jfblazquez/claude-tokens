@@ -114,6 +114,120 @@
   ],
   "guessed_price_models": [
     "claude-sonnet-5-6"
+  ],
+  "daily": [
+    {
+      "day": "2026-09-27",
+      "responses": 2,
+      "total_tokens": 60,
+      "estimated_cost_usd": 0.00022,
+      "models": {
+        "claude-haiku-4-5": {
+          "input": 20,
+          "output": 40,
+          "cache_read": 0,
+          "cache_write_5m": 0,
+          "cache_write_1h": 0,
+          "total_tokens": 60,
+          "estimated_cost_usd": 0.00022
+        }
+      }
+    },
+    {
+      "day": "2026-09-28",
+      "responses": 2,
+      "total_tokens": 55020,
+      "estimated_cost_usd": 0.05567999999999999,
+      "models": {
+        "claude-haiku-4-5": {
+          "input": 300,
+          "output": 500,
+          "cache_read": 9000,
+          "cache_write_5m": 1200,
+          "cache_write_1h": 0,
+          "total_tokens": 11000,
+          "estimated_cost_usd": 0.0052
+        },
+        "claude-opus-5-5": {
+          "input": 120,
+          "output": 900,
+          "cache_read": 40000,
+          "cache_write_5m": 0,
+          "cache_write_1h": 3000,
+          "total_tokens": 44020,
+          "estimated_cost_usd": 0.05048
+        }
+      }
+    },
+    {
+      "day": "2026-09-29",
+      "responses": 2,
+      "total_tokens": 76565,
+      "estimated_cost_usd": 0.05831,
+      "models": {
+        "claude-opus-5-5": {
+          "input": 15,
+          "output": 1400,
+          "cache_read": 52000,
+          "cache_write_5m": 800,
+          "cache_write_1h": 0,
+          "total_tokens": 54215,
+          "estimated_cost_usd": 0.04246
+        },
+        "claude-sonnet-5-6": {
+          "input": 50,
+          "output": 800,
+          "cache_read": 20000,
+          "cache_write_5m": 1500,
+          "cache_write_1h": 0,
+          "total_tokens": 22350,
+          "estimated_cost_usd": 0.01585
+        }
+      }
+    },
+    {
+      "day": "2026-09-30",
+      "responses": 2,
+      "total_tokens": 63809,
+      "estimated_cost_usd": 0.054236,
+      "models": {
+        "acme-model-1": {
+          "input": 400,
+          "output": 300,
+          "cache_read": 0,
+          "cache_write_5m": 0,
+          "cache_write_1h": 0,
+          "total_tokens": 700,
+          "estimated_cost_usd": null
+        },
+        "claude-opus-5-5": {
+          "input": 9,
+          "output": 2100,
+          "cache_read": 61000,
+          "cache_write_5m": 0,
+          "cache_write_1h": 0,
+          "total_tokens": 63109,
+          "estimated_cost_usd": 0.054236
+        }
+      }
+    },
+    {
+      "day": null,
+      "responses": 0,
+      "total_tokens": 18400,
+      "estimated_cost_usd": 0.0204,
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 200,
+          "output": 700,
+          "cache_read": 15000,
+          "cache_write_5m": 0,
+          "cache_write_1h": 2500,
+          "total_tokens": 18400,
+          "estimated_cost_usd": 0.0204
+        }
+      }
+    }
   ]
 }
 --- stderr
