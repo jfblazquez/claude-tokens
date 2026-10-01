@@ -16,8 +16,10 @@ from characterization import DATA, ENV, SCRIPT
 from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, build_projects
 
 from ctokens.catalog import conversation_rows
+from ctokens.logs import file_stats, parse_log
 from ctokens.pricing import load_prices
 from ctokens.reports import scan_totals, totals_report
+from ctokens.web.cache import StatsCache
 from ctokens.web.server import CSP, STATIC_FILES, Config, Handler, Server
 
 DEFAULT_HOST = object()
@@ -351,6 +353,211 @@ class EmptyFolderTest(unittest.TestCase):
                         self.assertEqual(get_json(port, f"/api/conversations/{CONV_A}")[0], 404)
                     finally:
                         stop_server(server, thread)
+
+
+class StatsCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "a.jsonl"
+        self.path.write_text("one\n", encoding="utf-8")
+        os.utime(self.path, ns=(1_000_000_000, 1_000_000_000))
+        self.cache = StatsCache()
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def compute(self, path):
+        self.calls.append(path)
+        return {"text": path.read_text(encoding="utf-8"), "call": len(self.calls)}
+
+    def test_hit_while_unchanged(self):
+        first = self.cache.get("ns", self.path, self.compute)
+        self.assertIs(self.cache.get("ns", str(self.path), self.compute), first)
+        self.assertEqual(self.calls, [self.path])
+
+    def test_mtime_change_recomputes(self):
+        self.cache.get("ns", self.path, self.compute)
+        os.utime(self.path, ns=(2_000_000_000, 2_000_000_000))
+        self.assertEqual(self.cache.get("ns", self.path, self.compute)["call"], 2)
+
+    def test_size_change_recomputes_even_with_same_mtime(self):
+        self.cache.get("ns", self.path, self.compute)
+        self.path.write_text("one\ntwo\n", encoding="utf-8")
+        os.utime(self.path, ns=(1_000_000_000, 1_000_000_000))
+        self.assertEqual(self.cache.get("ns", self.path, self.compute), {"text": "one\ntwo\n", "call": 2})
+
+    def test_namespaces_are_separate(self):
+        self.cache.get("a", self.path, self.compute)
+        self.cache.get("b", self.path, self.compute)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.cache.paths("a"), {self.path})
+
+    def test_prune_evicts_only_deleted_unseen_paths(self):
+        other = Path(self.tmp.name) / "b.jsonl"
+        other.write_text("x\n", encoding="utf-8")
+        gone = Path(self.tmp.name) / "c.jsonl"
+        gone.write_text("y\n", encoding="utf-8")
+        for path in (self.path, other, gone):
+            self.cache.get("ns", path, self.compute)
+        gone.unlink()
+        self.cache.prune({self.path})
+        self.assertEqual(self.cache.paths("ns"), {self.path, other})
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            self.cache.get("ns", Path(self.tmp.name) / "missing.jsonl", self.compute)
+        self.assertEqual(self.calls, [])
+
+    def test_concurrent_gets(self):
+        paths = []
+        for index in range(20):
+            path = Path(self.tmp.name) / f"f{index}.jsonl"
+            path.write_text(f"{index}\n", encoding="utf-8")
+            paths.append(path)
+        errors, barrier = [], threading.Barrier(8)
+
+        def worker():
+            barrier.wait()
+            try:
+                for _ in range(20):
+                    for path in paths:
+                        value = self.cache.get("ns", path, self.compute)
+                        if value["text"] != path.read_text(encoding="utf-8"):
+                            errors.append(path)
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.cache.paths("ns"), set(paths))
+
+
+class CacheWiringTest(unittest.TestCase):
+    """The server re-parses only logs whose mtime or size changed (R9.1, R9.3)."""
+
+    def setUp(self):
+        self.quiet = mock.patch.object(Handler, "log_message", lambda *args: None)
+        self.quiet.start()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.projects = build_projects(self.tmp.name)
+        self.server, self.thread = start_server(Config(self.projects, load_prices(None)))
+        self.port = self.server.server_address[1]
+        self.logs = sorted(self.projects.rglob("*.jsonl"))
+
+    def tearDown(self):
+        stop_server(self.server, self.thread)
+        self.tmp.cleanup()
+        self.quiet.stop()
+
+    def get(self, path):
+        status, data = get_json(self.port, path)
+        self.assertEqual(status, 200)
+        return data
+
+    def cli(self, *args):
+        return cli_json(*args, "--projects-dir", str(self.projects))
+
+    def touch(self, path, append=None):
+        if append is not None:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(append + "\n")
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    def test_totals_parse_each_log_once_then_only_changed_ones(self):
+        with mock.patch("ctokens.web.server.file_stats", wraps=file_stats) as stats:
+            first = self.get("/api/totals")
+            self.assertEqual(sorted(call.args[0] for call in stats.call_args_list), self.logs)
+            stats.reset_mock()
+            self.assertEqual(self.get("/api/totals"), first)
+            stats.assert_not_called()
+            changed = self.projects / "-home-dev-projects-billing-service" / f"{CONV_B}.jsonl"
+            self.touch(changed)
+            self.assertEqual(self.get("/api/totals"), first)
+            self.assertEqual([call.args[0] for call in stats.call_args_list], [changed])
+        self.assertEqual(first, self.cli("--totals", "--json"))
+
+    def test_changed_log_is_reflected(self):
+        main = self.projects / "-home-dev-projects-api-gateway" / f"{CONV_A}.jsonl"
+        self.get("/api/totals")
+        self.get(f"/api/conversations/{CONV_A}")
+        record = {"type": "assistant", "uuid": "e-new", "timestamp": "2026-10-01T08:00:00.000Z",
+                  "message": {"id": "msg_NEW", "model": "claude-opus-5-5", "role": "assistant",
+                              "content": [{"type": "text", "text": "Later."}],
+                              "usage": {"input_tokens": 7, "output_tokens": 11}}}
+        self.touch(main, json.dumps(record))
+        self.assertEqual(self.get("/api/totals"), self.cli("--totals", "--json"))
+        self.assertEqual(self.get(f"/api/conversations/{CONV_A}"), self.cli(CONV_A, "--json"))
+        self.assertEqual(self.get(f"/api/conversations/{CONV_A}/last-response"),
+                         self.cli(CONV_A, "--last-response", "--json"))
+
+    def test_deleted_log_is_evicted(self):
+        before = self.get("/api/totals")
+        deleted = self.projects / "-home-dev-projects-billing-service" / f"{CONV_B}.jsonl"
+        self.assertIn(deleted, self.server.cache.paths("file_stats"))
+        deleted.unlink()
+        after = self.get("/api/totals")
+        self.assertEqual(after["conversations"], before["conversations"] - 1)
+        self.assertEqual(after, self.cli("--totals", "--json"))
+        self.assertEqual(self.server.cache.paths("file_stats"), set(self.logs) - {deleted})
+
+    def test_report_uses_cache_and_stays_equal(self):
+        expected = self.cli(CONV_A, "--json")
+        with mock.patch("ctokens.web.server.parse_log", wraps=parse_log) as parse:
+            self.assertEqual(self.get(f"/api/conversations/{CONV_A}"), expected)
+            self.assertEqual(parse.call_count, 3)
+            parse.reset_mock()
+            self.assertEqual(self.get(f"/api/conversations/{CONV_A}"), expected)
+            parse.assert_not_called()
+
+    def test_subagent_description_change_without_log_change(self):
+        self.get(f"/api/conversations/{CONV_A}")
+        meta = next(self.projects.rglob("*.meta.json"))
+        meta.write_text(json.dumps({"description": "Renamed task"}), encoding="utf-8")
+        data = self.get(f"/api/conversations/{CONV_A}")
+        self.assertIn("Renamed task", [row["task"] for row in data["conversations"]])
+        self.assertEqual(data, self.cli(CONV_A, "--json"))
+
+    def test_list_uses_cache(self):
+        expected = self.get("/api/conversations")
+        with mock.patch("ctokens.web.server.session_title") as title, \
+                mock.patch("ctokens.web.server.project_path_of") as project:
+            self.assertEqual(self.get("/api/conversations"), expected)
+            title.assert_not_called()
+            project.assert_not_called()
+        main = self.projects / "-home-dev-projects-api-gateway" / f"{CONV_A}.jsonl"
+        self.touch(main, json.dumps({"type": "ai-title", "aiTitle": "Renamed"}))
+        rows = self.get("/api/conversations")["conversations"]
+        self.assertEqual(rows[0]["title"], "Renamed")
+        self.assertEqual(rows, conversation_rows(self.projects))
+
+    def test_concurrent_totals(self):
+        expected = self.cli("--totals", "--json")
+        results, errors, barrier = [], [], threading.Barrier(6)
+
+        def worker():
+            barrier.wait()
+            try:
+                for _ in range(3):
+                    results.append(get_json(self.port, "/api/totals"))
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 18)
+        for status, data in results:
+            self.assertEqual((status, data), (200, expected))
+        self.assertEqual(self.server.cache.paths("file_stats"), set(self.logs))
 
 
 if __name__ == "__main__":
