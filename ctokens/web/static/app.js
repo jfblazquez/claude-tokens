@@ -204,6 +204,202 @@ const VIEWS = {
   },
 };
 
+const modelCell = (model) => model;
+
+// ---------- conversation list (R3) ----------
+const convRows = new Map();
+const convTasks = new Map();
+const convCounts = new Map();
+
+function listRows(body) {
+  const rows = Array.isArray(body) ? body : (body && body.conversations) || [];
+  for (const row of [...rows].reverse()) convRows.set(row.id, row);
+  return rows;
+}
+
+const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
+
+let listFilter = "";
+
+VIEWS.list = {
+  title: () => "Conversations",
+  load: async () => listRows(await api("/api/conversations")),
+  head: () => h("div", { class: "page-head" }, h("h1", {}, "Conversations"),
+    h("div", { class: "meta" }, h("span", {}, "Most recent first · times in UTC"))),
+  render(rows) {
+    if (!rows.length) {
+      return emptyState("No conversations found", "There are no conversation logs in the projects folder yet (the one given "
+        + "by --projects-dir, ~/.claude/projects by default). Conversations appear here after you use Claude Code.");
+    }
+    const count = h("span", { class: "count" });
+    const holder = h("div", { class: "section" });
+    const draw = () => {
+      const shown = rows.filter((r) => projectMatches(r, listFilter));
+      count.textContent = `${fmt(shown.length)} of ${fmt(rows.length)} conversations`;
+      holder.replaceChildren(shown.length ? renderTable([
+        { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
+        { key: "title", label: "Title", wrap: true,
+          render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
+        { key: "project", label: "Project", render: (r) => h("span", { class: "mono" }, r.project) },
+        { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
+        { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
+        { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
+      ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); } })
+        : emptyState("No matching conversations", `No conversation has a project matching “${listFilter}”.`));
+    };
+    const input = h("input", { id: "list-filter", type: "search", placeholder: "Filter by project path", value: listFilter, "aria-label": "Filter by project",
+      oninput: (e) => { listFilter = e.target.value; draw(); } });
+    draw();
+    return [h("div", { class: "toolbar" }, h("label", { class: "field" }, "Project", input), count), holder];
+  },
+};
+
+// ---------- conversation header and tabs (R4.5) ----------
+const TABS = [["report", "Usage"], ["response", "Last response"], ["bash", "Bash commands"], ["files", "Files"]];
+
+async function refreshConvRow(id) {
+  try {
+    listRows(await api("/api/conversations"));
+  } catch (_) {
+    // The header falls back to the id; the view itself reports its own errors.
+  }
+}
+
+async function loadConversation(route, path) {
+  const [data] = await Promise.all([api(`/api/conversations/${encodeURIComponent(route.id)}${path}`), refreshConvRow(route.id)]);
+  return data;
+}
+
+function convHead(route) {
+  const row = convRows.get(route.id), counts = convCounts.get(route.id) || {};
+  const title = (row && row.title) || convTasks.get(route.id) || "Untitled conversation";
+  const meta = [h("span", { class: "mono" }, route.id)];
+  if (row) {
+    meta.push(h("span", {}, h("b", { class: "mono" }, row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
+      h("span", {}, `${fmt(row.size_kb)} KB · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
+  }
+  return [h("div", { class: "page-head" },
+    h("div", { class: "crumb" }, h("a", { href: "#/" }, "← Conversations")),
+    h("h1", {}, title),
+    h("div", { class: "meta" }, meta)),
+  h("nav", { class: "tabs", "aria-label": "Conversation views" }, TABS.map(([key, label]) => h("a", {
+    href: convHref(route.id, key), "aria-current": route.view === key ? "page" : null,
+  }, label, counts[key] != null ? h("span", { class: "n" }, fmt(counts[key])) : null)))];
+}
+
+const convTitle = (route) => (convRows.get(route.id) || {}).title || convTasks.get(route.id) || "Conversation";
+
+// ---------- usage report (R4) ----------
+const cacheWrite = (r) => `${fmt(r.cache_write_5m)}/${fmt(r.cache_write_1h)}`;
+const sumBy = (rows, key) => rows.reduce((s, r) => s + (r[key] || 0), 0);
+
+function stat(label, value, detail) {
+  return h("div", { class: "stat" }, h("div", { class: "k" }, label), h("div", { class: "v" }, value), detail ? h("div", { class: "d" }, detail) : null);
+}
+
+function sectionHead(title, hint) {
+  return h("div", { class: "section-head" }, h("h2", {}, title), hint ? h("span", { class: "hint" }, hint) : null);
+}
+
+function tokenColumns() {
+  return [
+    { key: "total_tokens", label: "Total", num: true, render: (r) => fmt(r.total_tokens) },
+    { key: "input", label: "Input", num: true, render: (r) => fmt(r.input) },
+    { key: "output", label: "Output", num: true, render: (r) => fmt(r.output) },
+  ];
+}
+
+VIEWS.report = {
+  title: convTitle,
+  load: async (route) => {
+    const data = await loadConversation(route, "");
+    const main = (data.conversations || []).find((c) => c.kind === "main");
+    if (main && main.task) convTasks.set(route.id, main.task);
+    return data;
+  },
+  head: convHead,
+  render(data) {
+    const scopes = data.conversations || [];
+    const byModel = data.by_model || [];
+    if (!byModel.length) {
+      return emptyState("No usage recorded yet", "This conversation has no assistant responses with token usage. "
+        + "It may have just started; refresh in a moment.");
+    }
+    const guessed = (data.guessed_price_models || []).length > 0;
+    const unknown = (data.unknown_price_models || []).length > 0;
+    const scopeRows = [];
+    for (const s of scopes) {
+      for (const model of Object.keys(s.models || {}).sort()) scopeRows.push({ ...s.models[model], kind: s.kind, id: s.id, task: s.task, model });
+    }
+    const tokens = sumBy(byModel, "total_tokens");
+    const subagents = scopes.filter((s) => s.kind !== "main").length;
+    const stats = h("div", { class: "stats" },
+      stat("Estimated cost", money(data.estimated_total_cost_usd, guessed),
+        [guessed ? "~ includes a guessed price" : "", unknown ? "excludes models without pricing" : ""].filter(Boolean).join(" · ")
+          || "main + subagents"),
+      stat("Total tokens", fmt(tokens), `${fmt(sumBy(byModel, "output"))} output`),
+      stat("Scopes", `1 + ${subagents}`, "main + subagents"),
+      stat("Served from cache", pct(tokens ? sumBy(byModel, "cache_read") / tokens : null), "of all tokens"));
+
+    const duplicates = scopes.filter((s) => s.skipped_duplicates).map((s) => `${s.id}=${s.skipped_duplicates}`).join(", ");
+    const usage = h("section", { class: "section" }, sectionHead("Usage per scope", "Main conversation and each subagent"),
+      renderTable([
+        { key: "kind", label: "Scope", render: (r) => h("span", { class: r.kind === "main" ? "chip main" : "chip" }, r.kind) },
+        { key: "id", label: "ID", render: (r) => h("span", { class: "mono" }, r.id) },
+        { key: "task", label: "Task", wrap: true },
+        { key: "model", label: "Model", render: (r) => modelCell(r.model) },
+        ...tokenColumns(),
+        { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
+        { key: "cache_write", label: "Cache write 5m/1h", num: true, render: cacheWrite, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
+        { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
+      ], scopeRows, { id: "report-scopes" }),
+      h("p", { class: "footnote" }, `Duplicates skipped: ${duplicates || "none"}`));
+
+    const showRaw = byModel.some((r) => r.raw_output_tokens != null && r.raw_output_tokens !== r.output);
+    const modelColumns = [
+      { key: "model", label: "Model", render: (r) => modelCell(r.model) },
+      ...tokenColumns(),
+      showRaw ? { key: "raw_output_tokens", label: "Raw output*", num: true,
+        render: (r) => (r.raw_output_tokens === r.output ? "" : fmt(r.raw_output_tokens)) } : null,
+      { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
+      { key: "cache_write", label: "Cache write 5m/1h", num: true, render: cacheWrite, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
+      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
+    ].filter(Boolean);
+    const footer = ["Total", fmt(tokens), fmt(sumBy(byModel, "input")), fmt(sumBy(byModel, "output")), showRaw ? "" : null,
+      fmt(sumBy(byModel, "cache_read")), `${fmt(sumBy(byModel, "cache_write_5m"))}/${fmt(sumBy(byModel, "cache_write_1h"))}`,
+      money(data.estimated_total_cost_usd, guessed)].filter((c) => c !== null);
+    const models = h("section", { class: "section" }, sectionHead("Summary by model"),
+      renderTable(modelColumns, byModel, { id: "report-models", footer }),
+      showRaw ? h("p", { class: "footnote" }, "* Raw output is shown only when persisted stream events differ from de-duplicated API responses.") : null);
+
+    const ratio = (r) => (r.context_window_tokens ? r.context_tokens / r.context_window_tokens : null);
+    const context = h("section", { class: "section" },
+      sectionHead("Last observed context", "Main conversation · window inferred from the largest context seen (200k/1M tier); pass --context-window to set it"),
+      renderTable([
+        { key: "model", label: "Model", render: (r) => modelCell(r.model) },
+        { key: "context_tokens", label: "Context / window", render: (r) => [
+          ratio(r) == null ? null : h("span", { class: "meter", "aria-hidden": "true" }, h("i", { css: { width: `${Math.min(100, ratio(r) * 100)}%` } })),
+          h("span", { class: "mono" }, `${fmt(r.context_tokens)} / ${r.context_window_tokens ? fmt(r.context_window_tokens) : "N/D"}`)] },
+        { key: "used", label: "Used", num: true, sortValue: ratio, render: (r) => pct(ratio(r)) },
+        { key: "input_tokens", label: "New input", num: true, render: (r) => fmt(r.input_tokens) },
+        { key: "cache_read_tokens", label: "Cache read", num: true, render: (r) => fmt(r.cache_read_tokens) },
+        { key: "cache_write_tokens", label: "Cache write", num: true, render: (r) => fmt(r.cache_write_tokens) },
+        { key: "last_output_tokens", label: "Last output", num: true, render: (r) => fmt(r.last_output_tokens) },
+      ], data.main_context_snapshot || [], { id: "report-context" }),
+      h("p", { class: "footnote" }, "System prompt, tools, memory, skills and messages are not broken down in the JSONL."));
+
+    const cold = h("section", { class: "section" }, sectionHead("Cold-summary estimate", "What summarizing this context would cost without cache"),
+      renderTable([
+        { key: "model", label: "Model", render: (r) => modelCell(r.model) },
+        { key: "context_tokens", label: "Cold input", num: true, render: (r) => fmt(r.context_tokens) },
+        { key: "assumed_summary_output_tokens", label: "Assumed output", num: true, render: (r) => fmt(r.assumed_summary_output_tokens) },
+        { key: "estimated_cold_summary_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cold_summary_cost_usd, r.price_estimated) },
+      ], data.cold_summary_estimate || [], { id: "report-cold" }));
+
+    return [stats, ...pricingNotices(data), usage, models, context, cold];
+  },
+};
+
 // ---------- shell: app bar, loading, refresh (R9.4, R9.5) ----------
 const app = { route: null, seq: 0, busy: false, phase: "loading", data: null, error: null, loadedAt: null, failedAt: null, timer: null, after: [] };
 
@@ -229,6 +425,7 @@ function runCleanups() {
 function show({ keepScroll = false } = {}) {
   const route = app.route, view = VIEWS[route.view];
   const y = window.scrollY;
+  const focused = document.activeElement && document.activeElement.id ? document.activeElement : null;
   runCleanups();
   const head = view.head ? view.head(route, app.data) : [];
   let body;
@@ -242,6 +439,11 @@ function show({ keepScroll = false } = {}) {
     if (typeof cleanup === "function") app.after.push(cleanup);
   }
   if (keepScroll) window.scrollTo(0, y);
+  const again = focused && focused.tagName === "INPUT" && !$("main").contains(focused) ? $(focused.id) : null;
+  if (again) {
+    again.focus();
+    if (typeof focused.selectionStart === "number") again.setSelectionRange(focused.selectionStart, focused.selectionEnd);
+  }
   updateBar();
 }
 
