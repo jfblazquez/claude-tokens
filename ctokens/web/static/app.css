@@ -105,6 +105,7 @@ th .ind { display: inline-block; width: 1em; color: var(--accent); }
 th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.wrap { white-space: normal; min-width: 220px; overflow-wrap: anywhere; }
 td.path { white-space: normal; min-width: 160px; overflow-wrap: break-word; }
+td.chips { white-space: normal; min-width: 150px; }
 tbody tr.link { cursor: pointer; }
 tbody tr.link:hover td { background: var(--accent-soft); }
 tbody tr.link a { color: inherit; text-decoration: none; }

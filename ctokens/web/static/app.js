@@ -114,7 +114,7 @@ function renderTable(columns, rows, opts = {}) {
     const body = data.map((r) => h("tr", {
       class: cls(opts.onRow && "link"),
       onclick: opts.onRow ? (e) => { if (!e.target.closest("a")) opts.onRow(r); } : null,
-    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.wrap && "wrap", c.path && "path") }, c.render ? c.render(r) : r[c.key]))));
+    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.wrap && "wrap", c.path && "path", c.chips && "chips") }, c.render ? c.render(r) : r[c.key]))));
     const foot = opts.footer
       ? h("tfoot", {}, h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: cls(columns[i] && columns[i].num && "num") }, cell))))
       : null;
@@ -588,11 +588,11 @@ VIEWS.files = {
     if (!rows.length) return emptyState("No files touched", "Neither the main conversation nor its subagents read, wrote or edited a file.");
     return [h("div", { class: "meta" }, "One row per file · counts add up every source that touched it"),
       renderTable([
-        { key: "file", label: "File", render: (r) => h("span", { class: "mono" }, r.file) },
+        { key: "file", label: "File", path: true, render: (r) => pathCell(r.file) },
         { key: "Read", label: "Read", num: true, render: (r) => fmt(r.Read) },
         { key: "Write", label: "Write", num: true, render: (r) => fmt(r.Write) },
         { key: "Edit", label: "Edit", num: true, render: (r) => fmt(r.Edit) },
-        { key: "sources", label: "Sources", sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
+        { key: "sources", label: "Sources", chips: true, sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
       ], rows, { id: "files", sortKey: "file", dir: 1 }),
       h("div", { class: "count" }, `${fmt(rows.length)} distinct file${rows.length === 1 ? "" : "s"}`)];
   },
