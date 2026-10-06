@@ -417,7 +417,7 @@ VIEWS.report = {
       stat("Estimated cost", money(data.estimated_total_cost_usd, guessed),
         [guessed ? "~ includes a guessed price" : "", unknown ? "excludes models without pricing" : ""].filter(Boolean).join(" · ")
           || "main + subagents"),
-      stat("Total tokens", fmt(tokens), `${fmt(sumBy(byModel, "output"))} output`),
+      stat("Total tokens", compact(tokens), `${fmt(tokens)} total · ${fmt(sumBy(byModel, "output"))} output`),
       stat("Scopes", `1 + ${subagents}`, "main + subagents"),
       stat("Served from cache", pct(tokens ? sumBy(byModel, "cache_read") / tokens : null), "of all tokens"));
 

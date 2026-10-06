@@ -74,7 +74,7 @@ h2 { font-size: var(--t-lg); margin: 0; letter-spacing: -0.01em; }
 
 /* Tabs */
 /* The divider is an inset shadow so the active underline can cover it without overflowing the bar. */
-.tabs { display: flex; gap: var(--s1); box-shadow: inset 0 -1px 0 var(--border); overflow-x: auto; overflow-y: hidden; }
+.tabs { display: flex; flex-wrap: wrap; gap: var(--s1); box-shadow: inset 0 -1px 0 var(--border); }
 .tabs a { padding: 8px 12px; color: var(--muted); font-weight: 550; text-decoration: none;
   border-bottom: 2px solid transparent; white-space: nowrap; }
 .tabs a:hover { color: var(--fg); }
@@ -85,7 +85,8 @@ h2 { font-size: var(--t-lg); margin: 0; letter-spacing: -0.01em; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s3); }
 .stat { padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); min-width: 0; }
 .stat .k { font-size: var(--t-xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-.stat .v { font-size: var(--t-num); font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.2; }
+.stat .v { font-size: var(--t-num); font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.2;
+  overflow-wrap: anywhere; }
 .stat .d { font-size: var(--t-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* Sections, cards, tables */
@@ -178,7 +179,8 @@ tr.total td { font-weight: 650; background: var(--surface-2); border-top: 1px so
 .cmds li.day { display: block; padding-block: var(--s2); background: var(--surface-2); color: var(--muted); font-size: var(--t-xs);
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-variant-numeric: tabular-nums; }
 .cmds time, .cmds .notime { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
-.cmds .desc { color: var(--muted); font-size: var(--t-sm); display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; min-width: 0; }
-.cmds pre { grid-column: 2; margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+.cmds .desc { color: var(--muted); font-size: var(--t-sm); display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; min-width: 0;
+  overflow-wrap: anywhere; }
+.cmds pre { grid-column: 2; margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere;
   background: var(--code-bg); border-radius: 6px; padding: 6px 10px; min-width: 0; }
 .cmds pre::before { content: "$ "; color: var(--muted); }
