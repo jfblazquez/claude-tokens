@@ -408,7 +408,7 @@ VIEWS.report = {
     const guessed = (data.guessed_price_models || []).length > 0;
     const unknown = (data.unknown_price_models || []).length > 0;
     const scopeRows = [];
-    for (const s of scopes) {
+    for (const s of [...scopes].sort((a, b) => (b.kind === "main") - (a.kind === "main"))) {
       for (const model of Object.keys(s.models || {}).sort()) scopeRows.push({ ...s.models[model], kind: s.kind, id: s.id, task: s.task, model });
     }
     const tokens = sumBy(byModel, "total_tokens");
@@ -421,7 +421,13 @@ VIEWS.report = {
       stat("Scopes", `1 + ${subagents}`, "main + subagents"),
       stat("Served from cache", pct(tokens ? sumBy(byModel, "cache_read") / tokens : null), "of all tokens"));
 
-    const duplicates = scopes.filter((s) => s.skipped_duplicates).map((s) => `${s.id}=${s.skipped_duplicates}`).join(", ");
+    const duplicated = scopes.filter((s) => s.skipped_duplicates);
+    const duplicates = duplicated.length
+      ? h("details", { class: "footnote" },
+        h("summary", {}, `Duplicates skipped: ${fmt(sumBy(duplicated, "skipped_duplicates"))} in ${fmt(duplicated.length)} `
+          + `scope${duplicated.length === 1 ? "" : "s"}`),
+        h("div", {}, duplicated.map((s) => `${s.id}=${s.skipped_duplicates}`).join(", ")))
+      : h("p", { class: "footnote" }, "Duplicates skipped: none");
     const usage = h("section", { class: "section" }, sectionHead("Usage per scope", "Main conversation and each subagent"),
       renderTable([
         { key: "id", label: "Scope", render: (r) => (r.kind === "main" ? h("span", { class: "chip main" }, "main") : h("span", { class: "mono" }, r.id)) },
@@ -432,7 +438,7 @@ VIEWS.report = {
         { key: "cache_write", label: "Cache write 5m/1h", num: true, render: cacheWrite, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
         { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
       ], scopeRows, { id: "report-scopes" }),
-      h("p", { class: "footnote" }, `Duplicates skipped: ${duplicates || "none"}`));
+      duplicates);
 
     const showRaw = byModel.some((r) => r.raw_output_tokens != null && r.raw_output_tokens !== r.output);
     const modelColumns = [
