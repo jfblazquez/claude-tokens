@@ -707,7 +707,7 @@ VIEWS.totals = {
       { key: "pct_cost", label: "% cost", num: true, render: (r) => pct(r.pct_cost) },
     ], T.by_model || [], { id: "totals-models", sortKey: "estimated_cost_usd" }));
     const projectTable = h("section", { class: "section" }, sectionHead("Projects by cost"), renderTable([
-      { key: "project", label: "Project", render: (r) => h("span", { class: "mono" }, r.project) },
+      { key: "project", label: "Project", path: true, render: (r) => pathCell(r.project) },
       { key: "conversations", label: "Conversations", num: true, render: (r) => fmt(r.conversations) },
       { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
       { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false, 2) },
