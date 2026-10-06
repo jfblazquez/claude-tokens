@@ -424,8 +424,7 @@ VIEWS.report = {
     const duplicates = scopes.filter((s) => s.skipped_duplicates).map((s) => `${s.id}=${s.skipped_duplicates}`).join(", ");
     const usage = h("section", { class: "section" }, sectionHead("Usage per scope", "Main conversation and each subagent"),
       renderTable([
-        { key: "kind", label: "Scope", render: (r) => h("span", { class: r.kind === "main" ? "chip main" : "chip" }, r.kind) },
-        { key: "id", label: "ID", render: (r) => h("span", { class: "mono" }, r.id) },
+        { key: "id", label: "Scope", render: (r) => (r.kind === "main" ? h("span", { class: "chip main" }, "main") : h("span", { class: "mono" }, r.id)) },
         { key: "task", label: "Task", wrap: true },
         { key: "model", label: "Model", render: (r) => modelCell(r.model) },
         ...tokenColumns(),
