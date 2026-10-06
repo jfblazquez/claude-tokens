@@ -530,12 +530,33 @@ VIEWS.response = {
   },
 };
 
+const sourceLabel = (source) => (source === "main" ? "main" : `subagent ${source.slice(0, 8)}`);
 const sourceChip = (source) => h("span", { class: source === "main" ? "chip main" : "chip", title: source === "main" ? "Main conversation" : `Subagent ${source}` },
-  source === "main" ? "main" : `subagent ${source.slice(0, 8)}`);
+  sourceLabel(source));
 
 function parseStamp(stamp) {
   const d = stamp ? new Date(stamp) : null;
   return d && !Number.isNaN(d.getTime()) ? d : null;
+}
+
+const bashFilter = { id: null, source: "", text: "" };
+
+function bashItems(commands) {
+  const items = [];
+  let day = null;
+  for (const c of commands) {
+    const today = c.when ? c.when.toISOString().slice(0, 10) : "undated";
+    if (today !== day) {
+      items.push(h("li", { class: "day" }, today === "undated" ? "No timestamp" : `${today} (UTC)`));
+      day = today;
+    }
+    items.push(h("li", {},
+      c.when ? h("time", { datetime: c.when.toISOString(), title: `${c.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(c.when))
+        : h("span", { class: "notime" }, "—"),
+      h("div", { class: "desc" }, sourceChip(c.source), c.description ? c.description : h("span", { class: "muted" }, "No description")),
+      h("pre", {}, c.command)));
+  }
+  return items;
 }
 
 VIEWS.bash = {
@@ -546,29 +567,35 @@ VIEWS.bash = {
     return data;
   },
   head: convHead,
-  render(data) {
+  render(data, route) {
     const commands = (data.bash_commands || []).map((c) => ({ ...c, source: c.source || "main", when: parseStamp(c.timestamp) }));
     if (!commands.length) return emptyState("No Bash commands", "Neither the main conversation nor its subagents ran any Bash command.");
-    const items = [];
-    let day = null;
-    for (const c of commands) {
-      const today = c.when ? c.when.toISOString().slice(0, 10) : "undated";
-      if (today !== day) {
-        items.push(h("li", { class: "day" }, today === "undated" ? "No timestamp" : `${today} (UTC)`));
-        day = today;
-      }
-      items.push(h("li", {},
-        c.when ? h("time", { datetime: c.when.toISOString(), title: `${c.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(c.when))
-          : h("span", { class: "notime" }, "—"),
-        h("div", { class: "desc" }, sourceChip(c.source), c.description ? c.description : h("span", { class: "muted" }, "No description")),
-        h("pre", {}, c.command)));
+    const perSource = new Map();
+    for (const c of commands) perSource.set(c.source, (perSource.get(c.source) || 0) + 1);
+    if (bashFilter.id !== route.id || (bashFilter.source && !perSource.has(bashFilter.source))) {
+      Object.assign(bashFilter, { id: route.id, source: "", text: bashFilter.id === route.id ? bashFilter.text : "" });
     }
-    const sources = [...new Set(commands.map((c) => c.source))];
-    const fromMain = commands.filter((c) => c.source === "main").length;
-    return [h("div", { class: "toolbar" }, h("div", { class: "meta" }, "Chronological across the main conversation and its subagents · times in UTC"),
-      h("div", { class: "legend" }, sources.map((s) => h("span", {}, sourceChip(s))))),
-    h("ol", { class: "cmds card" }, items),
-    h("div", { class: "count" }, `${fmt(commands.length)} Bash commands · ${fmt(fromMain)} from main, ${fmt(commands.length - fromMain)} from subagents`)];
+    const fromMain = perSource.get("main") || 0;
+    const list = h("ol", { class: "cmds card" });
+    const count = h("span", { class: "count" });
+    const draw = () => {
+      const q = bashFilter.text.trim().toLowerCase();
+      const shown = commands.filter((c) => (!bashFilter.source || c.source === bashFilter.source)
+        && (!q || c.command.toLowerCase().includes(q) || String(c.description || "").toLowerCase().includes(q)));
+      list.replaceChildren(...(shown.length ? bashItems(shown) : [h("li", { class: "day" }, "No command matches the filter")]));
+      count.textContent = shown.length === commands.length
+        ? `${fmt(commands.length)} Bash commands · ${fmt(fromMain)} from main, ${fmt(commands.length - fromMain)} from subagents`
+        : `${fmt(shown.length)} of ${fmt(commands.length)} Bash commands`;
+    };
+    const source = h("select", { id: "bash-source", "aria-label": "Filter by source", onchange: (e) => { bashFilter.source = e.target.value; draw(); } },
+      h("option", { value: "" }, `All sources (${fmt(commands.length)})`),
+      [...perSource].map(([s, n]) => h("option", { value: s, selected: s === bashFilter.source }, `${sourceLabel(s)} (${fmt(n)})`)));
+    const text = h("input", { id: "bash-filter", type: "search", placeholder: "Command or description", value: bashFilter.text, "aria-label": "Filter commands",
+      oninput: (e) => { bashFilter.text = e.target.value; draw(); } });
+    draw();
+    return [h("div", { class: "meta" }, "Chronological across the main conversation and its subagents · times in UTC"),
+      h("div", { class: "toolbar" }, h("div", { class: "filters" }, h("label", { class: "field" }, "Source", source), h("label", { class: "field" }, "Search", text)), count),
+      list];
   },
 };
 

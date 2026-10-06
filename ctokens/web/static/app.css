@@ -67,8 +67,10 @@ h2 { font-size: var(--t-lg); margin: 0; letter-spacing: -0.01em; }
 .meta b { color: var(--fg); font-weight: 550; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); justify-content: space-between; }
 .field { display: flex; align-items: center; gap: var(--s2); font-size: var(--t-sm); color: var(--muted); }
-.field input { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+.field input, .field select { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 10px; width: 240px; max-width: 60vw; }
+.field select { width: auto; }
+.filters { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s4); }
 .count { color: var(--muted); font-size: var(--t-sm); font-variant-numeric: tabular-nums; }
 .footnote { color: var(--muted); font-size: var(--t-xs); margin: 0; }
 
