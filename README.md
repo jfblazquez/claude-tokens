@@ -233,6 +233,18 @@ python3 claude_tokens.py --serve               # http://127.0.0.1:8765
 python3 claude_tokens.py --serve --port 9000 --pricing prices.json
 ```
 
+The screenshots show invented demo data, not real conversations.
+
+![Totals: cost, tokens and volume, with daily cost by model, model share, projects, activity, tools and skills](docs/images/totals.png)
+
+| Conversations | Usage report |
+|---|---|
+| ![Conversation list with title, project, size and subagents](docs/images/conversations.png) | ![Usage of one conversation per scope and per model](docs/images/usage.png) |
+| **Last response** | **Bash commands** |
+| ![Last response rendered as Markdown](docs/images/last-response.png) | ![Bash commands of the main conversation and its subagents, with source and text filters](docs/images/bash.png) |
+| **Files** | |
+| ![Files read, written and edited, with the sources that touched them](docs/images/files.png) | |
+
 It only listens on `127.0.0.1` and has no authentication. It rejects requests
 whose `Host` is not `localhost` or `127.0.0.1`, and anything but `GET`/`HEAD`.
 It never writes to the projects folder.
@@ -276,5 +288,15 @@ logs):
 python3 -m unittest discover -s tests
 python3 tests/coverage.py              # line coverage of the CLI characterization cases
 python3 tests/golden/refresh.py CASE   # regenerate a golden after a deliberate output change
+```
+
+The README screenshots come from a synthetic projects folder, so they never show
+real conversations. Regenerating them needs Playwright
+(`npm i --no-save playwright && npx playwright install chromium-headless-shell`):
+
+```bash
+python3 tools/demo_projects.py /tmp/demo        # prints the folder and the featured conversation id
+python3 claude_tokens.py --serve --port 8798 --projects-dir /tmp/demo/projects
+node tools/screenshots.js http://127.0.0.1:8798 /tmp/demo/projects <featured id> docs/images
 ```
 
