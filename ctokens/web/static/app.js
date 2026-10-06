@@ -50,6 +50,7 @@ function utcMinute(iso) {
 // Long paths and tool names may wrap after a separator instead of widening their table.
 const breakable = (text) => String(text == null ? "" : text).split(/(?<=\/|__|:)/).flatMap((part, i) => (i ? [h("wbr"), part] : [part]));
 const pathCell = (text) => h("span", { class: "mono" }, breakable(text));
+const pathCol = (key, label) => ({ key, label, cls: "path", render: (r) => pathCell(r[key]) });
 
 function guessedNotice(models) {
   return `~ estimated price: no published rate for ${models.join(", ")}; priced from the newest known model of the same `
@@ -114,7 +115,7 @@ function renderTable(columns, rows, opts = {}) {
     const body = data.map((r) => h("tr", {
       class: cls(opts.onRow && "link"),
       onclick: opts.onRow ? (e) => { if (!e.target.closest("a")) opts.onRow(r); } : null,
-    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.wrap && "wrap", c.path && "path", c.chips && "chips") }, c.render ? c.render(r) : r[c.key]))));
+    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.cls) }, c.render ? c.render(r) : r[c.key]))));
     const foot = opts.footer
       ? h("tfoot", {}, h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: cls(columns[i] && columns[i].num && "num") }, cell))))
       : null;
@@ -318,9 +319,9 @@ VIEWS.list = {
       count.textContent = `${fmt(shown.length)} of ${fmt(rows.length)} conversations`;
       holder.replaceChildren(shown.length ? renderTable([
         { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
-        { key: "title", label: "Title", wrap: true,
+        { key: "title", label: "Title", cls: "wrap",
           render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
-        { key: "project", label: "Project", path: true, render: (r) => pathCell(r.project) },
+        pathCol("project", "Project"),
         { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
         { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
         { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
@@ -421,24 +422,24 @@ VIEWS.report = {
       stat("Scopes", `1 + ${subagents}`, "main + subagents"),
       stat("Served from cache", pct(tokens ? sumBy(byModel, "cache_read") / tokens : null), "of all tokens"));
 
-    const duplicated = scopes.filter((s) => s.skipped_duplicates);
-    const duplicates = duplicated.length
+    const dupScopes = scopes.filter((s) => s.skipped_duplicates);
+    const dupNote = dupScopes.length
       ? h("details", { class: "footnote" },
-        h("summary", {}, `Duplicates skipped: ${fmt(sumBy(duplicated, "skipped_duplicates"))} in ${fmt(duplicated.length)} `
-          + `scope${duplicated.length === 1 ? "" : "s"}`),
-        h("div", {}, duplicated.map((s) => `${s.id}=${s.skipped_duplicates}`).join(", ")))
+        h("summary", {}, `Duplicates skipped: ${fmt(sumBy(dupScopes, "skipped_duplicates"))} in ${fmt(dupScopes.length)} `
+          + `scope${dupScopes.length === 1 ? "" : "s"}`),
+        h("div", {}, dupScopes.map((s) => `${s.id}=${s.skipped_duplicates}`).join(", ")))
       : h("p", { class: "footnote" }, "Duplicates skipped: none");
     const usage = h("section", { class: "section" }, sectionHead("Usage per scope", "Main conversation and each subagent"),
       renderTable([
         { key: "id", label: "Scope", render: (r) => (r.kind === "main" ? h("span", { class: "chip main" }, "main") : h("span", { class: "mono" }, r.id)) },
-        { key: "task", label: "Task", wrap: true },
+        { key: "task", label: "Task", cls: "wrap" },
         { key: "model", label: "Model", render: (r) => modelCell(r.model) },
         ...tokenColumns(),
         { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
         { key: "cache_write", label: "Cache write 5m/1h", num: true, render: cacheWrite, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
         { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
       ], scopeRows, { id: "report-scopes" }),
-      duplicates);
+      dupNote);
 
     const showRaw = byModel.some((r) => r.raw_output_tokens != null && r.raw_output_tokens !== r.output);
     const modelColumns = [
@@ -578,9 +579,8 @@ VIEWS.bash = {
     if (!commands.length) return emptyState("No Bash commands", "Neither the main conversation nor its subagents ran any Bash command.");
     const perSource = new Map();
     for (const c of commands) perSource.set(c.source, (perSource.get(c.source) || 0) + 1);
-    if (bashFilter.id !== route.id || (bashFilter.source && !perSource.has(bashFilter.source))) {
-      Object.assign(bashFilter, { id: route.id, source: "", text: bashFilter.id === route.id ? bashFilter.text : "" });
-    }
+    if (bashFilter.id !== route.id) Object.assign(bashFilter, { id: route.id, source: "", text: "" });
+    if (!perSource.has(bashFilter.source)) bashFilter.source = "";
     const fromMain = perSource.get("main") || 0;
     const list = h("ol", { class: "cmds card" });
     const count = h("span", { class: "count" });
@@ -620,11 +620,11 @@ VIEWS.files = {
     if (!rows.length) return emptyState("No files touched", "Neither the main conversation nor its subagents read, wrote or edited a file.");
     return [h("div", { class: "meta" }, "One row per file · counts add up every source that touched it"),
       renderTable([
-        { key: "file", label: "File", path: true, render: (r) => pathCell(r.file) },
+        pathCol("file", "File"),
         { key: "Read", label: "Read", num: true, render: (r) => fmt(r.Read) },
         { key: "Write", label: "Write", num: true, render: (r) => fmt(r.Write) },
         { key: "Edit", label: "Edit", num: true, render: (r) => fmt(r.Edit) },
-        { key: "sources", label: "Sources", chips: true, sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
+        { key: "sources", label: "Sources", cls: "chips", sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
       ], rows, { id: "files", sortKey: "file", dir: 1 }),
       h("div", { class: "count" }, `${fmt(rows.length)} distinct file${rows.length === 1 ? "" : "s"}`)];
   },
@@ -740,7 +740,7 @@ VIEWS.totals = {
       { key: "pct_cost", label: "% cost", num: true, render: (r) => pct(r.pct_cost) },
     ], T.by_model || [], { id: "totals-models", sortKey: "estimated_cost_usd" }));
     const projectTable = h("section", { class: "section" }, sectionHead("Projects by cost"), renderTable([
-      { key: "project", label: "Project", path: true, render: (r) => pathCell(r.project) },
+      pathCol("project", "Project"),
       { key: "conversations", label: "Conversations", num: true, render: (r) => fmt(r.conversations) },
       { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
       { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false, 2) },
@@ -749,7 +749,7 @@ VIEWS.totals = {
     const skillRows = topEntries(T.skills, Infinity).map(([skill, n]) => ({ skill, n }));
     const usageTables = h("div", { class: "charts" },
       h("section", { class: "section" }, sectionHead("Top tools"), toolRows.length ? renderTable([
-        { key: "tool", label: "Tool", wrap: true, render: (r) => breakable(r.tool) },
+        { key: "tool", label: "Tool", cls: "wrap", render: (r) => breakable(r.tool) },
         { key: "calls", label: "Calls", num: true, render: (r) => fmt(r.calls) },
         { key: "share", label: "% of calls", num: true, render: (r) => pct(r.share) },
       ], toolRows, { id: "totals-tools", sortKey: "calls" }) : emptyState("No tool calls", "No conversation called a tool.")),
@@ -773,9 +773,9 @@ function drawCharts(T) {
   const guessed = new Set(T.guessed_price_models || []);
   // Chart.js groups thousands by browser locale; ticks use the same separator as the tables instead.
   const tickNum = (v) => (Number.isInteger(v) ? fmt(v) : String(v));
-  const axis = (title, extra = {}) => ({
+  const axis = (title, extra = {}, ticks = {}) => ({
     grid: { color: grid, drawTicks: false }, border: { color: grid },
-    ticks: { color: fg, padding: 6, maxRotation: 0, autoSkipPadding: 10, callback: tickNum },
+    ticks: { color: fg, padding: 6, maxRotation: 0, autoSkipPadding: 10, ...ticks },
     title: { display: !!title, text: title, color: fg }, ...extra,
   });
   const base = { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } } };
@@ -802,8 +802,8 @@ function drawCharts(T) {
       backgroundColor: colorOf(m), borderRadius: 2, maxBarThickness: 22,
     })) },
     options: { ...base,
-      scales: { x: axis("Day (UTC)", { stacked: true, ticks: { color: fg, maxRotation: 0, autoSkipPadding: 10 } }),
-        y: axis(null, { stacked: true, border: { display: false }, ticks: { color: fg, padding: 6, callback: (v) => `$${tickNum(v)}` } }) },
+      scales: { x: axis("Day (UTC)", { stacked: true }),
+        y: axis(null, { stacked: true, border: { display: false } }, { callback: (v) => `$${tickNum(v)}` }) },
       plugins: { legend: { display: false }, tooltip: { mode: "index", filter: (i) => i.raw > 0, callbacks: {
         title: dayTitle,
         label: (i) => {
@@ -821,7 +821,7 @@ function drawCharts(T) {
       backgroundColor: models.map((m) => colorOf(m)), borderRadius: 3, maxBarThickness: 18,
     }] },
     options: { ...base, indexAxis: "y",
-      scales: { x: axis(title, { min: 0, max: 100, ticks: { color: fg, callback: (v) => `${v}%` } }),
+      scales: { x: axis(title, { min: 0, max: 100 }, { callback: (v) => `${v}%` }),
         y: { grid: { display: false }, border: { display: false }, ticks: { color: fg } } },
       plugins: { legend: { display: false }, tooltip: { callbacks: { title: (items) => models[items[0].dataIndex], label: (i) => ` ${i.raw.toFixed(1)}%` } } } },
   }, models.length ? null : "No usage");
@@ -829,24 +829,27 @@ function drawCharts(T) {
   share("c-share-tok", "pct_tokens", "% of tokens");
 
   // Chart.js clips y labels that do not fit, so long names are shortened in the middle; tooltips keep the full name.
-  const shortLabel = (name, max = 26) => (name.length > max ? `${name.slice(0, 10)}…${name.slice(-(max - 11))}` : name);
-  const logAxis = { type: "logarithmic", ticks: { color: fg, padding: 6, maxRotation: 0,
-    callback: (v) => (Number.isInteger(Math.log10(v)) ? fmt(v) : "") } };
-  const hbar = (id, names, values, color, format, title, fullNames, empty, log) => place(id, {
+  const shortLabel = (name) => (name.length > 26 ? `${name.slice(0, 10)}…${name.slice(-15)}` : name);
+  const logTick = (v) => (Number.isInteger(Math.log10(v)) ? fmt(v) : "");
+  const hbar = (id, { names, values, color, format, title, fullNames = names, empty, log = false }) => place(id, {
     type: "bar",
-    data: { labels: names.map((n) => shortLabel(n)), datasets: [{ data: values, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
+    data: { labels: names.map(shortLabel), datasets: [{ data: values, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
     options: { ...base, indexAxis: "y",
-      scales: { x: axis(title, log ? logAxis : {}), y: { grid: { display: false }, border: { display: false }, ticks: { color: fg, autoSkip: false } } },
+      scales: { x: axis(title, log ? { type: "logarithmic" } : {}, { callback: log ? logTick : tickNum }),
+        y: { grid: { display: false }, border: { display: false }, ticks: { color: fg, autoSkip: false } } },
       plugins: { legend: { display: false }, tooltip: { callbacks: {
-        title: (items) => (fullNames || names)[items[0].dataIndex], label: (i) => ` ${format(i.raw)}` } } } },
+        title: (items) => fullNames[items[0].dataIndex], label: (i) => ` ${format(i.raw)}` } } } },
   }, values.length ? null : empty);
 
   const projects = [...(T.projects || [])].sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd).slice(0, 15);
-  hbar("c-projects", projects.map((p) => String(p.project).split("/").filter(Boolean).pop() || p.project),
-    projects.map((p) => p.estimated_cost_usd), accent, (v) => moneyShort(v, false), "Cost (USD)", projects.map((p) => p.project), "No projects");
+  hbar("c-projects", { names: projects.map((p) => String(p.project).split("/").filter(Boolean).pop() || p.project),
+    values: projects.map((p) => p.estimated_cost_usd), color: accent, format: (v) => moneyShort(v, false), title: "Cost (USD)",
+    fullNames: projects.map((p) => p.project), empty: "No projects" });
   const tools = topEntries(T.tools), skills = topEntries(T.skills);
-  hbar("c-tools", tools.map((t) => t[0]), tools.map((t) => t[1]), accent, fmt, "Tool calls (log scale)", null, "No tool calls", true);
-  hbar("c-skills", skills.map((t) => t[0]), skills.map((t) => t[1]), cssVar("--m5"), fmt, "Invocations", null, "No skills used");
+  hbar("c-tools", { names: tools.map((t) => t[0]), values: tools.map((t) => t[1]), color: accent, format: fmt,
+    title: "Tool calls (log scale)", empty: "No tool calls", log: true });
+  hbar("c-skills", { names: skills.map((t) => t[0]), values: skills.map((t) => t[1]), color: cssVar("--m5"), format: fmt,
+    title: "Invocations", empty: "No skills used" });
 
   place("c-activity", {
     type: "line",
@@ -855,8 +858,8 @@ function drawCharts(T) {
       tension: 0.3, pointRadius: days.map((_, i) => (i === days.length - 1 ? 4 : 0)), pointBackgroundColor: accent, borderWidth: 2,
     }] },
     options: { ...base,
-      scales: { x: axis("Day (UTC)", { ticks: { color: fg, maxRotation: 0, autoSkipPadding: 10 } }),
-        y: axis(null, { beginAtZero: true, border: { display: false }, ticks: { color: fg, padding: 6, precision: 0, callback: (v) => fmt(v) } }) },
+      scales: { x: axis("Day (UTC)"),
+        y: axis(null, { beginAtZero: true, border: { display: false } }, { precision: 0, callback: tickNum }) },
       plugins: { legend: { display: false }, tooltip: { callbacks: { title: dayTitle, label: (i) => ` ${fmt(i.raw)} responses` } } } },
   }, days.length ? null : "No dated usage");
 
