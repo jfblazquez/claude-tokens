@@ -738,8 +738,11 @@ function drawCharts(T) {
   Chart.defaults.color = fg;
   const charts = [];
   const guessed = new Set(T.guessed_price_models || []);
+  // Chart.js groups thousands by browser locale; ticks use the same separator as the tables instead.
+  const tickNum = (v) => (Number.isInteger(v) ? fmt(v) : String(v));
   const axis = (title, extra = {}) => ({
-    grid: { color: grid, drawTicks: false }, border: { color: grid }, ticks: { color: fg, padding: 6, maxRotation: 0, autoSkipPadding: 10 },
+    grid: { color: grid, drawTicks: false }, border: { color: grid },
+    ticks: { color: fg, padding: 6, maxRotation: 0, autoSkipPadding: 10, callback: tickNum },
     title: { display: !!title, text: title, color: fg }, ...extra,
   });
   const base = { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } } };
@@ -767,7 +770,7 @@ function drawCharts(T) {
     })) },
     options: { ...base,
       scales: { x: axis("Day (UTC)", { stacked: true, ticks: { color: fg, maxRotation: 0, autoSkipPadding: 10 } }),
-        y: axis(null, { stacked: true, border: { display: false }, ticks: { color: fg, padding: 6, callback: (v) => `$${v}` } }) },
+        y: axis(null, { stacked: true, border: { display: false }, ticks: { color: fg, padding: 6, callback: (v) => `$${tickNum(v)}` } }) },
       plugins: { legend: { display: false }, tooltip: { mode: "index", filter: (i) => i.raw > 0, callbacks: {
         title: dayTitle,
         label: (i) => {
