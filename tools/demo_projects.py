@@ -6,6 +6,8 @@ import json
 import os
 import random
 import sys
+import uuid
+from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,33 +16,32 @@ START = datetime(2026, 9, 7, tzinfo=timezone.utc)
 DAYS = 30
 FEATURED_TITLE = "Add rate limiting to the public API"
 
-PROJECTS = {
-    "/home/dev/projects/api-gateway": ["src/router.py", "src/middleware/auth.py", "src/middleware/rate_limit.py",
-                                       "src/cache.py", "tests/test_router.py", "tests/test_rate_limit.py", "README.md"],
-    "/home/dev/projects/billing-service": ["billing/invoices.py", "billing/ledger.py", "billing/exports.py",
-                                           "tests/test_ledger.py", "migrations/0042_invoice_status.sql"],
-    "/home/dev/projects/web-dashboard": ["src/App.tsx", "src/pages/Usage.tsx", "src/components/Chart.tsx",
-                                         "src/api/client.ts", "package.json"],
-    "/home/dev/projects/data-pipeline": ["pipeline/ingest.py", "pipeline/transform.py", "dags/daily_rollup.py",
-                                         "tests/test_transform.py"],
-    "/home/dev/projects/mobile-app": ["lib/main.dart", "lib/screens/settings.dart", "lib/services/sync.dart",
-                                      "pubspec.yaml"],
-    "/home/dev/projects/infra": ["terraform/main.tf", "terraform/modules/db/main.tf", "k8s/deployment.yaml",
-                                 ".github/workflows/ci.yml"],
-}
-TITLES = {
-    "/home/dev/projects/api-gateway": ["Fix flaky router tests", "Cache invalidation on config reload",
-                                       "Migrate auth middleware to async", "Structured request logging"],
-    "/home/dev/projects/billing-service": ["Retry policy for ledger exports", "Invoice status migration",
-                                           "Investigate rounding in VAT totals", "Monthly export to CSV"],
-    "/home/dev/projects/web-dashboard": ["Dark mode for the usage page", "Paginate the invoices table",
-                                         "Replace chart library", "Fix layout on small screens"],
-    "/home/dev/projects/data-pipeline": ["Backfill September rollups", "Speed up the transform step",
-                                         "Schema drift alerts"],
-    "/home/dev/projects/mobile-app": ["Offline sync conflicts", "Settings screen redesign"],
-    "/home/dev/projects/infra": ["Terraform plan for the new database", "CI cache for dependencies"],
-}
-WEIGHTS = [5, 3, 3, 2, 1, 1]
+Project = namedtuple("Project", "cwd weight files titles")
+PROJECTS = [
+    Project("/home/dev/projects/api-gateway", 5,
+            ["src/router.py", "src/middleware/auth.py", "src/middleware/rate_limit.py", "src/cache.py",
+             "tests/test_router.py", "tests/test_rate_limit.py", "README.md"],
+            ["Fix flaky router tests", "Cache invalidation on config reload", "Migrate auth middleware to async",
+             "Structured request logging"]),
+    Project("/home/dev/projects/billing-service", 3,
+            ["billing/invoices.py", "billing/ledger.py", "billing/exports.py", "tests/test_ledger.py",
+             "migrations/0042_invoice_status.sql"],
+            ["Retry policy for ledger exports", "Invoice status migration", "Investigate rounding in VAT totals",
+             "Monthly export to CSV"]),
+    Project("/home/dev/projects/web-dashboard", 3,
+            ["src/App.tsx", "src/pages/Usage.tsx", "src/components/Chart.tsx", "src/api/client.ts", "package.json"],
+            ["Dark mode for the usage page", "Paginate the invoices table", "Replace chart library",
+             "Fix layout on small screens"]),
+    Project("/home/dev/projects/data-pipeline", 2,
+            ["pipeline/ingest.py", "pipeline/transform.py", "dags/daily_rollup.py", "tests/test_transform.py"],
+            ["Backfill September rollups", "Speed up the transform step", "Schema drift alerts"]),
+    Project("/home/dev/projects/mobile-app", 1,
+            ["lib/main.dart", "lib/screens/settings.dart", "lib/services/sync.dart", "pubspec.yaml"],
+            ["Offline sync conflicts", "Settings screen redesign"]),
+    Project("/home/dev/projects/infra", 1,
+            ["terraform/main.tf", "terraform/modules/db/main.tf", "k8s/deployment.yaml", ".github/workflows/ci.yml"],
+            ["Terraform plan for the new database", "CI cache for dependencies"]),
+]
 BASH = [
     ("git status --short", "Show working tree status"),
     ("git log --oneline -15", "Show recent commits"),
@@ -140,32 +141,27 @@ def write(path, events, when):
     os.utime(path, (when.timestamp(), when.timestamp()))
 
 
-def conversation(rnd, root, cwd, title, day, featured=False):
-    model = "claude-opus-5" if day < 14 and rnd.random() < 0.7 else rnd.choices(
-        ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"], [6, 3, 1])[0]
+def conversation(rnd, root, project, title, day, model, steps, skill, tasks, last):
     start = START + timedelta(days=day, hours=rnd.randint(7, 18), minutes=rnd.randint(0, 59))
-    log = Log(rnd, cwd, "claude-opus-5-5" if featured else model, start)
+    log = Log(rnd, project.cwd, model, start)
     log.user(title)
     log.events.append({"type": "ai-title", "aiTitle": title})
-    files = PROJECTS[cwd]
-    work(rnd, log, files, 40 if featured else rnd.randint(6, 45))
-    if featured or rnd.random() < 0.35:
-        log.tool("Skill", skill=rnd.choice(SKILLS[:3]) if featured else rnd.choice(SKILLS))
-    conv_id = f"{rnd.getrandbits(32):08x}-{rnd.getrandbits(16):04x}-4{rnd.getrandbits(12):03x}-8{rnd.getrandbits(12):03x}-{rnd.getrandbits(48):012x}"
-    folder = root / cwd.replace("/", "-")
-    subagents = 5 if featured else rnd.choices([0, 0, 0, 1, 2, 3], k=1)[0]
-    for s in range(subagents):
+    work(rnd, log, project.files, steps[0])
+    if skill:
+        log.tool("Skill", skill=skill)
+    conv_id = str(uuid.UUID(int=rnd.getrandbits(128), version=4))
+    folder = root / project.cwd.replace("/", "-")
+    for task in tasks:
         sub_id = f"a{rnd.getrandbits(64):016x}"
-        task = SUBAGENT_TASKS[s % len(SUBAGENT_TASKS)] if featured else rnd.choice(SUBAGENT_TASKS)
         log.tool("Agent", description=task, prompt=task)
-        sub = Log(rnd, cwd, rnd.choice(["claude-sonnet-5-5", "claude-haiku-4-5", "claude-opus-5-5"]), log.t)
+        sub = Log(rnd, project.cwd, rnd.choice(["claude-sonnet-5-5", "claude-haiku-4-5", "claude-opus-5-5"]), log.t)
         sub.user(task)
-        work(rnd, sub, files, rnd.randint(4, 14))
+        work(rnd, sub, project.files, rnd.randint(4, 14))
         sub_dir = folder / conv_id / "subagents"
         write(sub_dir / f"agent-{sub_id}.jsonl", sub.events, sub.t)
         (sub_dir / f"agent-{sub_id}.meta.json").write_text(json.dumps({"description": task}), encoding="utf-8")
-    work(rnd, log, files, 6 if featured else rnd.randint(1, 6))
-    log.respond([{"type": "text", "text": LAST_RESPONSE if featured else f"Done: {title.lower()}."}])
+    work(rnd, log, project.files, steps[1])
+    log.respond([{"type": "text", "text": last}])
     write(folder / f"{conv_id}.jsonl", log.events, log.t)
     return conv_id
 
@@ -173,14 +169,19 @@ def conversation(rnd, root, cwd, title, day, featured=False):
 def build(base):
     rnd = random.Random(SEED)
     root = Path(base) / "projects"
-    cwds = list(PROJECTS)
     for _ in range(48):
         day = rnd.randint(0, DAYS - 2)
         if rnd.random() < 0.25 and day % 7 in (5, 6):
             continue
-        cwd = rnd.choices(cwds, WEIGHTS)[0]
-        conversation(rnd, root, cwd, rnd.choice(TITLES[cwd]), day)
-    featured = conversation(rnd, root, cwds[0], FEATURED_TITLE, DAYS - 1, featured=True)
+        project = rnd.choices(PROJECTS, [p.weight for p in PROJECTS])[0]
+        title = rnd.choice(project.titles)
+        model = "claude-opus-5" if day < 14 and rnd.random() < 0.7 else rnd.choices(
+            ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"], [6, 3, 1])[0]
+        conversation(rnd, root, project, title, day, model, steps=(rnd.randint(6, 45), rnd.randint(1, 6)),
+                     skill=rnd.choice(SKILLS) if rnd.random() < 0.35 else None,
+                     tasks=rnd.choices(SUBAGENT_TASKS, k=rnd.choice([0, 0, 0, 1, 2, 3])), last=f"Done: {title.lower()}.")
+    featured = conversation(rnd, root, PROJECTS[0], FEATURED_TITLE, DAYS - 1, "claude-opus-5-5", steps=(40, 6),
+                            skill=rnd.choice(SKILLS[:3]), tasks=SUBAGENT_TASKS[:5], last=LAST_RESPONSE)
     return root, featured
 
 
