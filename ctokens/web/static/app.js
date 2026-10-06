@@ -694,7 +694,7 @@ VIEWS.totals = {
       h("div", { class: "chart-stack" }, legend, chartBox("c-daily", "Daily cost by model", "tall")), true),
       chartCard("Model share", "Percentage of cost and of tokens per model",
         h("div", { class: "pair" }, chartBox("c-share-cost", "Percentage of cost per model"), chartBox("c-share-tok", "Percentage of tokens per model"))),
-      chartCard("Projects by cost", "Top 15", chartBox("c-projects", "Projects by cost")),
+      chartCard("Projects by cost", "Top 15", chartBox("c-projects", "Projects by cost", "tall")),
       chartCard("Daily activity", "Assistant responses per day (UTC)", chartBox("c-activity", "Assistant responses per day")),
       chartCard("Tools and skills", "Top 15 tool calls · skill invocations",
         h("div", { class: "pair" }, chartBox("c-tools", "Tool calls"), chartBox("c-skills", "Skill invocations"))));
@@ -796,7 +796,7 @@ function drawCharts(T) {
     type: "bar",
     data: { labels: names, datasets: [{ data: values, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
     options: { ...base, indexAxis: "y",
-      scales: { x: axis(title), y: { grid: { display: false }, border: { display: false }, ticks: { color: fg } } },
+      scales: { x: axis(title), y: { grid: { display: false }, border: { display: false }, ticks: { color: fg, autoSkip: false } } },
       plugins: { legend: { display: false }, tooltip: { callbacks: {
         title: (items) => (fullNames || names)[items[0].dataIndex], label: (i) => ` ${format(i.raw)}` } } } },
   }, values.length ? null : empty);
