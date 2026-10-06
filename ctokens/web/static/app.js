@@ -695,9 +695,9 @@ VIEWS.totals = {
       chartCard("Model share", "Percentage of cost and of tokens per model",
         h("div", { class: "pair" }, chartBox("c-share-cost", "Percentage of cost per model"), chartBox("c-share-tok", "Percentage of tokens per model"))),
       chartCard("Projects by cost", "Top 15", chartBox("c-projects", "Projects by cost", "tall")),
-      chartCard("Daily activity", "Assistant responses per day (UTC)", chartBox("c-activity", "Assistant responses per day")),
-      chartCard("Tools and skills", "Top 15 tool calls · skill invocations",
-        h("div", { class: "pair" }, chartBox("c-tools", "Tool calls"), chartBox("c-skills", "Skill invocations"))));
+      chartCard("Daily activity", "Assistant responses per day (UTC)", chartBox("c-activity", "Assistant responses per day"), true),
+      chartCard("Tools and skills", "Top 15 tool calls (log scale) · skill invocations",
+        h("div", { class: "pair" }, chartBox("c-tools", "Tool calls", "tall"), chartBox("c-skills", "Skill invocations", "tall")), true));
 
     const modelTable = h("section", { class: "section" }, sectionHead("Usage by model"), renderTable([
       { key: "model", label: "Model", render: (r) => modelCell(r.model) },
@@ -739,7 +739,7 @@ function drawCharts(T) {
   const charts = [];
   const guessed = new Set(T.guessed_price_models || []);
   const axis = (title, extra = {}) => ({
-    grid: { color: grid, drawTicks: false }, border: { color: grid }, ticks: { color: fg, padding: 6 },
+    grid: { color: grid, drawTicks: false }, border: { color: grid }, ticks: { color: fg, padding: 6, maxRotation: 0, autoSkipPadding: 10 },
     title: { display: !!title, text: title, color: fg }, ...extra,
   });
   const base = { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } } };
@@ -792,11 +792,15 @@ function drawCharts(T) {
   share("c-share-cost", "pct_cost", "% of cost");
   share("c-share-tok", "pct_tokens", "% of tokens");
 
-  const hbar = (id, names, values, color, format, title, fullNames, empty) => place(id, {
+  // Chart.js clips y labels that do not fit, so long names are shortened in the middle; tooltips keep the full name.
+  const shortLabel = (name, max = 26) => (name.length > max ? `${name.slice(0, 10)}…${name.slice(-(max - 11))}` : name);
+  const logAxis = { type: "logarithmic", ticks: { color: fg, padding: 6, maxRotation: 0,
+    callback: (v) => (Number.isInteger(Math.log10(v)) ? fmt(v) : "") } };
+  const hbar = (id, names, values, color, format, title, fullNames, empty, log) => place(id, {
     type: "bar",
-    data: { labels: names, datasets: [{ data: values, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
+    data: { labels: names.map((n) => shortLabel(n)), datasets: [{ data: values, backgroundColor: color, borderRadius: 3, maxBarThickness: 16 }] },
     options: { ...base, indexAxis: "y",
-      scales: { x: axis(title), y: { grid: { display: false }, border: { display: false }, ticks: { color: fg, autoSkip: false } } },
+      scales: { x: axis(title, log ? logAxis : {}), y: { grid: { display: false }, border: { display: false }, ticks: { color: fg, autoSkip: false } } },
       plugins: { legend: { display: false }, tooltip: { callbacks: {
         title: (items) => (fullNames || names)[items[0].dataIndex], label: (i) => ` ${format(i.raw)}` } } } },
   }, values.length ? null : empty);
@@ -805,7 +809,7 @@ function drawCharts(T) {
   hbar("c-projects", projects.map((p) => String(p.project).split("/").filter(Boolean).pop() || p.project),
     projects.map((p) => p.estimated_cost_usd), accent, (v) => moneyShort(v, false), "Cost (USD)", projects.map((p) => p.project), "No projects");
   const tools = topEntries(T.tools), skills = topEntries(T.skills);
-  hbar("c-tools", tools.map((t) => t[0]), tools.map((t) => t[1]), accent, fmt, "Tool calls", null, "No tool calls");
+  hbar("c-tools", tools.map((t) => t[0]), tools.map((t) => t[1]), accent, fmt, "Tool calls (log scale)", null, "No tool calls", true);
   hbar("c-skills", skills.map((t) => t[0]), skills.map((t) => t[1]), cssVar("--m5"), fmt, "Invocations", null, "No skills used");
 
   place("c-activity", {
