@@ -47,6 +47,10 @@ function utcMinute(iso) {
   return Number.isNaN(d.getTime()) ? String(iso || "") : d.toISOString().slice(0, 16).replace("T", " ");
 }
 
+// Long paths and tool names may wrap after a separator instead of widening their table.
+const breakable = (text) => String(text == null ? "" : text).split(/(?<=\/|__|:)/).flatMap((part, i) => (i ? [h("wbr"), part] : [part]));
+const pathCell = (text) => h("span", { class: "mono" }, breakable(text));
+
 function guessedNotice(models) {
   return `~ estimated price: no published rate for ${models.join(", ")}; priced from the newest known model of the same `
     + "family. Use --pricing to set the real rate.";
@@ -110,7 +114,7 @@ function renderTable(columns, rows, opts = {}) {
     const body = data.map((r) => h("tr", {
       class: cls(opts.onRow && "link"),
       onclick: opts.onRow ? (e) => { if (!e.target.closest("a")) opts.onRow(r); } : null,
-    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.wrap && "wrap") }, c.render ? c.render(r) : r[c.key]))));
+    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.wrap && "wrap", c.path && "path") }, c.render ? c.render(r) : r[c.key]))));
     const foot = opts.footer
       ? h("tfoot", {}, h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: cls(columns[i] && columns[i].num && "num") }, cell))))
       : null;
@@ -316,7 +320,7 @@ VIEWS.list = {
         { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
         { key: "title", label: "Title", wrap: true,
           render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
-        { key: "project", label: "Project", render: (r) => h("span", { class: "mono" }, r.project) },
+        { key: "project", label: "Project", path: true, render: (r) => pathCell(r.project) },
         { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
         { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
         { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
