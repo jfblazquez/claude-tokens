@@ -165,7 +165,7 @@ tr.total td { font-weight: 650; background: var(--surface-2); border-top: 1px so
 .md code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
 .md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r); padding: var(--s3) var(--s4); overflow-x: auto; }
 .md pre code, .md pre code.hljs { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; overflow-wrap: normal; }
-.md table { width: auto; margin: var(--s3) 0; border: 1px solid var(--border); display: block; overflow-x: auto; }
+.md table { width: max-content; max-width: 100%; margin: var(--s3) 0; border: 1px solid var(--border); display: block; overflow-x: auto; }
 .md th { text-transform: none; letter-spacing: 0; font-size: var(--t-sm); }
 .md td { white-space: normal; }
 .md hr { border: 0; border-top: 1px solid var(--border); }
