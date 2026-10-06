@@ -716,7 +716,7 @@ VIEWS.totals = {
     const skillRows = topEntries(T.skills, Infinity).map(([skill, n]) => ({ skill, n }));
     const usageTables = h("div", { class: "charts" },
       h("section", { class: "section" }, sectionHead("Top tools"), toolRows.length ? renderTable([
-        { key: "tool", label: "Tool" },
+        { key: "tool", label: "Tool", wrap: true, render: (r) => breakable(r.tool) },
         { key: "calls", label: "Calls", num: true, render: (r) => fmt(r.calls) },
         { key: "share", label: "% of calls", num: true, render: (r) => pct(r.share) },
       ], toolRows, { id: "totals-tools", sortKey: "calls" }) : emptyState("No tool calls", "No conversation called a tool.")),
