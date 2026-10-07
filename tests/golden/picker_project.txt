@@ -1,0 +1,9 @@
+--- exit 0
+--- stdout
+ # | Date             | GUID                                 | Size KB | Subagents | Project                            | Title 
+---+------------------+--------------------------------------+---------+-----------+------------------------------------+-------
+ 1 | 2026-09-21 14:26 | 22222222-2222-4222-8222-222222222222 | 1       | 0         | /home/dev/projects/billing-service |       
+ 2 | 2026-09-21 14:16 | 33333333-3333-4333-8333-333333333333 | 1       | 0         | /home/dev/projects/billing-service |       
+--- stderr
+
+No TTY: pass the conversation path explicitly.

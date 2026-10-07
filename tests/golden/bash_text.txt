@@ -1,0 +1,16 @@
+--- exit 0
+--- stdout
+# Show working tree status
+$ git status --short
+
+# [subagent a1b2c3d4e5f6a7b8c] Find call sites
+$ grep -rn 'invalidate(' src/
+
+# Run tests
+$ python3 -m unittest -v
+
+# [subagent b2c3d4e5f6a7b8c9d] Run cache tests
+$ python3 -m unittest tests.test_cache
+
+4 Bash command(s).
+--- stderr

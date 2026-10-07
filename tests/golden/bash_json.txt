@@ -1,0 +1,31 @@
+--- exit 0
+--- stdout
+{
+  "bash_commands": [
+    {
+      "command": "git status --short",
+      "description": "Show working tree status",
+      "source": "main",
+      "timestamp": "2026-09-28T10:00:05.100Z"
+    },
+    {
+      "command": "grep -rn 'invalidate(' src/",
+      "description": "Find call sites",
+      "source": "a1b2c3d4e5f6a7b8c",
+      "timestamp": "2026-09-28T10:01:02.000Z"
+    },
+    {
+      "command": "python3 -m unittest -v",
+      "description": "Run tests",
+      "source": "main",
+      "timestamp": "2026-09-30T00:00:10.100Z"
+    },
+    {
+      "command": "python3 -m unittest tests.test_cache",
+      "description": "Run cache tests",
+      "source": "b2c3d4e5f6a7b8c9d",
+      "timestamp": null
+    }
+  ]
+}
+--- stderr

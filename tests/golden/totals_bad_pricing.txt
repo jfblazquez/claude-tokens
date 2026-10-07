@@ -1,0 +1,9 @@
+--- exit 2
+--- stdout
+--- stderr
+warning: <FIXTURES>/projects/-home-dev-projects-billing-service/22222222-2222-4222-8222-222222222222.jsonl:3: Expecting property name enclosed in double quotes
+usage: claude_tokens.py [-h] [--projects-dir PROJECTS_DIR] [--project PROJECT] [--totals] [--pricing PRICING] [--json]
+                        [--cold-summary-output COLD_SUMMARY_OUTPUT] [--context-window CONTEXT_WINDOW]
+                        [--last-response] [--bash] [--files] [--serve] [--port PORT]
+                        [conversation]
+claude_tokens.py: error: archivo de precios inválido: could not convert string to float: 'cheap'

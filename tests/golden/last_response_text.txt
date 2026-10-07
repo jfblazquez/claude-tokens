@@ -1,0 +1,13 @@
+--- exit 0
+--- stdout
+## Request cache now invalidates on reload
+
+Entries are keyed by the **config generation** and `reload()` bumps it.
+
+```python
+def get(self, key):
+    return self._entries.get(key)
+```
+
+<script>alert('xss')</script>See the <a href="javascript:alert(1)">cache notes</a>.
+--- stderr

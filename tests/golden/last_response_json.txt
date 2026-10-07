@@ -1,0 +1,6 @@
+--- exit 0
+--- stdout
+{
+  "last_response": "## Request cache now invalidates on reload\n\nEntries are keyed by the **config generation** and `reload()` bumps it.\n\n```python\ndef get(self, key):\n    return self._entries.get(key)\n```\n\n<script>alert('xss')</script>See the <a href=\"javascript:alert(1)\">cache notes</a>."
+}
+--- stderr

@@ -1,0 +1,32 @@
+--- exit 0
+--- stdout
+## Request cache now invalidates on reload
+
+Entries are keyed by the **config generation** and `reload()` bumps it.
+
+```python
+def get(self, key):
+    return self._entries.get(key)
+```
+
+<script>alert('xss')</script>See the <a href="javascript:alert(1)">cache notes</a>.
+# Show working tree status
+$ git status --short
+
+# [subagent a1b2c3d4e5f6a7b8c] Find call sites
+$ grep -rn 'invalidate(' src/
+
+# Run tests
+$ python3 -m unittest -v
+
+# [subagent b2c3d4e5f6a7b8c9d] Run cache tests
+$ python3 -m unittest tests.test_cache
+
+4 Bash command(s).
+ File                                                | Read | Write | Edit | Sources                 
+-----------------------------------------------------+------+-------+------+-------------------------
+ /home/dev/projects/api-gateway/src/cache.py         | 2    | 0     | 1    | main, a1b2c3d4e5f6a7b8c 
+ /home/dev/projects/api-gateway/tests/test_reload.py | 0    | 1     | 0    | b2c3d4e5f6a7b8c9d       
+
+2 distinct file(s).
+--- stderr

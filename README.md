@@ -115,6 +115,17 @@ Metrics reported: time window (span, active days, busiest day), total cost and
 cost per conversation, tokens generated, cache-hit ratio, per-model token/cost
 share, tool-call distribution, skills invoked, and per-project cost.
 
+Each tool call (and skill invocation) is counted once by its `tool_use` id. Claude
+Code writes one event per content block of a response, all with the same
+`message.id`, so counting only the first event of each response would miss most
+tool calls.
+
+`--totals --json` also includes a `daily` series: for each Day (a UTC calendar
+day) the assistant responses, tokens and estimated cost, broken down by model.
+Records without a timestamp go to a last entry with `"day": null`. The daily
+costs add up to `estimated_total_cost_usd`; the text output does not show the
+series.
+
 For each conversation it shows the task/reason (the `.meta.json` description
 when available, otherwise the first user message), usage by model and cache
 class, and estimated cost. Subagents are shown first, then the main
@@ -154,34 +165,42 @@ works with a path or a bare id, and with `--json`):
 
 ```bash
 python3 claude_tokens.py CONVERSATION --last-response   # final assistant turn, Markdown rendered for the terminal
-python3 claude_tokens.py CONVERSATION --bash            # every Bash command it ran, in order
+python3 claude_tokens.py CONVERSATION --bash            # every Bash command it and its subagents ran, by time
 python3 claude_tokens.py CONVERSATION --files           # files touched by Read/Write/Edit, with per-tool counts
 ```
 
 `--last-response` renders inline `code`, **bold**, and headings with ANSI when
-writing to a terminal, and falls back to plain text when piped.
+writing to a terminal, and falls back to plain text when piped. It shows the
+main conversation's last response only.
 
-Built-in rates are USD per million tokens, checked on 2026-07-30 against the
+`--bash` and `--files` cover the main conversation and its subagents. A Bash
+command run by a subagent is headed `# [subagent <id>]`. The files table has one
+row per file with the counts added across sources and a `Sources` column. With
+`--json`, each command has `source` (`main` or the subagent id) and `timestamp`,
+and each file has `sources`. A block repeated in the log is counted once.
+
+Built-in rates are USD per million tokens, checked on 2026-10-01 against the
 [official Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
-They include the published cache multipliers: `0.1x` for reads, `1.25x` for
-5-minute writes, and `2x` for 1-hour writes. The result is an API estimate; it
+They include the published cache multipliers: `0.1x` for reads (`0.05x` on
+`claude-opus-5-5`, `0.025x` on `claude-fable-5-1` and `claude-mythos-5-1`),
+`1.25x` for 5-minute writes, and `2x` for 1-hour writes. The result is an API estimate; it
 does not include taxes, discounts, server-tool charges, fast mode, or
 provider/region premiums.
 
 | Model | Input | Output |
 |---|---|---|
-| `claude-fable-5`, `claude-mythos-5` | 10 | 50 |
+| `claude-fable-5-1`, `claude-mythos-5-1`, `claude-fable-5`, `claude-mythos-5` | 10 | 50 |
+| `claude-opus-5-5` | 4 | 20 |
 | `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5` | 5 | 25 |
 | `claude-opus-4-1`, `claude-opus-4`, `claude-3-opus` | 15 | 75 |
-| `claude-sonnet-5` | 2 | 10 |
+| `claude-sonnet-5-5`, `claude-sonnet-5` | 2 | 10 |
 | `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | 3 | 15 |
 | `claude-haiku-4-5` | 1 | 5 |
 | `claude-3-5-haiku` | 0.8 | 4 |
 | `claude-3-haiku` | 0.25 | 1.25 |
 
-`claude-sonnet-5` is at its introductory rate; the list price is `3`/`15` from
-2026-09-01. Fast mode on `claude-opus-5` bills at `10`/`50`, but the JSONL does
-not record it, so those responses are costed at the standard rate.
+Fast mode bills at `8`/`40` on `claude-opus-5-5` and `10`/`50` on `claude-opus-5`,
+but the JSONL does not record it, so those responses are costed at the standard rate.
 
 A model that is not in the table but belongs to a known family — a future
 `claude-opus-6`, `claude-fable-5-2`, `claude-sonnet-6` — is priced from the
@@ -192,9 +211,92 @@ Trailing `-YYYYMMDD` release dates are stripped before the lookup.
 Override or add model rates without changing the code:
 
 ```json
-{"claude-sonnet-5": {"input": 3, "output": 15}}
+{"claude-sonnet-5": {"input": 3, "output": 15},
+ "claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.05}}
 ```
+
+`cache_read` is the optional cache-read multiplier; it defaults to `0.1`.
 
 ```bash
 python3 claude_tokens.py CONVERSATION.jsonl --pricing prices.json
 ```
+
+## Web UI (`--serve`)
+
+`--serve` starts a local web server with the same data as the CLI: the
+conversation list, the usage report, the last response, Bash commands, files
+and the totals, plus charts (daily cost by model, model share, projects by cost,
+daily activity, tools and skills).
+
+```bash
+python3 claude_tokens.py --serve               # http://127.0.0.1:8765
+python3 claude_tokens.py --serve --port 9000 --pricing prices.json
+```
+
+The screenshots show invented demo data, not real conversations.
+
+![Totals: cost, tokens and volume, with daily cost by model, model share, projects, activity, tools and skills](docs/images/totals.png)
+
+| Conversations | Usage report |
+|---|---|
+| ![Conversation list with title, project, size and subagents](docs/images/conversations.png) | ![Usage of one conversation per scope and per model](docs/images/usage.png) |
+| **Last response** | **Bash commands** |
+| ![Last response rendered as Markdown](docs/images/last-response.png) | ![Bash commands of the main conversation and its subagents, with source and text filters](docs/images/bash.png) |
+| **Files** | |
+| ![Files read, written and edited, with the sources that touched them](docs/images/files.png) | |
+
+It only listens on `127.0.0.1` and has no authentication. It rejects requests
+whose `Host` is not `localhost` or `127.0.0.1`, and anything but `GET`/`HEAD`.
+It never writes to the projects folder.
+`--serve` accepts `--port`, `--projects-dir`, `--pricing`,
+`--cold-summary-output` and `--context-window`; the project filter is chosen in
+the UI. A port that is already in use is an error.
+
+When the tool runs on a remote machine, open an SSH tunnel and browse
+`http://localhost:8765` on your own machine (any local port works):
+
+```bash
+ssh -N -L 8765:localhost:8765 <remote-host>
+```
+
+Every request re-reads the logs that changed since the previous one, so the data
+is always current. The first totals load parses everything (about as long as
+`--totals`); later loads take a fraction of a second when nothing changed.
+
+The browser libraries (Chart.js, marked, DOMPurify, highlight.js) are bundled in
+`ctokens/web/static/vendor/`, so the UI works offline and loads nothing from
+other sites. `tools/vendor.py` refreshes them.
+
+The JSON API behind the UI returns the same objects as the CLI's `--json`:
+
+| Route | Same as |
+|---|---|
+| `GET /api/conversations?project=` | the picker list, as `{"projects_dir", "conversations": [...]}` |
+| `GET /api/conversations/<id>` | `<id> --json` |
+| `GET /api/conversations/<id>/last-response` | `<id> --last-response --json` |
+| `GET /api/conversations/<id>/bash` | `<id> --bash --json` |
+| `GET /api/conversations/<id>/files` | `<id> --files --json` |
+| `GET /api/totals?project=` | `--totals --json` |
+
+## Development
+
+The code lives in the `ctokens/` package; `claude_tokens.py` is the entry point.
+Tests use only the standard library and synthetic fixtures (never your real
+logs):
+
+```bash
+python3 -m unittest discover -s tests
+python3 tests/coverage.py              # line coverage of the CLI characterization cases
+python3 tests/golden/refresh.py CASE   # regenerate a golden after a deliberate output change
+```
+
+The README screenshots come from a synthetic projects folder, so they never show
+real conversations. Regenerating them needs Playwright
+(`npm i --no-save playwright && npx playwright install chromium-headless-shell`):
+
+```bash
+python3 tools/demo_projects.py /tmp/demo        # prints the folder and the featured conversation id
+python3 claude_tokens.py --serve --port 8798 --projects-dir /tmp/demo/projects
+node tools/screenshots.js http://127.0.0.1:8798 /tmp/demo/projects <featured id> docs/images
+```
+

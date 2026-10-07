@@ -1,0 +1,10 @@
+--- exit 2
+--- stdout
+--- stderr
+usage: claude_tokens.py [-h] [--projects-dir PROJECTS_DIR] [--project PROJECT] [--totals] [--pricing PRICING] [--json]
+                        [--cold-summary-output COLD_SUMMARY_OUTPUT] [--context-window CONTEXT_WINDOW]
+                        [--last-response] [--bash] [--files] [--serve] [--port PORT]
+                        [conversation]
+claude_tokens.py: error: ambiguous id, matches:
+  <FIXTURES>/projects/-home-dev-projects-api-gateway/33333333-3333-4333-8333-333333333333.jsonl
+  <FIXTURES>/projects/-home-dev-projects-billing-service/33333333-3333-4333-8333-333333333333.jsonl
