@@ -185,6 +185,24 @@ tr.total td { font-weight: 650; background: var(--surface-2); border-top: 1px so
 .cmds time, .cmds .notime { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
 .cmds .desc { color: var(--muted); font-size: var(--t-sm); display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; min-width: 0;
   overflow-wrap: anywhere; }
-.cmds pre { grid-column: 2; margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere;
-  background: var(--code-bg); border-radius: 6px; padding: 6px 10px; min-width: 0; }
+.cmds .cmd { grid-column: 2; position: relative; min-width: 0; }
+.cmds pre { margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--code-bg); border-radius: 6px; padding: 6px 40px 6px 10px; min-width: 0; }
 .cmds pre::before { content: "$ "; color: var(--muted); }
+.cmds .copy-btn { position: absolute; top: 3px; right: 3px; }
+
+/* Copy to clipboard */
+.copy-btn { padding: 1px 8px; font-size: var(--t-xs); font-weight: 550; white-space: nowrap; }
+.icon-btn { padding: 4px; line-height: 0; color: var(--muted); }
+.icon-btn:hover { color: var(--fg); }
+.icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.conv-id { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.md > .copy-btn { float: right; margin: 0 0 var(--s2) var(--s3); }
+.md > .copy-btn + * { margin-top: 0; }
+.copyable { cursor: copy; position: relative; }
+.copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.md pre.copyable:hover { text-decoration: none; border-color: var(--accent); }
+.copyable[data-copied]::after { content: attr(data-copied); position: absolute; left: 0; bottom: 100%; margin-bottom: 4px;
+  padding: 1px 8px; border-radius: 4px; background: var(--fg); color: var(--bg); font: 600 var(--t-xs)/1.5 var(--font);
+  white-space: nowrap; pointer-events: none; z-index: 2; }
+.md pre.copyable[data-copied]::after { bottom: auto; top: var(--s2); left: auto; right: var(--s2); margin: 0; }
