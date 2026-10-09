@@ -233,6 +233,11 @@ python3 claude_tokens.py --serve               # http://127.0.0.1:8765
 python3 claude_tokens.py --serve --port 9000 --pricing prices.json
 ```
 
+Double-click a conversation id, project path, projects folder, file path, tool
+name or a code block in the last response to copy it to the clipboard. Bash
+commands and the last response have a clipboard button, and the conversation
+header has **Copy resume**, which copies `cd <project> && claude --resume <id>`.
+
 The screenshots show invented demo data, not real conversations.
 
 ![Totals: cost, tokens and volume, with daily cost by model, model share, projects, activity, tools and skills](docs/images/totals.png)

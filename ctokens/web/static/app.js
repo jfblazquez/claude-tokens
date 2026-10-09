@@ -49,8 +49,73 @@ function utcMinute(iso) {
 
 // Long paths and tool names may wrap after a separator instead of widening their table.
 const breakable = (text) => String(text == null ? "" : text).split(/(?<=\/|__|:)/).flatMap((part, i) => (i ? [h("wbr"), part] : [part]));
-const pathCell = (text) => h("span", { class: "mono" }, breakable(text));
-const pathCol = (key, label) => ({ key, label, cls: "path", render: (r) => pathCell(r[key]) });
+
+// ---------- copy to clipboard ----------
+const COPY_FEEDBACK_MS = 1500;
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const ICON_PATHS = {
+  clipboard: ["M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z",
+    "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"],
+  check: ["M20 6 9 17l-5-5"],
+  failed: ["M18 6 6 18", "m6 6 12 12"],
+};
+
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of [["viewBox", "0 0 24 24"], ["class", "icon"], ["aria-hidden", "true"]]) svg.setAttribute(k, v);
+  for (const d of ICON_PATHS[name]) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
+
+// show(true | false) right after the copy, show(null) once the feedback expires.
+function copyText(text, el, show) {
+  const done = (ok) => {
+    show(ok);
+    clearTimeout(el.copyTimer);
+    el.copyTimer = setTimeout(() => show(null), COPY_FEEDBACK_MS);
+  };
+  const write = navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject(new Error("no clipboard"));
+  write.then(() => done(true), () => done(false));
+}
+
+// Copies the original value, not the rendered text, which may be truncated or carry <wbr> breaks.
+function copyable(el, value) {
+  el.classList.add("copyable");
+  el.title = "Double-click to copy";
+  el.addEventListener("dblclick", () => {
+    getSelection().removeAllRanges();
+    copyText(value, el, (ok) => {
+      if (ok == null) delete el.dataset.copied;
+      else el.dataset.copied = ok ? "Copied" : "Copy failed";
+    });
+  });
+  return el;
+}
+
+// Without a label the button shows only the clipboard icon, so the title doubles as its accessible name.
+function copyButton(text, title, label = null) {
+  const idle = () => label || icon("clipboard");
+  const button = h("button", { class: label ? "btn copy-btn" : "btn copy-btn icon-btn", type: "button", title,
+    "aria-label": label ? null : title }, idle());
+  button.addEventListener("click", () => copyText(text, button, (ok) => {
+    if (ok == null) button.replaceChildren(idle());
+    else button.replaceChildren(label ? (ok ? "Copied" : "Copy failed") : icon(ok ? "check" : "failed"));
+  }));
+  return button;
+}
+
+const shellQuote = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
+
+const pathCell = (text, copy) => {
+  const cell = h("span", { class: "mono" }, breakable(text));
+  return copy ? copyable(cell, String(text)) : cell;
+};
+const pathCol = (key, label, copy = false) => ({ key, label, cls: "path", render: (r) => pathCell(r[key], copy) });
 
 function guessedNotice(models) {
   return `~ estimated price: no published rate for ${models.join(", ")}; priced from the newest known model of the same `
@@ -294,7 +359,7 @@ function listRows(body) {
   return rows;
 }
 
-const folderLabel = () => (projectsDir ? h("b", { class: "mono" }, projectsDir) : "the projects folder");
+const folderLabel = () => (projectsDir ? copyable(h("b", { class: "mono" }, projectsDir), projectsDir) : "the projects folder");
 const folderText = () => projectsDir || "the projects folder";
 
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
@@ -354,9 +419,11 @@ async function loadConversation(route, path) {
 function convHead(route) {
   const row = convRows.get(route.id), counts = convCounts.get(route.id) || {};
   const title = (row && row.title) || convTasks.get(route.id) || "Untitled conversation";
-  const meta = [h("span", { class: "mono" }, route.id)];
+  const resume = row ? `cd ${shellQuote(row.project)} && claude --resume ${shellQuote(route.id)}` : null;
+  const meta = [h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
+    resume ? copyButton(resume, resume, "Copy resume") : null)];
   if (row) {
-    meta.push(h("span", {}, h("b", { class: "mono" }, row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
+    meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmt(row.size_kb)} KB · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
   }
   return [h("div", { class: "page-head" },
@@ -520,6 +587,7 @@ function renderMarkdown(markdown) {
       hljs.highlightElement(code);
     }
   }
+  for (const pre of box.querySelectorAll("pre")) copyable(pre, pre.textContent.replace(/\n$/, ""));
   return box;
 }
 
@@ -532,8 +600,9 @@ VIEWS.response = {
       return emptyState("No text response", "The main conversation has no assistant text response yet. "
         + "Responses from subagents are not shown here.");
     }
-    return [h("div", { class: "meta" }, "Last assistant text response of the main conversation · rendered Markdown"),
-      renderMarkdown(data.last_response)];
+    const box = renderMarkdown(data.last_response);
+    box.prepend(copyButton(data.last_response, "Copy the response as Markdown"));
+    return [h("div", { class: "meta" }, "Last assistant text response of the main conversation · rendered Markdown"), box];
   },
 };
 
@@ -561,7 +630,7 @@ function bashItems(commands) {
       c.when ? h("time", { datetime: c.when.toISOString(), title: `${c.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(c.when))
         : h("span", { class: "notime" }, "—"),
       h("div", { class: "desc" }, sourceChip(c.source), c.description ? c.description : h("span", { class: "muted" }, "No description")),
-      h("pre", {}, c.command)));
+      h("div", { class: "cmd" }, h("pre", {}, c.command), copyButton(c.command, "Copy the command"))));
   }
   return items;
 }
@@ -620,7 +689,7 @@ VIEWS.files = {
     if (!rows.length) return emptyState("No files touched", "Neither the main conversation nor its subagents read, wrote or edited a file.");
     return [h("div", { class: "meta" }, "One row per file · counts add up every source that touched it"),
       renderTable([
-        pathCol("file", "File"),
+        pathCol("file", "File", true),
         { key: "Read", label: "Read", num: true, render: (r) => fmt(r.Read) },
         { key: "Write", label: "Write", num: true, render: (r) => fmt(r.Write) },
         { key: "Edit", label: "Edit", num: true, render: (r) => fmt(r.Edit) },
@@ -740,7 +809,7 @@ VIEWS.totals = {
       { key: "pct_cost", label: "% cost", num: true, render: (r) => pct(r.pct_cost) },
     ], T.by_model || [], { id: "totals-models", sortKey: "estimated_cost_usd" }));
     const projectTable = h("section", { class: "section" }, sectionHead("Projects by cost"), renderTable([
-      pathCol("project", "Project"),
+      pathCol("project", "Project", true),
       { key: "conversations", label: "Conversations", num: true, render: (r) => fmt(r.conversations) },
       { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
       { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false, 2) },
@@ -749,7 +818,7 @@ VIEWS.totals = {
     const skillRows = topEntries(T.skills, Infinity).map(([skill, n]) => ({ skill, n }));
     const usageTables = h("div", { class: "charts" },
       h("section", { class: "section" }, sectionHead("Top tools"), toolRows.length ? renderTable([
-        { key: "tool", label: "Tool", cls: "wrap", render: (r) => breakable(r.tool) },
+        { key: "tool", label: "Tool", cls: "wrap", render: (r) => copyable(h("span", {}, breakable(r.tool)), r.tool) },
         { key: "calls", label: "Calls", num: true, render: (r) => fmt(r.calls) },
         { key: "share", label: "% of calls", num: true, render: (r) => pct(r.share) },
       ], toolRows, { id: "totals-tools", sortKey: "calls" }) : emptyState("No tool calls", "No conversation called a tool.")),
