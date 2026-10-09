@@ -1,0 +1,9 @@
+--- exit 0
+--- stdout
+Messages (main): Explain picker pagination
+ # | Time (UTC)          | Role | Model | Input | Output | Cache read | Cache write 5m/1h | Context | Cost | Content                   
+---+---------------------+------+-------+-------+--------+------------+-------------------+---------+------+---------------------------
+ 1 | 2026-09-26 09:00:00 | user |       |       |        |            |                   |         |      | Explain picker pagination 
+
+1 message(s), 0 response(s). Estimated cost: $0.0000
+--- stderr

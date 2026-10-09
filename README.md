@@ -160,13 +160,15 @@ skills, and messages categories, so those cannot be reconstructed reliably.
 
 ## Inspecting a conversation
 
-Three flags print raw conversation material instead of the usage report (each
+These flags print raw conversation material instead of the usage report (each
 works with a path or a bare id, and with `--json`):
 
 ```bash
 python3 claude_tokens.py CONVERSATION --last-response   # final assistant turn, Markdown rendered for the terminal
 python3 claude_tokens.py CONVERSATION --bash            # every Bash command it and its subagents ran, by time
 python3 claude_tokens.py CONVERSATION --files           # files touched by Read/Write/Edit, with per-tool counts
+python3 claude_tokens.py CONVERSATION --messages        # every message, with the token usage of each response
+python3 claude_tokens.py CONVERSATION --messages --source <subagent id>
 ```
 
 `--last-response` renders inline `code`, **bold**, and headings with ANSI when
@@ -178,6 +180,15 @@ command run by a subagent is headed `# [subagent <id>]`. The files table has one
 row per file with the counts added across sources and a `Sources` column. With
 `--json`, each command has `source` (`main` or the subagent id) and `timestamp`,
 and each file has `sources`. A block repeated in the log is counted once.
+
+`--messages` lists the user and assistant messages of the main conversation, or
+of one subagent with `--source`, in log order. The log writes one event per
+content block, so the events of one API response are merged into one message.
+Each response shows its model, input, output (and how much of it was thinking),
+cache read, cache write 5m/1h, context size and estimated cost. The costs add
+up to the usage report. With `--json` each message also has its blocks: text,
+thinking, tool calls and tool results. Tool inputs and results keep their first
+4.000 characters and their original length.
 
 Built-in rates are USD per million tokens, checked on 2026-10-01 against the
 [official Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
@@ -224,7 +235,8 @@ python3 claude_tokens.py CONVERSATION.jsonl --pricing prices.json
 ## Web UI (`--serve`)
 
 `--serve` starts a local web server with the same data as the CLI: the
-conversation list, the usage report, the last response, Bash commands, files
+conversation list, the usage report, the whole conversation (opened at the
+latest message, with the token usage of each response), the last response, Bash commands, files
 and the totals, plus charts (daily cost by model, model share, projects by cost,
 daily activity, tools and skills).
 
@@ -281,6 +293,7 @@ The JSON API behind the UI returns the same objects as the CLI's `--json`:
 | `GET /api/conversations/<id>/last-response` | `<id> --last-response --json` |
 | `GET /api/conversations/<id>/bash` | `<id> --bash --json` |
 | `GET /api/conversations/<id>/files` | `<id> --files --json` |
+| `GET /api/conversations/<id>/messages?source=` | `<id> --messages --source <source> --json` |
 | `GET /api/totals?project=` | `--totals --json` |
 
 ## Development

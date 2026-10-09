@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fixtures import AMBIGUOUS, API, CONV_A, CONV_B, CONV_EMPTY, ROOT
+from fixtures import AMBIGUOUS, API, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE
 
 SCRIPT = ROOT / "claude_tokens.py"
 GOLDEN = Path(__file__).resolve().parent / "golden"
@@ -45,6 +45,13 @@ CASES = {
     "files_json": [CONV_A, "--files", "--json"],
     "files_none": [CONV_B, "--files"],
     "content_combined": [CONV_A, "--last-response", "--bash", "--files"],
+    "messages_text": [CONV_A, "--messages"],
+    "messages_json": [CONV_A, "--messages", "--json"],
+    "messages_subagent": [CONV_A, "--messages", "--source", SUB_EXPLORE],
+    "messages_none": [CONV_EMPTY, "--messages", "--source", "main"],
+    "messages_priced_unknown": [CONV_B, "--messages"],
+    "error_unknown_source": [CONV_A, "--messages", "--source", "nope"],
+    "error_source_without_messages": [CONV_A, "--source", SUB_EXPLORE],
     "picker_listing": [],
     "picker_project": ["--project", "billing"],
     "picker_no_match": ["--project", "nothing-matches"],
