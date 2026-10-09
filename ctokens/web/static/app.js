@@ -365,38 +365,72 @@ const folderText = () => projectsDir || "the projects folder";
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
 let listFilter = "";
+let listSearch = "";
+let listSearchDraft = "";
+let listSearchTimer = null;
+// Long enough to skip the requests of a word still being typed; a cached search answers in ~30 ms.
+const SEARCH_DEBOUNCE_MS = 300;
+
+function applyListSearch(value) {
+  clearTimeout(listSearchTimer);
+  const next = value.trim();
+  if (next === listSearch) return;
+  listSearch = next;
+  show({ keepScroll: true });
+  load({ refresh: true });
+}
+
+function listCount(data) {
+  if (data && data.search !== listSearch) return [h("span", { class: "spinner small", "aria-hidden": "true" }), "Searching…"];
+  if (!data) return "";
+  const shown = data.rows.filter((r) => projectMatches(r, listFilter)).length;
+  return data.search ? `${fmt(shown)} conversations containing “${data.search}”` : `${fmt(shown)} of ${fmt(data.rows.length)} conversations`;
+}
 
 VIEWS.list = {
   title: () => "Conversations",
-  load: async () => listRows(await api("/api/conversations")),
-  head: () => h("div", { class: "page-head" }, h("h1", {}, "Conversations"),
-    h("div", { class: "meta" }, projectsDir ? h("span", {}, "Projects folder ", folderLabel()) : null,
-      h("span", {}, "Most recent first · times in UTC"))),
-  render(rows) {
-    if (!rows.length) {
+  async load() {
+    const search = listSearch;
+    return { search, rows: listRows(await api(search ? `/api/conversations?q=${encodeURIComponent(search)}` : "/api/conversations")) };
+  },
+  head(route, data) {
+    const count = h("span", { class: "count", "aria-live": "polite" }, listCount(app.phase === "ready" ? data : null));
+    const project = h("input", { id: "list-filter", type: "search", placeholder: "Filter by project path", value: listFilter, "aria-label": "Filter by project",
+      oninput: (e) => { listFilter = e.target.value; show({ keepScroll: true }); } });
+    const search = h("input", { id: "list-search", type: "search", placeholder: "Word or phrase in the title or messages", value: listSearchDraft,
+      "aria-label": "Search conversations",
+      oninput: (e) => {
+        listSearchDraft = e.target.value;
+        clearTimeout(listSearchTimer);
+        listSearchTimer = setTimeout(() => applyListSearch(listSearchDraft), SEARCH_DEBOUNCE_MS);
+      },
+      onchange: (e) => applyListSearch(e.target.value),
+      onsearch: (e) => applyListSearch(e.target.value) });
+    return [h("div", { class: "page-head" }, h("h1", {}, "Conversations"),
+      h("div", { class: "meta" }, projectsDir ? h("span", {}, "Projects folder ", folderLabel()) : null,
+        h("span", {}, "Most recent first · times in UTC"))),
+    h("div", { class: "toolbar" }, h("div", { class: "filters" }, h("label", { class: "field" }, "Project", project),
+      h("label", { class: "field" }, "Search", search)), count)];
+  },
+  render({ search, rows }) {
+    if (!rows.length && !search) {
       return emptyState("No conversations found", `No conversations were found in ${folderText()}. `
         + "Conversations appear here after you use Claude Code.");
     }
-    const count = h("span", { class: "count" });
-    const holder = h("div", { class: "section" });
-    const draw = () => {
-      const shown = rows.filter((r) => projectMatches(r, listFilter));
-      count.textContent = `${fmt(shown.length)} of ${fmt(rows.length)} conversations`;
-      holder.replaceChildren(shown.length ? renderTable([
-        { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
-        { key: "title", label: "Title", cls: "wrap",
-          render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
-        pathCol("project", "Project"),
-        { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
-        { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
-        { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
-      ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); } })
-        : emptyState("No matching conversations", `No conversation has a project matching “${listFilter}”.`));
-    };
-    const input = h("input", { id: "list-filter", type: "search", placeholder: "Filter by project path", value: listFilter, "aria-label": "Filter by project",
-      oninput: (e) => { listFilter = e.target.value; draw(); } });
-    draw();
-    return [h("div", { class: "toolbar" }, h("label", { class: "field" }, "Project", input), count), holder];
+    const shown = rows.filter((r) => projectMatches(r, listFilter));
+    if (!shown.length) {
+      const why = [listFilter && `a project matching “${listFilter}”`, search && `“${search}” in its title or messages`];
+      return emptyState("No matching conversations", `No conversation has ${why.filter(Boolean).join(" and ")}.`);
+    }
+    return h("div", { class: "section" }, renderTable([
+      { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
+      { key: "title", label: "Title", cls: "wrap",
+        render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
+      pathCol("project", "Project"),
+      { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
+      { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
+      { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
+    ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); } }));
   },
 };
 

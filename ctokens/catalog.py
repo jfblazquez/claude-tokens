@@ -52,11 +52,32 @@ def session_title(path, tail=131072):
     return title
 
 
+def conversation_text(path):
+    """User prompts and assistant text of a log, whitespace-collapsed and casefolded for phrase search."""
+    parts = []
+    for event in lines(path):
+        message = event.get("message")
+        if event.get("type") not in ("user", "assistant") or not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts += [str(b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    return normalized(" ".join(parts))
+
+
+def normalized(text):
+    return " ".join(text.split()).casefold()
+
+
 CONVERSATION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
-def list_conversations(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title):
-    """Top-level session logs across every project, most recent first."""
+def list_conversations(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title,
+                       search=None, text_of=conversation_text):
+    """Top-level session logs across every project, most recent first; search matches the title or the text."""
+    phrase = normalized(search or "")
     conversations = []
     for project in projects_dir.iterdir() if projects_dir.is_dir() else []:
         if not project.is_dir():
@@ -65,22 +86,26 @@ def list_conversations(projects_dir, project_filter=None, project_of=project_pat
             cwd = project_of(path)
             if project_filter and project_filter.lower() not in cwd.lower():
                 continue
+            title = title_of(path)
+            if phrase and phrase not in normalized(title) and phrase not in text_of(path):
+                continue
             stat = path.stat()
             conversations.append({
                 "path": path, "mtime": stat.st_mtime, "size_kb": stat.st_size / 1024,
-                "subagents": count_subagents(path), "project": cwd, "title": title_of(path),
+                "subagents": count_subagents(path), "project": cwd, "title": title,
             })
     conversations.sort(key=lambda row: row["mtime"], reverse=True)
     return conversations
 
 
-def conversation_rows(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title):
+def conversation_rows(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title,
+                      search=None, text_of=conversation_text):
     """The picker's list as JSON-ready dicts; modified is ISO 8601 UTC."""
     return [{"id": row["path"].stem,
              "modified": datetime.fromtimestamp(row["mtime"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
              "size_kb": round(row["size_kb"], 1), "subagents": row["subagents"],
              "project": row["project"], "title": row["title"]}
-            for row in list_conversations(projects_dir, project_filter, project_of, title_of)]
+            for row in list_conversations(projects_dir, project_filter, project_of, title_of, search, text_of)]
 
 
 def find_conversation(conversation_id, projects_dir):
