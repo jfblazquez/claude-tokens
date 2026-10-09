@@ -263,12 +263,18 @@ modified (today, yesterday, this week, last week, earlier this month, then by
 month; UTC days, weeks start on Monday) while it is sorted by date. Filter and
 search cover every conversation, not just the current page. Coming back from a
 conversation shows the list at once, on the same page and scroll position, and
-reloads it behind.
+reloads it behind. The project column shows the last two folders of the path;
+hover it for the full path.
 
 Opening a conversation loads the other tabs (usage, conversation, last
 response, Bash commands, files) in the background, so switching tabs is
 immediate. They are kept until you go back to the list; **Refresh** reloads the
 current tab and the others reload the next time you open them.
+
+Inside a conversation the top bar holds its tabs and a **← Conversations**
+button, so they stay on screen however far you scroll. The **Conversation** tab
+keeps the message you were reading when you switch to another tab and back. A
+round **↑** button at the bottom right of every page goes back to the top.
 
 Double-click a conversation id, project path, projects folder, file path, tool
 name or a code block in the last response to copy it to the clipboard. Bash

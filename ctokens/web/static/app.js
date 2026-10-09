@@ -407,6 +407,10 @@ function listRows(body) {
 const folderLabel = () => (projectsDir ? copyable(h("b", { class: "mono" }, projectsDir), projectsDir) : "the projects folder");
 const folderText = () => projectsDir || "the projects folder";
 
+const pathTail = (path) => String(path || "").split(/[\\/]/).filter(Boolean).slice(-2).join("/");
+// The last two levels of a path, so a deep project folder does not widen the list.
+const shortPath = (path) => (String(path || "").split(/[\\/]/).filter(Boolean).length > 2 ? `…/${pathTail(path)}` : String(path || ""));
+
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
 let listFilter = "";
@@ -499,7 +503,8 @@ VIEWS.list = {
       { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
       { key: "title", label: "Title", cls: "wrap",
         render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
-      pathCol("project", "Project"),
+      { key: "project", label: "Project", cls: "path", sortValue: (r) => pathTail(r.project),
+        render: (r) => h("span", { class: "mono", title: r.project }, breakable(shortPath(r.project))) },
       { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
       { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
       { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
@@ -532,6 +537,7 @@ function convEntries(id) {
 
 function clearConvCache() {
   Object.assign(convCache, { id: null, entries: new Map() });
+  messagesState.anchor = null;
 }
 
 // Tab counts and the fallback title come from whichever answer arrives first, prefetched or not; true when one changed.
@@ -601,9 +607,8 @@ function convView(path, spec) {
 function redrawConvHead(id) {
   const route = app.route;
   if (!route || route.id !== id || !$("conv-head")) return;
-  const [head, tabs] = convHead(route);
-  $("conv-head").replaceWith(head);
-  $("conv-tabs").replaceWith(tabs);
+  $("conv-head").replaceWith(convHead(route));
+  drawConvNav();
   document.title = `${VIEWS[route.view].title(route, app.data)} · claude-tokens`;
 }
 
@@ -617,13 +622,31 @@ function convHead(route) {
     meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmt(row.size_kb)} KB · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
   }
-  return [h("div", { class: "page-head", id: "conv-head" },
-    h("div", { class: "crumb" }, h("a", { href: "#/" }, "← Conversations")),
+  return h("div", { class: "page-head", id: "conv-head" },
     h("h1", {}, title),
-    h("div", { class: "meta" }, meta)),
-  h("nav", { class: "tabs", id: "conv-tabs", "aria-label": "Conversation views" }, TABS.map(([key, label]) => h("a", {
-    href: convHref(route.id, key), "aria-current": route.view === key ? "page" : null,
-  }, label, counts[key] != null ? h("span", { class: "n" }, fmt(counts[key])) : null)))];
+    h("div", { class: "meta" }, meta));
+}
+
+// The tabs live in the app bar, so they stay on screen however far the page scrolls;
+// inside a conversation a back button takes the place of the main nav.
+const SHORT_TABS = { response: "Response", bash: "Bash" };
+
+function drawConvNav() {
+  const nav = $("conv-nav"), route = app.route;
+  nav.hidden = !route || !route.id;
+  $("nav-back").hidden = nav.hidden;
+  $("nav-main").hidden = !nav.hidden;
+  if (nav.hidden) {
+    nav.replaceChildren();
+    return;
+  }
+  const counts = convCounts.get(route.id) || {};
+  nav.replaceChildren(...TABS.map(([key, label]) => h("a", {
+    href: convHref(route.id, key), title: label, "aria-current": route.view === key ? "page" : null,
+  }, SHORT_TABS[key] || label, counts[key] != null ? h("span", { class: "n" }, fmt(counts[key])) : null)));
+  // On a phone the tabs scroll sideways; keep the current one in view.
+  const current = nav.querySelector("[aria-current]");
+  if (current && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = current.offsetLeft - nav.offsetLeft - 24;
 }
 
 const convTitle = (route) => (convRows.get(route.id) || {}).title || convTasks.get(route.id) || "Conversation";
@@ -872,7 +895,8 @@ VIEWS.files = convView("/files", {
 });
 
 // ---------- conversation messages ----------
-const messagesState = { id: null, source: "main", toBottom: false };
+// anchor: the message at the top of the screen when the tab was left, to come back to the same place.
+const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null };
 const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results" };
 
 const withSource = (path, source) => (source === "main" ? path : `${path}?source=${encodeURIComponent(source)}`);
@@ -976,12 +1000,13 @@ const ellipsis = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : 
 const sourceOption = (s) => `${s.id === "main" ? "main" : `subagent ${s.id.slice(0, 8)}`} · ${ellipsis(String(s.task || ""), 60)}`;
 const visibleMessages = (messages) => messages.filter((m) => m.kind !== "tool_result");
 
-// Off-screen messages have an estimated height (content-visibility), so the end moves as the last ones get laid out.
-function scrollToEnd() {
+// Off-screen messages have an estimated height (content-visibility), so positions move as the ones in view get laid out;
+// the target is applied again until the page height settles.
+function settleScroll(target) {
   let last = -1, stable = 0, frames = 0;
   const step = () => {
     const end = document.documentElement.scrollHeight;
-    window.scrollTo(0, end);
+    window.scrollTo(0, target());
     stable = end === last ? stable + 1 : 0;
     last = end;
     if (stable < 2 && ++frames < 30) requestAnimationFrame(step);
@@ -989,8 +1014,19 @@ function scrollToEnd() {
   step();
 }
 
+const scrollToEnd = () => settleScroll(() => document.documentElement.scrollHeight);
+
+function topMessage() {
+  const top = Math.max(0, document.querySelector(".appbar").getBoundingClientRect().bottom);
+  for (const el of document.querySelectorAll(".msgs > li")) {
+    const box = el.getBoundingClientRect();
+    if (box.bottom > top) return { el, offset: box.top };
+  }
+  return null;
+}
+
 function messagesPath(route) {
-  if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main" });
+  if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main", anchor: null });
   return withSource("/messages", messagesState.source);
 }
 
@@ -998,10 +1034,12 @@ VIEWS.messages = convView(messagesPath, {
   title: (route) => `Conversation · ${convTitle(route)}`,
   load: (route, opts) => {
     // A fresh open starts at the latest message; a refresh keeps the reader where they are.
-    if (!opts.refresh) messagesState.toBottom = true;
+    if (!opts.refresh) Object.assign(messagesState, { toBottom: true, restore: false });
     return loadConversation(route, messagesPath(route), opts);
   },
-  enter: () => { messagesState.toBottom = true; },
+  // Coming back from another tab reattaches the same nodes, so the anchor is still in the page; otherwise start at the end.
+  enter: () => Object.assign(messagesState, { toBottom: true, restore: true }),
+  leave: () => { messagesState.anchor = topMessage(); },
   render(data) {
     let n = 0;
     // Same numbering as the CLI: tool results are not counted, since they render under their call.
@@ -1030,9 +1068,10 @@ VIEWS.messages = convView(messagesPath, {
     return [meta, toolbar, h("ol", { class: "msgs" }, messageItems(shown, tools))];
   },
   after: () => {
-    if (!messagesState.toBottom) return;
-    messagesState.toBottom = false;
-    scrollToEnd();
+    const { anchor, restore, toBottom } = messagesState;
+    Object.assign(messagesState, { anchor: null, restore: false, toBottom: false });
+    if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
+    else if (toBottom) scrollToEnd();
   },
 });
 
@@ -1278,14 +1317,15 @@ const app = { route: null, seq: 0, busy: false, phase: "loading", data: null, er
 function updateBar() {
   const loaded = $("loaded");
   if (app.busy) loaded.textContent = "Loading…";
-  else if (app.failedAt) loaded.textContent = `Load failed at ${utcTime(app.failedAt)} UTC`;
-  else loaded.textContent = app.loadedAt ? `Loaded at ${utcTime(app.loadedAt)} UTC` : "Loaded at --:--:-- UTC";
+  else if (app.failedAt) loaded.textContent = `Failed at ${utcTime(app.failedAt)} UTC`;
+  else loaded.textContent = app.loadedAt ? `${utcTime(app.loadedAt)} UTC` : "--:--:-- UTC";
   $("refresh").disabled = app.busy;
   const totals = !!app.route && app.route.view === "totals";
   for (const [id, on] of [["nav-list", !totals], ["nav-totals", totals]]) {
     if (on) $(id).setAttribute("aria-current", "page");
     else $(id).removeAttribute("aria-current");
   }
+  drawConvNav();
 }
 
 function runCleanups() {
@@ -1380,7 +1420,15 @@ function setAutoRefresh(on) {
   app.timer = on ? setInterval(() => { if (!app.busy) load({ refresh: true }); }, 30000) : null;
 }
 
+function updateToTop() {
+  $("to-top").hidden = window.scrollY < window.innerHeight;
+}
+
 function boot() {
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  document.body.append(h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
+    onclick: () => window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "↑"));
+  window.addEventListener("scroll", updateToTop, { passive: true });
   const auto = $("auto");
   auto.checked = false;
   auto.addEventListener("change", () => setAutoRefresh(auto.checked));

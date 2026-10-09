@@ -30,7 +30,7 @@ const SHOTS = [
   });
   for (const shot of SHOTS) {
     await page.goto(`${base}/${shot.hash}`);
-    await page.waitForFunction(() => document.getElementById("loaded").textContent.startsWith("Loaded"), null, { timeout: 120000 });
+    await page.waitForFunction(() => /^\d\d:\d\d:\d\d UTC$/.test(document.getElementById("loaded").textContent), null, { timeout: 120000 });
     await page.waitForTimeout(500);
     if ((await page.textContent("body")).includes(projectsDir)) throw new Error(`${shot.name}: the real projects path leaked`);
     let clip;
