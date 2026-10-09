@@ -56,6 +56,28 @@ class ConversationRowsTest(unittest.TestCase):
     def test_missing_folder(self):
         self.assertEqual(conversation_rows(Path(self.tmp.name) / "nope"), [])
 
+    def test_search_prompts_and_assistant_text(self):
+        ids = lambda **kw: [r["id"] for r in conversation_rows(self.projects, **kw)]
+        self.assertEqual(ids(search="LEDGER   exports"), [CONV_B])
+        self.assertEqual(ids(search="looking at the CACHE."), [CONV_A])
+        self.assertEqual(ids(search="hi."), [AMBIGUOUS, AMBIGUOUS])
+        self.assertEqual(ids(search="  "), ids())
+        self.assertEqual(ids(search="git status"), [])
+        self.assertEqual(ids(search="ledger exports retries"), [])
+
+    def test_search_title_and_project(self):
+        rows = conversation_rows(self.projects, "billing", title_of=lambda p: "Special title", search="special TITLE")
+        self.assertEqual([r["id"] for r in rows], [CONV_B, AMBIGUOUS])
+        rows = conversation_rows(self.projects, "billing", search="same id")
+        self.assertEqual([r["project"] for r in rows], ["/home/dev/projects/billing-service"])
+
+    def test_search_reads_text_only_without_title_match(self):
+        read = []
+        rows = conversation_rows(self.projects, title_of=lambda p: "Cache", search="cache",
+                                 text_of=lambda p: read.append(p) or "")
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(read, [])
+
 
 class FindConversationTest(unittest.TestCase):
     def setUp(self):

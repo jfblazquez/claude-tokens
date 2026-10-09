@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
-from ..catalog import conversation_rows, find_conversation, project_path_of, session_title
+from ..catalog import conversation_rows, conversation_text, find_conversation, project_path_of, session_title
 from ..content import bash_commands, conversation_messages, last_response, touched_files, transcript
 from ..logs import discover, file_stats, parse_log
 from ..reports import report, scan_totals, totals_report
@@ -112,7 +112,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/conversations":
             return json_response(200, {"projects_dir": str(config.projects_dir),
                                        "conversations": conversation_rows(config.projects_dir, project,
-                                                                          *cached_meta(cache))})
+                                                                          *cached_meta(cache),
+                                                                          params.get("q", [None])[0],
+                                                                          cached_text(cache))})
         if path == "/api/totals":
             return json_response(200, cached_totals(cache, config, project))
         match = CONVERSATION_ROUTE.fullmatch(path)
@@ -191,6 +193,10 @@ def cached_meta(cache):
     def meta(path):
         return cache.get("meta", path, lambda p: (project_path_of(p), session_title(p)))
     return (lambda path: meta(path)[0]), (lambda path: meta(path)[1])
+
+
+def cached_text(cache):
+    return lambda path: cache.get("text", path, conversation_text)
 
 
 class Server(ThreadingHTTPServer):

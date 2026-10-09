@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from characterization import DATA, ENV, SCRIPT
-from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE, build_projects
+from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE, build_projects, user
 
 from ctokens.catalog import conversation_rows
 from ctokens.logs import file_stats, parse_log
@@ -298,6 +298,13 @@ class ApiParityTest(ServerTestCase):
         _, data = self.get_json("/api/conversations?project=nothing-matches")
         self.assertEqual(data["conversations"], [])
 
+    def test_conversations_search(self):
+        _, data = self.get_json("/api/conversations?q=Ledger%20exports")
+        self.assertEqual(data["conversations"], conversation_rows(self.projects, search="ledger exports"))
+        self.assertEqual([row["id"] for row in data["conversations"]], [CONV_B])
+        _, data = self.get_json("/api/conversations?project=api&q=hi.")
+        self.assertEqual([row["id"] for row in data["conversations"]], [AMBIGUOUS])
+
     def test_head(self):
         status, headers, body = self.request(f"/api/conversations/{CONV_A}", method="HEAD")
         self.assertEqual((status, body), (200, b""))
@@ -549,6 +556,18 @@ class CacheWiringTest(unittest.TestCase):
         rows = self.get("/api/conversations")["conversations"]
         self.assertEqual(rows[0]["title"], "Renamed")
         self.assertEqual(rows, conversation_rows(self.projects))
+
+    def test_search_uses_cache(self):
+        expected = self.get("/api/conversations?q=cache")
+        with mock.patch("ctokens.web.server.conversation_text") as text:
+            self.assertEqual(self.get("/api/conversations?q=cache"), expected)
+            text.assert_not_called()
+        main = self.projects / "-home-dev-projects-billing-service" / f"{CONV_B}.jsonl"
+        self.touch(main, json.dumps(user("Now about the cache", "/home/dev/projects/billing-service",
+                                         "2026-10-01T08:00:00.000Z", "u-new")))
+        rows = self.get("/api/conversations?q=cache")["conversations"]
+        self.assertIn(CONV_B, [row["id"] for row in rows])
+        self.assertEqual(rows, conversation_rows(self.projects, search="cache"))
 
     def test_concurrent_totals(self):
         expected = self.cli("--totals", "--json")

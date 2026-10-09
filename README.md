@@ -245,6 +245,12 @@ python3 claude_tokens.py --serve               # http://127.0.0.1:8765
 python3 claude_tokens.py --serve --port 9000 --pricing prices.json
 ```
 
+The conversation list filters by project as you type. **Search** runs when you
+stop typing (or press Enter) and keeps the conversations whose title, prompts or
+assistant text contain a word or phrase, ignoring case and line breaks; thinking,
+tool calls, tool results and subagents are not searched. The first search after
+start-up reads every log; later ones only re-read the logs that changed.
+
 Double-click a conversation id, project path, projects folder, file path, tool
 name or a code block in the last response to copy it to the clipboard. Bash
 commands and the last response have a clipboard button, and the conversation
@@ -288,7 +294,7 @@ The JSON API behind the UI returns the same objects as the CLI's `--json`:
 
 | Route | Same as |
 |---|---|
-| `GET /api/conversations?project=` | the picker list, as `{"projects_dir", "conversations": [...]}` |
+| `GET /api/conversations?project=&q=` | the picker list, as `{"projects_dir", "conversations": [...]}`; `q` is the search |
 | `GET /api/conversations/<id>` | `<id> --json` |
 | `GET /api/conversations/<id>/last-response` | `<id> --last-response --json` |
 | `GET /api/conversations/<id>/bash` | `<id> --bash --json` |
