@@ -53,7 +53,7 @@
           "cache_write_1h": 2500,
           "total_tokens": 18400,
           "price_estimated": false,
-          "estimated_cost_usd": 0.0204
+          "estimated_cost_usd": 0.0189
         }
       },
       "context_snapshot": [
@@ -70,7 +70,7 @@
       "raw_output_tokens": {
         "claude-sonnet-5-5": 1400
       },
-      "estimated_cost_usd": 0.0204
+      "estimated_cost_usd": 0.0189
     },
     {
       "id": "main",
@@ -143,7 +143,7 @@
       "cache_write_1h": 2500,
       "total_tokens": 18400,
       "price_estimated": false,
-      "estimated_cost_usd": 0.0204,
+      "estimated_cost_usd": 0.0189,
       "raw_output_tokens": 1400
     }
   ],
@@ -174,7 +174,7 @@
       "estimated_cold_summary_cost_usd": 0.284036
     }
   ],
-  "estimated_total_cost_usd": 0.172776,
+  "estimated_total_cost_usd": 0.171276,
   "unknown_price_models": [],
   "guessed_price_models": []
 }

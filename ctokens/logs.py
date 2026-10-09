@@ -6,6 +6,8 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 
+from .pricing import usage_key
+
 
 FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 
@@ -84,7 +86,7 @@ def parse_log(path, kind, identifier, task):
         five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
         if not any((input_tokens, output_tokens, cache_read, five, hour)):
             continue
-        tokens = models[model]
+        tokens = models[usage_key(model, input_tokens + cache_read + five + hour)]
         tokens["input"] += input_tokens
         tokens["output"] += output_tokens
         tokens["cache_read"] += cache_read
@@ -182,7 +184,8 @@ def file_stats(path):
         record = {"input": int(usage.get("input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
                   "cache_read": int(usage.get("cache_read_input_tokens") or 0),
                   "cache_write_5m": five, "cache_write_1h": hour}
-        for tokens in (models[model], daily_models[day][model]):
+        key = usage_key(model, record["input"] + record["cache_read"] + five + hour)
+        for tokens in (models[key], daily_models[day][key]):
             for field in FIELDS:
                 tokens[field] += record[field]
     return {"models": dict(models), "tools": tools, "skills": skills, "window": window, "responses": responses,

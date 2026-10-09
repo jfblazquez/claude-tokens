@@ -18,7 +18,7 @@
           "cache_write_1h": 0,
           "total_tokens": 22350,
           "price_estimated": true,
-          "estimated_cost_usd": 0.01585
+          "estimated_cost_usd": 0.01385
         },
         "acme-model-1": {
           "input": 400,
@@ -82,7 +82,7 @@
       "cache_write_1h": 0,
       "total_tokens": 22350,
       "price_estimated": true,
-      "estimated_cost_usd": 0.01585,
+      "estimated_cost_usd": 0.01385,
       "raw_output_tokens": 800
     }
   ],
@@ -136,7 +136,7 @@
       "estimated_cold_summary_cost_usd": null
     }
   ],
-  "estimated_total_cost_usd": 0.01585,
+  "estimated_total_cost_usd": 0.01385,
   "unknown_price_models": [
     "acme-model-1"
   ],

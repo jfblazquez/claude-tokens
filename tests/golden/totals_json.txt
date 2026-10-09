@@ -14,8 +14,8 @@
   "projects_count": 2,
   "total_tokens": 213854,
   "output_tokens": 6740,
-  "estimated_total_cost_usd": 0.188846,
-  "cost_per_conversation_usd": 0.0377692,
+  "estimated_total_cost_usd": 0.185346,
+  "cost_per_conversation_usd": 0.037069200000000004,
   "cache_hit_ratio": 0.9511669901600085,
   "by_model": [
     {
@@ -29,7 +29,7 @@
       "price_estimated": false,
       "estimated_cost_usd": 0.147176,
       "pct_tokens": 0.7544586493589084,
-      "pct_cost": 0.7793440157588722
+      "pct_cost": 0.7940608375686553
     },
     {
       "model": "claude-sonnet-5-5",
@@ -40,9 +40,9 @@
       "cache_write_1h": 2500,
       "total_tokens": 18400,
       "price_estimated": false,
-      "estimated_cost_usd": 0.0204,
+      "estimated_cost_usd": 0.0189,
       "pct_tokens": 0.08604000860400086,
-      "pct_cost": 0.10802452792222234
+      "pct_cost": 0.10197144799456152
     },
     {
       "model": "claude-sonnet-5-6",
@@ -53,9 +53,9 @@
       "cache_write_1h": 0,
       "total_tokens": 22350,
       "price_estimated": true,
-      "estimated_cost_usd": 0.01585,
+      "estimated_cost_usd": 0.01385,
       "pct_tokens": 0.10451055392931627,
-      "pct_cost": 0.0839308219395698
+      "pct_cost": 0.07472510871559138
     },
     {
       "model": "claude-haiku-4-5",
@@ -68,7 +68,7 @@
       "price_estimated": false,
       "estimated_cost_usd": 0.00542,
       "pct_tokens": 0.051717526910883126,
-      "pct_cost": 0.02870063437933554
+      "pct_cost": 0.02924260572119172
     },
     {
       "model": "acme-model-1",
@@ -89,13 +89,13 @@
       "project": "/home/dev/projects/api-gateway",
       "conversations": 3,
       "total_tokens": 190774,
-      "estimated_cost_usd": 0.172886
+      "estimated_cost_usd": 0.171386
     },
     {
       "project": "/home/dev/projects/billing-service",
       "conversations": 2,
       "total_tokens": 23080,
-      "estimated_cost_usd": 0.01596
+      "estimated_cost_usd": 0.01396
     }
   ],
   "tools": {
@@ -163,7 +163,7 @@
       "day": "2026-09-29",
       "responses": 2,
       "total_tokens": 76565,
-      "estimated_cost_usd": 0.05831,
+      "estimated_cost_usd": 0.05631,
       "models": {
         "claude-opus-5-5": {
           "input": 15,
@@ -181,7 +181,7 @@
           "cache_write_5m": 1500,
           "cache_write_1h": 0,
           "total_tokens": 22350,
-          "estimated_cost_usd": 0.01585
+          "estimated_cost_usd": 0.01385
         }
       }
     },
@@ -215,7 +215,7 @@
       "day": null,
       "responses": 0,
       "total_tokens": 18400,
-      "estimated_cost_usd": 0.0204,
+      "estimated_cost_usd": 0.0189,
       "models": {
         "claude-sonnet-5-5": {
           "input": 200,
@@ -224,7 +224,7 @@
           "cache_write_5m": 0,
           "cache_write_1h": 2500,
           "total_tokens": 18400,
-          "estimated_cost_usd": 0.0204
+          "estimated_cost_usd": 0.0189
         }
       }
     }

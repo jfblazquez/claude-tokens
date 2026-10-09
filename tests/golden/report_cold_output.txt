@@ -4,7 +4,7 @@ Conversation usage
  Scope    | ID                | Task                                             | Model             | Total   | Input | Output | Cache read | Cache write 5m/1h | Cost    
 ----------+-------------------+--------------------------------------------------+-------------------+---------+-------+--------+------------+-------------------+---------
  subagent | a1b2c3d4e5f6a7b8c | Explore cache invalidation call sites            | claude-haiku-4-5  | 11.000  | 300   | 500    | 9.000      | 1.200/0           | $0.0052 
- subagent | b2c3d4e5f6a7b8c9d | Review cache tests                               | claude-sonnet-5-5 | 18.400  | 200   | 700    | 15.000     | 0/2.500           | $0.0204 
+ subagent | b2c3d4e5f6a7b8c9d | Review cache tests                               | claude-sonnet-5-5 | 18.400  | 200   | 700    | 15.000     | 0/2.500           | $0.0189 
  main     | main              | Add request-cache invalidation when the config … | claude-opus-5-5   | 161.344 | 144   | 4.400  | 153.000    | 800/3.000         | $0.1472 
 
 Duplicates skipped: a1b2c3d4e5f6a7b8c=1, b2c3d4e5f6a7b8c9d=1, main=5
@@ -14,7 +14,7 @@ Summary by model
 -------------------+---------+-------+--------+-------------+------------+-------------------+---------
  claude-haiku-4-5  | 11.000  | 300   | 500    | 1.000       | 9.000      | 1.200/0           | $0.0052 
  claude-opus-5-5   | 161.344 | 144   | 4.400  | 12.300      | 153.000    | 800/3.000         | $0.1472 
- claude-sonnet-5-5 | 18.400  | 200   | 700    | 1.400       | 15.000     | 0/2.500           | $0.0204 
+ claude-sonnet-5-5 | 18.400  | 200   | 700    | 1.400       | 15.000     | 0/2.500           | $0.0189 
 * Raw output is shown only when persisted stream events differ from de-duplicated API responses.
 
 Last observed context (main conversation)
@@ -29,5 +29,5 @@ Cold-summary estimate (without cache)
 -----------------+------------+----------------+---------
  claude-opus-5-5 | 61.009     | 500            | $0.2540 
 
-Estimated cost: $0.1728
+Estimated cost: $0.1713
 --- stderr
