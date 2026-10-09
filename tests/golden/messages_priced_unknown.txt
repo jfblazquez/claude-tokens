@@ -4,9 +4,9 @@ Messages (main): Retry policy for ledger exports
  # | Time (UTC)          | Role      | Model             | Input | Output | Cache read | Cache write 5m/1h | Context | Cost     | Content                         
 ---+---------------------+-----------+-------------------+-------+--------+------------+-------------------+---------+----------+---------------------------------
  1 | 2026-09-29 08:00:00 | user      |                   |       |        |            |                   |         |          | Retry policy for ledger exports 
- 2 | 2026-09-29 08:00:04 | assistant | claude-sonnet-5-6 | 50    | 800    | 20.000     | 1.500/0           | 21.550  | ~$0.0158 | Adding retries.                 
+ 2 | 2026-09-29 08:00:04 | assistant | claude-sonnet-5-6 | 50    | 800    | 20.000     | 1.500/0           | 21.550  | ~$0.0138 | Adding retries.                 
  3 | 2026-09-30 12:00:00 | assistant | acme-model-1      | 400   | 300    | 0          | 0/0               | 400     | N/D      | Done.                           
 
-3 message(s), 2 response(s). Estimated cost: ~$0.0158
+3 message(s), 2 response(s). Estimated cost: ~$0.0138
 --- stderr
 warning: <FIXTURES>/projects/-home-dev-projects-billing-service/22222222-2222-4222-8222-222222222222.jsonl:3: Expecting property name enclosed in double quotes

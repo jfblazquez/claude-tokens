@@ -12,7 +12,7 @@ from fixtures import (API, BILLING, CONV_A, CONV_B, LAST_RESPONSE, SUB_EXPLORE, 
 from ctokens.cli import show_bash_commands
 from ctokens.content import CLIP, bash_commands, conversation_messages, last_response, touched_files, transcript
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
-from ctokens.pricing import load_prices
+from ctokens.pricing import estimated_cost, load_prices, rate_of, usage_key
 from ctokens.reports import report, scan_totals, totals_report
 from ctokens.text import messages_text
 
@@ -154,6 +154,42 @@ class ScanTotalsTest(CoreTest):
         scan_totals(self.projects, stats=cache.__getitem__)
         self.assertEqual(cache, snapshot)
         self.assertEqual(cache, {path: file_stats(path) for path in cache})
+
+
+class LongPromptPricingTest(unittest.TestCase):
+    def test_usage_key_splits_at_the_threshold(self):
+        self.assertEqual(usage_key("claude-haiku-5-5", 100_000), "claude-haiku-5-5")
+        self.assertEqual(usage_key("claude-haiku-5-5", 100_001), "claude-haiku-5-5 (prompt >100k)")
+        self.assertEqual(usage_key("claude-haiku-5-5-20261001", 150_000), "claude-haiku-5-5 (prompt >100k)")
+        self.assertEqual(usage_key("claude-opus-5-5", 900_000), "claude-opus-5-5")
+
+    def test_rates(self):
+        prices = load_prices(None)
+        self.assertEqual(rate_of(prices, "claude-haiku-5-5"), (.1, .5, False, .1))
+        self.assertEqual(rate_of(prices, "claude-haiku-5-5 (prompt >100k)"), (.5, 2.5, False, .1))
+        self.assertEqual(rate_of(prices, "claude-sonnet-5-5"), (2, 10, False, .05))
+        # A future haiku is estimated from haiku-5-5's base rate, never from its long-prompt rate.
+        self.assertEqual(rate_of(prices, "claude-haiku-5-6"), (.1, .5, True, .1))
+
+    def test_each_response_is_priced_by_its_own_prompt(self):
+        short, long = usage(1_000, 2_000, 80_000, five=4_000), usage(1_000, 2_000, 120_000, hour=4_000)
+        events = [assistant("msg_1", "claude-haiku-5-5", "2026-10-08T10:00:00.000Z", "e1", [text("a")], short),
+                  assistant("msg_2", "claude-haiku-5-5", "2026-10-08T10:01:00.000Z", "e2", [text("b")], long)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "haiku.jsonl"
+            write_jsonl(path, events, 1790000000)
+            models = parse_log(path, "main", "main", "task")["models"]
+            self.assertEqual(file_stats(path)["models"], models)
+            messages = conversation_messages(path, "main", load_prices(None))["messages"]
+        self.assertEqual(sorted(models), ["claude-haiku-5-5", "claude-haiku-5-5 (prompt >100k)"])
+        self.assertEqual(models["claude-haiku-5-5 (prompt >100k)"]["cache_write_1h"], 4_000)
+        prices = load_prices(None)
+        cost = sum(estimated_cost(tokens, rate_of(prices, model)) for model, tokens in models.items())
+        expected = ((1_000 + .1 * 80_000 + 1.25 * 4_000) * .1 + 2_000 * .5
+                    + (1_000 + .1 * 120_000 + 2 * 4_000) * .5 + 2_000 * 2.5) / 1e6
+        self.assertAlmostEqual(cost, expected, places=12)
+        self.assertEqual([m["model"] for m in messages], ["claude-haiku-5-5", "claude-haiku-5-5"])
+        self.assertAlmostEqual(sum(m["estimated_cost_usd"] for m in messages), expected, places=12)
 
 
 class DailySeriesTest(CoreTest):

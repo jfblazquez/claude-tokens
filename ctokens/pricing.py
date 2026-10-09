@@ -16,14 +16,21 @@ PRICES = {
     "claude-opus-4-6": (5, 25), "claude-opus-4-5": (5, 25),
     "claude-opus-4-1": (15, 75), "claude-opus-4": (15, 75),
     "claude-3-opus": (15, 75),
-    "claude-sonnet-5-5": (2, 10),
+    "claude-sonnet-5-5": (2, 10, .05),
     "claude-sonnet-5": (2, 10), "claude-sonnet-4-6": (3, 15),
     "claude-sonnet-4-5": (3, 15), "claude-sonnet-4": (3, 15),
     "claude-3-7-sonnet": (3, 15), "claude-3-5-sonnet": (3, 15),
+    "claude-haiku-5-5": (.1, .5), "claude-haiku-5-5 (prompt >100k)": (.5, 2.5),
     "claude-haiku-4-5": (1, 5),
     "claude-haiku-3-5": (.8, 4), "claude-3-5-haiku": (.8, 4),
     "claude-3-haiku": (.25, 1.25),
 }
+
+
+# Models priced by prompt length (input + cache reads + cache writes): a response whose
+# prompt is over the threshold is counted under the second key, which has its own price.
+LONG_PROMPT = {"claude-haiku-5-5": (100_000, "claude-haiku-5-5 (prompt >100k)")}
+LONG_PROMPT_KEYS = frozenset(key for _, key in LONG_PROMPT.values())
 
 
 # Known model families. Used to price unreleased versions (opus-6, fable-5-2,
@@ -62,6 +69,18 @@ def priced(rate, estimated):
     return input_rate, output_rate, estimated, cache_read[0] if cache_read else .1
 
 
+def base_model(model):
+    """The model id without a trailing -YYYYMMDD release date."""
+    head, _, tail = model.rpartition("-")
+    return head if tail.isdigit() and len(tail) == 8 else model
+
+
+def usage_key(model, prompt_tokens):
+    """The key a response's tokens are counted under: the long-prompt key above its model's threshold."""
+    tier = LONG_PROMPT.get(base_model(model))
+    return tier[1] if tier and prompt_tokens > tier[0] else model
+
+
 def rate_of(prices, model):
     """(input, output, estimated, cache_read multiplier) for a model, or None when unpriceable.
 
@@ -69,8 +88,7 @@ def rate_of(prices, model):
     belongs to a known family (claude-opus-6, claude-fable-5-2, ...) is priced
     from the closest earlier sibling and flagged as estimated.
     """
-    head, _, tail = model.rpartition("-")
-    base = head if tail.isdigit() and len(tail) == 8 else model
+    base = base_model(model)
     if base in prices:
         return priced(prices[base], False)
     parsed = parse_model(base)
@@ -78,6 +96,7 @@ def rate_of(prices, model):
         return None
     family, version = parsed
     known = [(other[1], rate) for name, rate in prices.items()
+             if name not in LONG_PROMPT_KEYS
              for other in [parse_model(name)] if other and other[0] == family]
     if not known:
         return None

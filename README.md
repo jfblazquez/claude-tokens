@@ -190,10 +190,10 @@ up to the usage report. With `--json` each message also has its blocks: text,
 thinking, tool calls and tool results. Tool inputs and results keep their first
 4.000 characters and their original length.
 
-Built-in rates are USD per million tokens, checked on 2026-10-01 against the
+Built-in rates are USD per million tokens, checked on 2026-10-09 against the
 [official Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing).
 They include the published cache multipliers: `0.1x` for reads (`0.05x` on
-`claude-opus-5-5`, `0.025x` on `claude-fable-5-1` and `claude-mythos-5-1`),
+`claude-opus-5-5` and `claude-sonnet-5-5`, `0.025x` on `claude-fable-5-1` and `claude-mythos-5-1`),
 `1.25x` for 5-minute writes, and `2x` for 1-hour writes. The result is an API estimate; it
 does not include taxes, discounts, server-tool charges, fast mode, or
 provider/region premiums.
@@ -206,9 +206,16 @@ provider/region premiums.
 | `claude-opus-4-1`, `claude-opus-4`, `claude-3-opus` | 15 | 75 |
 | `claude-sonnet-5-5`, `claude-sonnet-5` | 2 | 10 |
 | `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4`, `claude-3-7-sonnet`, `claude-3-5-sonnet` | 3 | 15 |
+| `claude-haiku-5-5` | 0.1 | 0.5 |
+| `claude-haiku-5-5 (prompt >100k)` | 0.5 | 2.5 |
 | `claude-haiku-4-5` | 1 | 5 |
 | `claude-3-5-haiku` | 0.8 | 4 |
 | `claude-3-haiku` | 0.25 | 1.25 |
+
+`claude-haiku-5-5` is priced by prompt length: a response whose prompt (input,
+cache reads and cache writes) is over 100,000 tokens pays the higher rates. Its
+tokens are counted under `claude-haiku-5-5 (prompt >100k)`, which shows up as a
+separate model in the reports and can be overridden in a pricing file like any other.
 
 Fast mode bills at `8`/`40` on `claude-opus-5-5` and `10`/`50` on `claude-opus-5`,
 but the JSONL does not record it, so those responses are costed at the standard rate.

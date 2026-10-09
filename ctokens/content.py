@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 from .logs import conversation_sources, lines, parse_timestamp, short, subagent_task, task_from_log, tool_uses
-from .pricing import estimated_cost, rate_of
+from .pricing import estimated_cost, rate_of, usage_key
 
 # Tool inputs and results can hold whole files; the transcript keeps their head and the original length.
 CLIP = 4000
@@ -155,7 +155,7 @@ def response_entry(event, message, timestamp, prices):
     tokens = {"input": count(usage, "input_tokens") or 0, "output": count(usage, "output_tokens") or 0,
               "cache_read": count(usage, "cache_read_input_tokens") or 0, "cache_write_5m": five, "cache_write_1h": hour}
     model = str(message.get("model") or "modelo-desconocido")
-    rate = rate_of(prices, model)
+    rate = rate_of(prices, usage_key(model, tokens["input"] + tokens["cache_read"] + five + hour))
     server = usage.get("server_tool_use")
     return {"role": "assistant", "kind": "error" if event.get("isApiErrorMessage") else "response",
             "timestamp": timestamp, "model": model, "stop_reason": message.get("stop_reason"),

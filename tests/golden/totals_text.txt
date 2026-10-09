@@ -6,14 +6,14 @@ Overall usage (projects folder)
   Volume      : 5 conversations across 2 projects, 2 subagents
   Tokens      : 213.854 total, 6.740 generated (output)
   Cache hits  : 95.1% of input tokens served from cache
-  Total cost  : $0.19 ($0.0378 per conversation)
+  Total cost  : $0.19 ($0.0371 per conversation)
 
 Usage by model
  Model             | Total tokens | % tokens | Cost   | % cost 
 -------------------+--------------+----------+--------+--------
- claude-opus-5-5   | 161.344      | 75.4%    | $0.15  | 77.9%  
- claude-sonnet-5-5 | 18.400       | 8.6%     | $0.02  | 10.8%  
- claude-sonnet-5-6 | 22.350       | 10.5%    | ~$0.02 | 8.4%   
+ claude-opus-5-5   | 161.344      | 75.4%    | $0.15  | 79.4%  
+ claude-sonnet-5-5 | 18.400       | 8.6%     | $0.02  | 10.2%  
+ claude-sonnet-5-6 | 22.350       | 10.5%    | ~$0.01 | 7.5%   
  claude-haiku-4-5  | 11.060       | 5.2%     | $0.01  | 2.9%   
  acme-model-1      | 700          | 0.3%     | N/D    | N/D    
 
@@ -35,7 +35,7 @@ Top projects by cost
  Project                            | Conversations | Total tokens | Cost  
 ------------------------------------+---------------+--------------+-------
  /home/dev/projects/api-gateway     | 3             | 190.774      | $0.17 
- /home/dev/projects/billing-service | 2             | 23.080       | $0.02 
+ /home/dev/projects/billing-service | 2             | 23.080       | $0.01 
 
 Models without pricing: acme-model-1
 
