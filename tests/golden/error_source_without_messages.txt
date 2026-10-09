@@ -5,4 +5,4 @@ usage: claude_tokens.py [-h] [--projects-dir PROJECTS_DIR] [--project PROJECT] [
                         [--cold-summary-output COLD_SUMMARY_OUTPUT] [--context-window CONTEXT_WINDOW]
                         [--last-response] [--bash] [--files] [--messages] [--source SOURCE] [--serve] [--port PORT]
                         [conversation]
-claude_tokens.py: error: does not exist: 99999999-9999-4999-8999-999999999999
+claude_tokens.py: error: --source requires --messages

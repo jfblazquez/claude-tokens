@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 from .catalog import default_projects_dir, list_conversations, resolve_conversation
-from .content import bash_commands, last_response, touched_files
+from .content import bash_commands, conversation_messages, last_response, touched_files
 from .logs import discover
 from .pricing import load_prices
 from .reports import report, scan_totals, totals_report
-from .text import ANSI, fmt, render_markdown, report_text, show_page, table, totals_text
+from .text import ANSI, fmt, messages_text, render_markdown, report_text, show_page, table, totals_text
 
 
 def pick_conversation(projects_dir, project_filter, page_size=10):
@@ -103,6 +103,19 @@ def show_touched_files(path, as_json):
     print(f"\n{fmt(len(files))} distinct file(s).")
 
 
+def show_messages(path, source, prices, as_json):
+    data = conversation_messages(path, source, prices)
+    if data is None:
+        return False
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    elif not data["messages"]:
+        print("(no messages)", file=sys.stderr)
+    else:
+        messages_text(data)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("conversation", type=Path, nargs="?",
@@ -120,6 +133,9 @@ def main():
     parser.add_argument("--last-response", action="store_true", help="print the last assistant response instead of the usage report")
     parser.add_argument("--bash", action="store_true", help="print every Bash command the conversation ran")
     parser.add_argument("--files", action="store_true", help="print the files read or written by the conversation")
+    parser.add_argument("--messages", action="store_true",
+                        help="print every message of the conversation with the token usage of each response")
+    parser.add_argument("--source", help="with --messages, a subagent id to show instead of main")
     parser.add_argument("--serve", action="store_true",
                         help="start the local web server (JSON API and browser UI) on 127.0.0.1")
     parser.add_argument("--port", type=int, help="port for --serve (default: 8765)")
@@ -152,6 +168,16 @@ def main():
         args.conversation = resolved
     if not args.conversation.is_file():
         parser.error(f"does not exist: {args.conversation}")
+    if args.messages:
+        try:
+            prices = load_prices(args.pricing)
+        except ValueError as error:
+            parser.error(str(error))
+        if not show_messages(args.conversation, args.source or "main", prices, args.json):
+            parser.error(f"no source {args.source!r} in this conversation")
+        return
+    if args.source is not None:
+        parser.error("--source requires --messages")
     if args.last_response or args.bash or args.files:
         if args.last_response:
             show_last_response(args.conversation, args.json)
@@ -176,7 +202,7 @@ def main():
 DEFAULT_PORT = 8765
 NOT_WITH_SERVE = (("conversation", "a conversation"), ("totals", "--totals"), ("json", "--json"),
                   ("last_response", "--last-response"), ("bash", "--bash"), ("files", "--files"),
-                  ("project", "--project"))
+                  ("messages", "--messages"), ("source", "--source"), ("project", "--project"))
 
 
 def start_server(parser, args):

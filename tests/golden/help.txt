@@ -2,7 +2,7 @@
 --- stdout
 usage: claude_tokens.py [-h] [--projects-dir PROJECTS_DIR] [--project PROJECT] [--totals] [--pricing PRICING] [--json]
                         [--cold-summary-output COLD_SUMMARY_OUTPUT] [--context-window CONTEXT_WINDOW]
-                        [--last-response] [--bash] [--files] [--serve] [--port PORT]
+                        [--last-response] [--bash] [--files] [--messages] [--source SOURCE] [--serve] [--port PORT]
                         [conversation]
 
 Summarize a Claude Code JSONL conversation and its subagents.
@@ -26,6 +26,8 @@ options:
   --last-response       print the last assistant response instead of the usage report
   --bash                print every Bash command the conversation ran
   --files               print the files read or written by the conversation
+  --messages            print every message of the conversation with the token usage of each response
+  --source SOURCE       with --messages, a subagent id to show instead of main
   --serve               start the local web server (JSON API and browser UI) on 127.0.0.1
   --port PORT           port for --serve (default: 8765)
 --- stderr

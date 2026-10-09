@@ -11,7 +11,7 @@ from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
 from ..catalog import conversation_rows, find_conversation, project_path_of, session_title
-from ..content import bash_commands, last_response, touched_files
+from ..content import bash_commands, conversation_messages, last_response, touched_files, transcript
 from ..logs import discover, file_stats, parse_log
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache
@@ -30,7 +30,7 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 MAX_DISCARDED_BODY = 1 << 20
-CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files))?")
+CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages))?")
 
 
 class Config(NamedTuple):
@@ -107,7 +107,8 @@ class Handler(BaseHTTPRequestHandler):
         if path in STATIC_FILES:
             return self.static(STATIC_FILES[path])
         config, cache = self.server.config, self.server.cache
-        project = parse_qs(query).get("project", [None])[0]
+        params = parse_qs(query)
+        project = params.get("project", [None])[0]
         if path == "/api/conversations":
             return json_response(200, {"projects_dir": str(config.projects_dir),
                                        "conversations": conversation_rows(config.projects_dir, project,
@@ -116,11 +117,11 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, cached_totals(cache, config, project))
         match = CONVERSATION_ROUTE.fullmatch(path)
         if match:
-            return self.conversation(config, cache, *match.groups())
+            return self.conversation(config, cache, *match.groups(), params.get("source", ["main"])[0])
         return NOT_FOUND
 
     @staticmethod
-    def conversation(config, cache, conversation_id, view):
+    def conversation(config, cache, conversation_id, view, source):
         path, matches = find_conversation(conversation_id, config.projects_dir)
         if path is None:
             if len(matches) > 1:
@@ -132,6 +133,9 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, {"bash_commands": bash_commands(path)})
         if view == "files":
             return json_response(200, {"files": touched_files(path)})
+        if view == "messages":
+            data = conversation_messages(path, source, config.prices, cached_transcript(cache))
+            return json_response(200, data) if data else json_response(404, {"error": "source not found"})
         return json_response(200, report(discover(path, cached_parse(cache)), config.prices,
                                          config.cold_summary_output, config.context_window))
 
@@ -177,6 +181,10 @@ def cached_parse(cache):
         # report() adds costs to these dicts; kind, id and task come from the caller (task may live in .meta.json).
         return {**copy.deepcopy(value), "kind": kind, "id": identifier, "task": task}
     return parse
+
+
+def cached_transcript(cache):
+    return lambda path, prices: cache.get("transcript", path, lambda p: transcript(p, prices))
 
 
 def cached_meta(cache):

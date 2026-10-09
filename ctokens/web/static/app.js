@@ -251,7 +251,7 @@ function parseRoute(hash) {
   const path = String(hash || "").replace(/^#/, "") || "/";
   if (path === "/") return { view: "list" };
   if (path === "/totals") return { view: "totals" };
-  const m = path.match(/^\/c\/([^/]+)(?:\/(response|bash|files))?\/?$/);
+  const m = path.match(/^\/c\/([^/]+)(?:\/(messages|response|bash|files))?\/?$/);
   if (m) {
     try {
       return { view: m[2] || "report", id: decodeURIComponent(m[1]) };
@@ -401,7 +401,7 @@ VIEWS.list = {
 };
 
 // ---------- conversation header and tabs (R4.5) ----------
-const TABS = [["report", "Usage"], ["response", "Last response"], ["bash", "Bash commands"], ["files", "Files"]];
+const TABS = [["report", "Usage"], ["messages", "Conversation"], ["response", "Last response"], ["bash", "Bash commands"], ["files", "Files"]];
 
 async function refreshList() {
   try {
@@ -564,8 +564,8 @@ const SANITIZE = {
   FORBID_ATTR: ["style"],
 };
 
-function renderMarkdown(markdown) {
-  const box = h("article", { class: "card md" });
+function renderMarkdown(markdown, cls = "card md") {
+  const box = h("article", { class: cls });
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
     box.append(h("pre", {}, markdown));
     return box;
@@ -696,6 +696,156 @@ VIEWS.files = {
         { key: "sources", label: "Sources", cls: "chips", sortValue: (r) => r.sources.length, render: (r) => r.sources.map(sourceChip) },
       ], rows, { id: "files", sortKey: "file", dir: 1 }),
       h("div", { class: "count" }, `${fmt(rows.length)} distinct file${rows.length === 1 ? "" : "s"}`)];
+  },
+};
+
+// ---------- conversation messages ----------
+const messagesState = { id: null, source: "main", toBottom: false };
+const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results" };
+
+const withSource = (path, source) => (source === "main" ? path : `${path}?source=${encodeURIComponent(source)}`);
+
+// Tool inputs and results can be long, so a block is only built the first time it is opened.
+function lazyDetails(cls, summary, build, title = null) {
+  const body = h("div", { class: "blk-body" });
+  const box = h("details", { class: cls }, h("summary", { title }, summary), body);
+  box.addEventListener("toggle", () => { if (box.open && !body.firstChild) append(body, build()); });
+  return box;
+}
+
+const clippedPre = (item) => [h("pre", {}, item.text), item.size > item.text.length
+  ? h("div", { class: "footnote" }, `Showing the first ${fmt(item.text.length)} of ${fmt(item.size)} characters`) : null];
+
+const labelled = (label, item) => h("div", {}, h("div", { class: "lbl" }, label), clippedPre(item));
+
+// The figures that change from one response to the next stand out; the rest stay small and muted.
+function usageStats(m) {
+  const u = m.usage;
+  const items = [
+    ["Context", fmt(u.context), "key"],
+    ["Output", u.thinking ? `${fmt(u.output)} (${fmt(u.thinking)} thinking)` : fmt(u.output), "key"],
+    ["Cost", money(m.estimated_cost_usd, m.price_estimated), "key"],
+    ["Input", fmt(u.input)],
+    ["Cache read", fmt(u.cache_read)],
+    ["Cache write 5m/1h", `${fmt(u.cache_write_5m)}/${fmt(u.cache_write_1h)}`],
+    u.web_search_requests ? ["Web searches", fmt(u.web_search_requests)] : null,
+    u.web_fetch_requests ? ["Web fetches", fmt(u.web_fetch_requests)] : null,
+    u.speed && u.speed !== "standard" ? ["Speed", u.speed] : null,
+    u.service_tier && u.service_tier !== "standard" ? ["Tier", u.service_tier] : null,
+  ].filter(Boolean);
+  return h("dl", { class: "ustats" }, items.map(([k, v, cls]) => h("div", { class: cls }, h("dt", {}, k), h("dd", {}, v))));
+}
+
+const ROUTINE_STOPS = new Set(["tool_use", "end_turn", "stop_sequence"]);
+const cacheMiss = (u) => u.cache_read === 0 && u.cache_write_5m + u.cache_write_1h > 0;
+
+function toolBlock(block, result) {
+  const failed = !!(result && result.is_error);
+  return lazyDetails(failed ? "blk failed" : "blk",
+    [h("span", { class: "chip" }, block.name), failed ? h("span", { class: "badge" }, "error") : null,
+      result ? null : h("span", { class: "muted" }, "no result"), block.summary ? h("span", { class: "mono sum" }, block.summary) : null],
+    () => [block.input.map((f) => labelled(f.name, f)), result ? labelled(failed ? "result (error)" : "result", result) : null],
+    block.summary || null);
+}
+
+// tools: tool_use id -> its result, plus the ids of every tool_use, so results render under the call that made them.
+function messageBlocks(m, tools) {
+  return m.blocks.map((b) => {
+    if (b.type === "text") return m.role === "assistant" ? renderMarkdown(b.text, "md") : h("pre", { class: "prompt" }, b.text);
+    if (b.type === "thinking") return lazyDetails("think", "Thinking", () => h("pre", {}, b.text));
+    if (b.type === "tool_use") return toolBlock(b, tools.results.get(b.id));
+    if (b.type === "tool_result" && !tools.calls.has(b.tool_use_id)) {
+      return lazyDetails(b.is_error ? "blk failed" : "blk", "Tool result", () => clippedPre(b));
+    }
+    return null;
+  });
+}
+
+// showModel: the model name is written only when it differs from the previous response; the swatch is always there.
+function messageItem(m, tools, showModel) {
+  const time = m.when ? h("time", { datetime: m.when.toISOString(), title: `${m.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(m.when))
+    : h("span", { class: "notime" }, "—");
+  const num = m.n ? h("span", { class: "n" }, `#${m.n}`) : null;
+  if (m.role === "assistant") {
+    const item = h("li", { class: m.kind === "error" ? "msg failed" : "msg" },
+      h("div", { class: "msg-head" }, num, time, h("span", { class: "model", title: m.model }, swatch(m.model), showModel ? m.model : null),
+        m.kind === "error" ? h("span", { class: "badge" }, "API error") : null,
+        m.stop_reason && !ROUTINE_STOPS.has(m.stop_reason) ? h("span", { class: "badge warn" }, m.stop_reason) : null,
+        cacheMiss(m.usage) ? h("span", { class: "badge warn", title: "Nothing was read from cache: the whole context was written again" },
+          "cache miss") : null,
+        usageStats(m)),
+      h("div", { class: "msg-body" }, messageBlocks(m, tools)));
+    item.style.borderLeftColor = colorOf(m.model);
+    return item;
+  }
+  const collapsed = m.kind === "meta" || m.kind === "summary";
+  return h("li", { class: collapsed ? "msg aside" : "msg user" },
+    h("div", { class: "msg-head" }, num, time, h("b", {}, KIND_LABELS[m.kind])),
+    h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)));
+}
+
+function messageItems(messages, tools) {
+  const items = [];
+  let day = null, model = null;
+  for (const m of messages) {
+    const today = m.when ? m.when.toISOString().slice(0, 10) : "undated";
+    if (today !== day) {
+      items.push(h("li", { class: "day" }, today === "undated" ? "No timestamp" : `${today} (UTC)`));
+      day = today;
+      model = null;
+    }
+    items.push(messageItem(m, tools, m.role === "assistant" && m.model !== model));
+    if (m.role === "assistant") model = m.model;
+  }
+  return items;
+}
+
+const ellipsis = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
+const sourceOption = (s) => `${s.id === "main" ? "main" : `subagent ${s.id.slice(0, 8)}`} · ${ellipsis(String(s.task || ""), 60)}`;
+const visibleMessages = (messages) => messages.filter((m) => m.kind !== "tool_result");
+
+VIEWS.messages = {
+  title: (route) => `Conversation · ${convTitle(route)}`,
+  load: async (route, { refresh }) => {
+    if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main" });
+    // A fresh open starts at the latest message; a refresh keeps the reader where they are.
+    if (!refresh) messagesState.toBottom = true;
+    const data = await loadConversation(route, withSource("/messages", messagesState.source));
+    if (data.source === "main") setCount(route.id, "messages", visibleMessages(data.messages || []).length);
+    return data;
+  },
+  head: convHead,
+  render(data) {
+    let n = 0;
+    // Same numbering as the CLI: tool results are not counted, since they render under their call.
+    const messages = (data.messages || []).map((m) => ({ ...m, n: m.kind === "tool_result" ? null : ++n, when: parseStamp(m.timestamp) }));
+    const tools = { results: new Map(), calls: new Set() };
+    for (const m of messages) {
+      for (const b of m.blocks) {
+        if (b.type === "tool_result") tools.results.set(b.tool_use_id, b);
+        if (b.type === "tool_use") tools.calls.add(b.id);
+      }
+    }
+    const shown = messages.filter((m) => !(m.kind === "tool_result" && m.blocks.every((b) => tools.calls.has(b.tool_use_id))));
+    const responses = messages.filter((m) => m.role === "assistant");
+    const cost = responses.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0);
+    const source = h("select", { id: "messages-source", "aria-label": "Source",
+      onchange: (e) => { messagesState.source = e.target.value; load({ refresh: false }); } },
+    (data.sources || []).map((s) => h("option", { value: s.id, selected: s.id === data.source }, sourceOption(s))));
+    const toolbar = h("div", { class: "toolbar" },
+      h("div", { class: "filters" }, h("label", { class: "field" }, "Source", source),
+        h("button", { class: "btn", type: "button", onclick: () => window.scrollTo(0, 0) }, "↑ First"),
+        h("button", { class: "btn", type: "button", onclick: () => window.scrollTo(0, document.documentElement.scrollHeight) }, "↓ Last")),
+      h("span", { class: "count" }, `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
+        + money(cost, responses.some((m) => m.price_estimated))));
+    const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
+    if (!shown.length) return [meta, toolbar, emptyState("No messages", "This log has no user or assistant messages yet.")];
+    return [meta, toolbar, h("ol", { class: "msgs" }, messageItems(shown, tools))];
+  },
+  after: () => {
+    if (!messagesState.toBottom) return;
+    messagesState.toBottom = false;
+    window.scrollTo(0, document.documentElement.scrollHeight);
   },
 };
 
@@ -994,7 +1144,7 @@ async function load({ refresh }) {
     updateBar();
   }
   try {
-    const data = await view.load(route);
+    const data = await view.load(route, { refresh });
     if (seq !== app.seq) return;
     Object.assign(app, { phase: "ready", data, error: null, loadedAt: new Date(), failedAt: null, busy: false });
     show({ keepScroll: refresh });

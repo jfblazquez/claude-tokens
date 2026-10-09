@@ -172,6 +172,8 @@ tr.total td { font-weight: 650; background: var(--surface-2); border-top: 1px so
 .md pre code, .md pre code.hljs { background: none; padding: 0; font-size: 12.5px; line-height: 1.55; overflow-wrap: normal; }
 .md table { width: max-content; max-width: 100%; margin: var(--s3) 0; border: 1px solid var(--border); display: block; overflow-x: auto; }
 .md th { text-transform: none; letter-spacing: 0; font-size: var(--t-sm); }
+/* break-word, unlike the anywhere set on .md, does not shrink columns to one letter: a wide table scrolls instead. */
+.md table { overflow-wrap: break-word; }
 .md td { white-space: normal; }
 .md hr { border: 0; border-top: 1px solid var(--border); }
 
@@ -206,3 +208,50 @@ tr.total td { font-weight: 650; background: var(--surface-2); border-top: 1px so
   padding: 1px 8px; border-radius: 4px; background: var(--fg); color: var(--bg); font: 600 var(--t-xs)/1.5 var(--font);
   white-space: nowrap; pointer-events: none; z-index: 2; }
 .md pre.copyable[data-copied]::after { bottom: auto; top: var(--s2); left: auto; right: var(--s2); margin: 0; }
+
+/* Conversation messages */
+.msgs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s3); }
+.msgs li.day { color: var(--muted); font-size: var(--t-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums; padding-top: var(--s2); }
+.msg { display: grid; gap: var(--s2); min-width: 0; padding: var(--s3) var(--s4); background: var(--surface);
+  border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: var(--r); }
+.msg.user { background: var(--accent-soft); border-left-color: var(--accent); }
+.msg.aside { background: var(--surface-2); }
+.msg.failed { border-left-color: var(--err-fg); }
+.msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); color: var(--muted); font-size: var(--t-sm); }
+.msg-head b { color: var(--fg); font-weight: 650; }
+.msg-head .n, .msg-head time, .msg-head .notime { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.msg-head .model { display: inline-flex; align-items: center; }
+.msg-head .model .sw { margin-right: 6px; }
+.ustats { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); margin: 0 0 0 auto; font-size: var(--t-xs); }
+.ustats div { display: flex; gap: 5px; white-space: nowrap; }
+.ustats dd { margin: 0; font-variant-numeric: tabular-nums; }
+.ustats .key { font-size: var(--t-sm); }
+.ustats .key dd { color: var(--fg); font-weight: 650; }
+.badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+.msg-body { display: grid; gap: var(--s2); min-width: 0; }
+.msg .md { padding: 0; }
+.prompt { margin: 0; font-family: var(--font); white-space: pre-wrap; overflow-wrap: anywhere; }
+.blk { min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
+.blk.failed { border-color: var(--err-fg); }
+.blk > summary { cursor: pointer; padding: 4px 10px; color: var(--muted); font-size: var(--t-sm);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.blk > summary > * { margin-left: var(--s2); }
+.blk > summary .chip { margin-right: 0; }
+.blk > summary .sum { color: var(--fg); }
+.badge { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--err-bg); color: var(--err-fg); font-size: var(--t-xs);
+  font-weight: 600; }
+.think > summary { cursor: pointer; width: fit-content; color: var(--muted); font-size: var(--t-xs); }
+.think > summary:hover { color: var(--fg); }
+.think > .blk-body { border-top: 0; padding: var(--s1) 0 0; }
+.blk-body { display: grid; gap: var(--s2); min-width: 0; padding: var(--s2) 10px var(--s3); border-top: 1px solid var(--border); }
+.blk-body .lbl { margin-bottom: 2px; color: var(--muted); font-family: var(--mono); font-size: var(--t-xs); }
+.blk-body pre { margin: 0; max-height: 420px; overflow: auto; padding: 6px 10px; background: var(--code-bg); border-radius: 6px;
+  font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  /* The bar wraps to three rows on a phone; fixed, it would hide a fifth of the screen. */
+  .appbar { position: static; }
+  .msg { padding: var(--s3); }
+  .ustats { width: 100%; margin-left: 0; column-gap: var(--s3); }
+}

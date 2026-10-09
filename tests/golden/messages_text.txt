@@ -1,0 +1,12 @@
+--- exit 0
+--- stdout
+Messages (main): Add request-cache invalidation when the config is reloaded
+ # | Time (UTC)          | Role      | Model           | Input | Output | Cache read | Cache write 5m/1h | Context | Cost    | Content                                                      
+---+---------------------+-----------+-----------------+-------+--------+------------+-------------------+---------+---------+--------------------------------------------------------------
+ 1 | 2026-09-28 10:00:00 | user      |                 |       |        |            |                   |         |         | Add request-cache invalidation when the config is reloaded   
+ 2 | 2026-09-28 10:00:05 | assistant | claude-opus-5-5 | 120   | 900    | 40.000     | 0/3.000           | 43.120  | $0.0505 | Looking at the cache.                                        
+ 3 | 2026-09-29 23:59:50 | assistant | claude-opus-5-5 | 15    | 1.400  | 52.000     | 800/0             | 52.815  | $0.0425 | → Read, Edit                                                 
+ 4 | 2026-09-30 00:00:10 | assistant | claude-opus-5-5 | 9     | 2.100  | 61.000     | 0/0               | 61.009  | $0.0542 | ## Request cache now invalidates on reload Entries are keye… 
+
+4 message(s), 3 response(s). Estimated cost: $0.1472
+--- stderr

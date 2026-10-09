@@ -10,10 +10,11 @@ from fixtures import (API, BILLING, CONV_A, CONV_B, LAST_RESPONSE, SUB_EXPLORE, 
                       text, tool, usage, write_jsonl)
 
 from ctokens.cli import show_bash_commands
-from ctokens.content import bash_commands, last_response, touched_files
+from ctokens.content import CLIP, bash_commands, conversation_messages, last_response, touched_files, transcript
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
 from ctokens.pricing import load_prices
-from ctokens.reports import scan_totals, totals_report
+from ctokens.reports import report, scan_totals, totals_report
+from ctokens.text import messages_text
 
 
 class CoreTest(unittest.TestCase):
@@ -267,6 +268,106 @@ class ContentTest(CoreTest):
         ], {"zz": [assistant("s1", "claude-haiku-4-5", "2026-09-28T11:00:00.000Z", "s1", [text("From sub.")], use)]})
         self.assertEqual(last_response(path), "From main.")
         self.assertEqual(last_response(self.conv_a), LAST_RESPONSE)
+
+
+
+def tool_result(tool_id, content, is_error=False, stamp=None):
+    event = {"type": "user", "uuid": f"r-{tool_id}", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_id, "content": content, "is_error": is_error}]}}
+    if stamp:
+        event["timestamp"] = stamp
+    return event
+
+
+class MessagesTest(ContentTest):
+    prices = load_prices(None)
+
+    def test_one_message_per_response_with_its_usage_and_cost(self):
+        messages = transcript(self.conv_a, self.prices)
+        self.assertEqual([(m["role"], m["kind"]) for m in messages],
+                         [("user", "prompt")] + [("assistant", "response")] * 3)
+        first = messages[1]
+        self.assertEqual([b["type"] for b in first["blocks"]], ["text", "tool_use"])
+        self.assertEqual(first["blocks"][1], {"type": "tool_use", "id": "toolu_A1", "name": "Bash",
+                                              "summary": "git status --short", "input": [
+                                                  {"name": "command", "text": "git status --short", "size": 18},
+                                                  {"name": "description", "text": "Show working tree status", "size": 24}]})
+        self.assertEqual(first["usage"], {"input": 120, "output": 900, "cache_read": 40000, "cache_write_5m": 0,
+                                          "cache_write_1h": 3000, "thinking": None, "context": 43120,
+                                          "web_search_requests": None, "web_fetch_requests": None,
+                                          "service_tier": None, "speed": None})
+        self.assertEqual((first["model"], first["timestamp"]), ("claude-opus-5-5", "2026-09-28T10:00:05.000Z"))
+        # The repeated Read block of msg_A2 is listed once.
+        self.assertEqual([b["id"] for b in messages[2]["blocks"]], ["toolu_A2", "toolu_A3"])
+
+    def test_costs_add_up_to_the_usage_report(self):
+        total = 0
+        for source, _ in conversation_sources(self.conv_a):
+            data = conversation_messages(self.conv_a, source, self.prices)
+            total += sum(m["estimated_cost_usd"] for m in data["messages"] if m["role"] == "assistant")
+        expected = report(discover(self.conv_a), self.prices, 2000)["estimated_total_cost_usd"]
+        self.assertAlmostEqual(total, expected, places=12)
+
+    def test_repeated_stream_events_do_not_repeat_blocks(self):
+        messages = transcript(self.conv_b, self.prices)
+        self.assertEqual([b["text"] for b in messages[-1]["blocks"]], ["Done."])
+        self.assertIsNone(messages[-1]["estimated_cost_usd"])
+        self.assertEqual(messages[1]["usage"]["cache_write_5m"], 1500)
+
+    def test_sources_and_unknown_source(self):
+        data = conversation_messages(self.conv_a, SUB_EXPLORE, self.prices)
+        self.assertEqual([s["id"] for s in data["sources"]], ["main", SUB_EXPLORE, SUB_REVIEW])
+        self.assertEqual(data["sources"][1]["task"], "Explore cache invalidation call sites")
+        self.assertEqual(data["messages"][1]["model"], "claude-haiku-4-5")
+        self.assertIsNone(conversation_messages(self.conv_a, "nope", self.prices))
+
+    def test_kinds_results_thinking_and_clipping(self):
+        use, big = usage(1, 1), "x" * (CLIP + 10)
+        error = dict(assistant("m2", "<synthetic>", None, "e3", [text("API Error: overloaded")], usage()), isApiErrorMessage=True)
+        path = self.conversation("kinds", [
+            {"type": "user", "uuid": "u1", "message": {"role": "user", "content": "Fix it"}},
+            {"type": "user", "uuid": "u2", "isMeta": True, "message": {"role": "user", "content": [text("Skill body")]}},
+            {"type": "summary", "summary": "not a message"},
+            assistant("m1", "claude-opus-5-5", None, "e1", [{"type": "thinking", "thinking": "", "signature": "s"}], use),
+            assistant("m1", "claude-opus-5-5", None, "e2", [{"type": "thinking", "thinking": "Plan"},
+                                                            tool("t1", "Read", file_path="/a.py", limit=3)], use),
+            tool_result("t1", [{"type": "text", "text": big}, {"type": "image"}], is_error=True),
+            {"type": "user", "uuid": "u3", "isCompactSummary": True, "message": {"role": "user", "content": "Summary"}},
+            error,
+        ], {})
+        messages = transcript(path, self.prices)
+        self.assertEqual([m["kind"] for m in messages], ["prompt", "meta", "response", "tool_result", "summary", "error"])
+        self.assertEqual([b["type"] for b in messages[2]["blocks"]], ["thinking", "tool_use"])
+        self.assertEqual(messages[2]["blocks"][1]["input"][1], {"name": "limit", "text": "3", "size": 1})
+        self.assertEqual(messages[2]["blocks"][1]["summary"], "/a.py")
+        result = messages[3]["blocks"][0]
+        self.assertEqual((result["tool_use_id"], result["is_error"], result["size"]), ("t1", True, CLIP + 18))
+        self.assertEqual(len(result["text"]), CLIP)
+        self.assertIsNone(messages[5]["estimated_cost_usd"])
+
+    def test_tool_summary_falls_back_to_the_first_text(self):
+        use = usage(1, 1)
+        ask = tool("t1", "AskUserQuestion", questions=[{"header": "", "question": "Which port?", "options": []}])
+        path = self.conversation("summary", [
+            assistant("m1", "claude-opus-5-5", None, "e1", [ask, tool("t2", "Glob", pattern="*.py", path="src")], use),
+            assistant("m2", "claude-opus-5-5", None, "e2", [tool("t3", "TodoWrite", todos=[])], use),
+        ], {})
+        blocks = [b for m in transcript(path, self.prices) for b in m["blocks"]]
+        self.assertEqual([b["summary"] for b in blocks], ["Which port?", "src", ""])
+
+    def test_text_numbers_only_the_messages_the_web_ui_shows(self):
+        use = usage(1, 1)
+        path = self.conversation("numbers", [
+            {"type": "user", "uuid": "u1", "message": {"role": "user", "content": "Go"}},
+            assistant("m1", "claude-opus-5-5", None, "e1", [tool("t1", "Bash", command="ls")], use),
+            tool_result("t1", "a.py"),
+            assistant("m2", "claude-opus-5-5", None, "e2", [text("Done.")], use),
+        ], {})
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            messages_text(conversation_messages(path, "main", self.prices))
+        rows = [line.split("|") for line in out.getvalue().splitlines()[3:6]]
+        self.assertEqual([(r[0].strip(), r[2].strip()) for r in rows], [("1", "user"), ("2", "assistant"), ("3", "assistant")])
+        self.assertIn("3 message(s), 2 response(s)", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from characterization import DATA, ENV, SCRIPT
-from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, build_projects
+from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE, build_projects
 
 from ctokens.catalog import conversation_rows
 from ctokens.logs import file_stats, parse_log
@@ -263,6 +263,20 @@ class ApiParityTest(ServerTestCase):
                 with self.subTest(conversation=conversation, view=view):
                     self.assert_parity(f"/api/conversations/{conversation}/{view}", conversation, flag, "--json")
 
+    def test_messages(self):
+        for conversation in (CONV_A, CONV_B, CONV_EMPTY):
+            with self.subTest(conversation=conversation):
+                self.assert_parity(f"/api/conversations/{conversation}/messages", conversation, "--messages", "--json")
+        self.assert_parity(f"/api/conversations/{CONV_A}/messages?source={SUB_EXPLORE}", CONV_A, "--messages",
+                           "--source", SUB_EXPLORE, "--json")
+        self.assert_parity(f"/api/conversations/{CONV_B}/messages", CONV_B, "--messages", "--json", custom=True)
+
+    def test_messages_unknown_source(self):
+        for source in ("nope", "..%2Fmain", "main%00"):
+            with self.subTest(source=source):
+                self.assertEqual(self.get_json(f"/api/conversations/{CONV_A}/messages?source={source}"),
+                                 (404, {"error": "source not found"}))
+
     def test_totals(self):
         self.assert_parity("/api/totals", "--totals", "--json")
         self.assert_parity("/api/totals?project=billing", "--totals", "--json", "--project", "billing")
@@ -293,7 +307,7 @@ class ApiParityTest(ServerTestCase):
 class ApiErrorsTest(ServerTestCase):
     def test_bad_ids(self):
         for conversation_id in BAD_IDS:
-            for view in ("", "/last-response", "/bash", "/files"):
+            for view in ("", "/last-response", "/bash", "/files", "/messages"):
                 with self.subTest(id=conversation_id, view=view):
                     status, data = self.get_json(f"/api/conversations/{conversation_id}{view}")
                     message = "not found" if "/" in conversation_id else "conversation not found"
@@ -315,7 +329,7 @@ class ApiErrorsTest(ServerTestCase):
     def test_ambiguous_id(self):
         expected = {"error": "ambiguous id",
                     "projects": ["/home/dev/projects/api-gateway", "/home/dev/projects/billing-service"]}
-        for view in ("", "/last-response", "/bash", "/files"):
+        for view in ("", "/last-response", "/bash", "/files", "/messages"):
             with self.subTest(view=view):
                 self.assertEqual(self.get_json(f"/api/conversations/{AMBIGUOUS}{view}"), (409, expected))
 

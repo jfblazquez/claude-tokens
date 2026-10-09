@@ -160,6 +160,47 @@ def totals_text(data, top=15):
         print("\n" + guessed_notice(data["guessed_price_models"]))
 
 
+ROLE_LABELS = {"prompt": "user", "meta": "meta", "summary": "summary",
+               "response": "assistant", "error": "api error"}
+
+
+def message_preview(message):
+    blocks = message["blocks"]
+    texts = [b["text"] for b in blocks if b["type"] == "text"]
+    if texts:
+        return short(texts[0], 60)
+    tools = [b["name"] for b in blocks if b["type"] == "tool_use"]
+    if tools:
+        return "→ " + ", ".join(tools)
+    return "(thinking)"
+
+
+def messages_text(data):
+    rows, cost, guessed = [], 0, False
+    # Tool results are shown under the call that made them in the web UI, so neither view numbers them.
+    shown = [m for m in data["messages"] if m["kind"] != "tool_result"]
+    for index, message in enumerate(shown, 1):
+        when = (message["timestamp"] or "")[:19].replace("T", " ")
+        row = [index, when, ROLE_LABELS[message["kind"]]]
+        if message["role"] == "assistant":
+            u = message["usage"]
+            output = fmt(u["output"]) + (f" ({fmt(u['thinking'])} th)" if u["thinking"] else "")
+            row += [message["model"], fmt(u["input"]), output, fmt(u["cache_read"]),
+                    f"{fmt(u['cache_write_5m'])}/{fmt(u['cache_write_1h'])}", fmt(u["context"]),
+                    money(message["estimated_cost_usd"], message["price_estimated"])]
+            cost += message["estimated_cost_usd"] or 0
+            guessed = guessed or message["price_estimated"]
+        else:
+            row += [""] * 7
+        rows.append(row + [message_preview(message)])
+    task = next((s["task"] for s in data["sources"] if s["id"] == data["source"]), "")
+    print(f"Messages ({data['source']}): {task}")
+    table(["#", "Time (UTC)", "Role", "Model", "Input", "Output", "Cache read", "Cache write 5m/1h", "Context", "Cost",
+           "Content"], rows)
+    responses = sum(m["role"] == "assistant" for m in shown)
+    print(f"\n{fmt(len(rows))} message(s), {fmt(responses)} response(s). Estimated cost: {money(cost, guessed)}")
+
+
 def show_page(conversations, start, end):
     rows = []
     for index in range(start, end):

@@ -1,0 +1,10 @@
+--- exit 0
+--- stdout
+Messages (a1b2c3d4e5f6a7b8c): Explore cache invalidation call sites
+ # | Time (UTC)          | Role      | Model            | Input | Output | Cache read | Cache write 5m/1h | Context | Cost    | Content                              
+---+---------------------+-----------+------------------+-------+--------+------------+-------------------+---------+---------+--------------------------------------
+ 1 | 2026-09-28 10:01:00 | user      |                  |       |        |            |                   |         |         | Find every call site of invalidate() 
+ 2 | 2026-09-28 10:01:02 | assistant | claude-haiku-4-5 | 300   | 500    | 9.000      | 1.200/0           | 10.500  | $0.0052 | → Bash, Read                         
+
+2 message(s), 1 response(s). Estimated cost: $0.0052
+--- stderr

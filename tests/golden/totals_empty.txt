@@ -3,6 +3,6 @@
 --- stderr
 usage: claude_tokens.py [-h] [--projects-dir PROJECTS_DIR] [--project PROJECT] [--totals] [--pricing PRICING] [--json]
                         [--cold-summary-output COLD_SUMMARY_OUTPUT] [--context-window CONTEXT_WINDOW]
-                        [--last-response] [--bash] [--files] [--serve] [--port PORT]
+                        [--last-response] [--bash] [--files] [--messages] [--source SOURCE] [--serve] [--port PORT]
                         [conversation]
 claude_tokens.py: error: no conversations found in <FIXTURES>/empty
