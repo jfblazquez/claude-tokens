@@ -153,16 +153,47 @@ function sortRows(rows, value, dir) {
 // ---------- generic table with click-to-sort (R3.4, R11.4) ----------
 const sortMemory = new Map();
 
+function countBy(rows, key) {
+  const counts = new Map();
+  for (const r of rows) counts.set(key(r), (counts.get(key(r)) || 0) + 1);
+  return counts;
+}
+
+// opts.group = { key, label(row) } adds a header row per label while the table is sorted by that key;
+// opts.pageSize/page/onPage show one page of the sorted rows at a time.
 function renderTable(columns, rows, opts = {}) {
   const remembered = opts.id && sortMemory.get(opts.id);
   let sortKey = remembered ? remembered.key : opts.sortKey || null;
   let dir = remembered ? remembered.dir : opts.dir || -1;
+  let page = opts.page || 0;
   const wrap = h("div", { class: "card scroll" });
+  const pager = opts.pageSize ? h("nav", { class: "pager", "aria-label": "Pages" }) : null;
   const cls = (...names) => names.filter(Boolean).join(" ") || null;
+  const setPage = (n) => {
+    page = n;
+    if (opts.onPage) opts.onPage(page);
+  };
+
+  function drawPager(total) {
+    const pages = Math.max(1, Math.ceil(total / opts.pageSize));
+    const first = page * opts.pageSize;
+    const go = (n) => () => {
+      setPage(n);
+      draw();
+      window.scrollTo(0, 0);
+    };
+    const button = (label, n, title) => h("button", { class: "btn", type: "button", title, disabled: n === page || n < 0 || n >= pages, onclick: go(n) }, label);
+    pager.hidden = pages < 2;
+    pager.replaceChildren(button("«", 0, "First page"), button("‹ Previous", page - 1, "Previous page"),
+      h("span", { class: "count" }, `${fmt(first + 1)}–${fmt(Math.min(first + opts.pageSize, total))} of ${fmt(total)} · page ${fmt(page + 1)} of ${fmt(pages)}`),
+      button("Next ›", page + 1, "Next page"), button("»", pages - 1, "Last page"));
+  }
 
   function draw() {
     const col = columns.find((c) => c.key === sortKey);
     const data = col ? sortRows(rows, col.sortValue || ((r) => r[col.key]), dir) : rows;
+    if (pager) setPage(Math.min(page, Math.max(0, Math.ceil(data.length / opts.pageSize) - 1)));
+    const shown = pager ? data.slice(page * opts.pageSize, (page + 1) * opts.pageSize) : data;
     const head = h("tr", {}, columns.map((c) => {
       const active = sortKey === c.key;
       const button = h("button", {
@@ -171,24 +202,38 @@ function renderTable(columns, rows, opts = {}) {
           if (active) dir = -dir;
           else { sortKey = c.key; dir = c.num ? -1 : 1; }
           if (opts.id) sortMemory.set(opts.id, { key: sortKey, dir });
+          setPage(0);
           draw();
         },
       }, c.label, h("span", { class: "ind", "aria-hidden": "true" }, active ? (dir > 0 ? "▲" : "▼") : ""));
       return h("th", { class: cls(c.num && "num"), scope: "col",
         "aria-sort": active ? (dir > 0 ? "ascending" : "descending") : null }, button);
     }));
-    const body = data.map((r) => h("tr", {
-      class: cls(opts.onRow && "link"),
-      onclick: opts.onRow ? (e) => { if (!e.target.closest("a")) opts.onRow(r); } : null,
-    }, columns.map((c) => h("td", { class: cls(c.num && "num", c.cls) }, c.render ? c.render(r) : r[c.key]))));
+    const group = opts.group && opts.group.key === sortKey ? opts.group.label : null;
+    // Group sizes count every row, not only this page, so a group cut by a page break still shows its full size.
+    const sizes = group ? countBy(data, group) : null;
+    const body = [];
+    let current = null;
+    for (const r of shown) {
+      if (group && group(r) !== current) {
+        current = group(r);
+        body.push(h("tr", { class: "group" }, h("th", { colspan: columns.length, scope: "colgroup" }, current,
+          h("span", { class: "n" }, fmt(sizes.get(current))))));
+      }
+      body.push(h("tr", {
+        class: cls(opts.onRow && "link"),
+        onclick: opts.onRow ? (e) => { if (!e.target.closest("a")) opts.onRow(r); } : null,
+      }, columns.map((c) => h("td", { class: cls(c.num && "num", c.cls) }, c.render ? c.render(r) : r[c.key]))));
+    }
     const foot = opts.footer
       ? h("tfoot", {}, h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: cls(columns[i] && columns[i].num && "num") }, cell))))
       : null;
     wrap.replaceChildren(h("table", {}, h("thead", {}, head), h("tbody", {}, body), foot));
+    if (pager) drawPager(data.length);
   }
 
   draw();
-  return wrap;
+  return pager ? h("div", { class: "paged" }, wrap, pager) : wrap;
 }
 
 // ---------- states (R11.5) ----------
@@ -362,6 +407,10 @@ function listRows(body) {
 const folderLabel = () => (projectsDir ? copyable(h("b", { class: "mono" }, projectsDir), projectsDir) : "the projects folder");
 const folderText = () => projectsDir || "the projects folder";
 
+const pathTail = (path) => String(path || "").split(/[\\/]/).filter(Boolean).slice(-2).join("/");
+// The last two levels of a path, so a deep project folder does not widen the list.
+const shortPath = (path) => (String(path || "").split(/[\\/]/).filter(Boolean).length > 2 ? `…/${pathTail(path)}` : String(path || ""));
+
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
 let listFilter = "";
@@ -370,14 +419,35 @@ let listSearchDraft = "";
 let listSearchTimer = null;
 // Long enough to skip the requests of a word still being typed; a cached search answers in ~30 ms.
 const SEARCH_DEBOUNCE_MS = 300;
+const LIST_PAGE_SIZE = 50;
+// The last list shown, its page and scroll, so coming back from a conversation redraws it at once.
+const listState = { data: null, at: null, page: 0, scrollY: 0 };
 
 function applyListSearch(value) {
   clearTimeout(listSearchTimer);
   const next = value.trim();
   if (next === listSearch) return;
   listSearch = next;
+  listState.page = 0;
   show({ keepScroll: true });
   load({ refresh: true });
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// UTC days, like every time in the UI; weeks start on Monday.
+function dateGroup(iso, now) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "No date";
+  const day = Math.floor(t / DAY_MS), today = Math.floor(now / DAY_MS);
+  const weekStart = today - ((new Date(now).getUTCDay() + 6) % 7);
+  if (day >= today) return "Today";
+  if (day === today - 1) return "Yesterday";
+  if (day >= weekStart) return "This week";
+  if (day >= weekStart - 7) return "Last week";
+  const date = new Date(t), current = new Date(now);
+  if (date.getUTCFullYear() === current.getUTCFullYear() && date.getUTCMonth() === current.getUTCMonth()) return "Earlier this month";
+  return `${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
 function listCount(data) {
@@ -391,12 +461,18 @@ VIEWS.list = {
   title: () => "Conversations",
   async load() {
     const search = listSearch;
-    return { search, rows: listRows(await api(search ? `/api/conversations?q=${encodeURIComponent(search)}` : "/api/conversations")) };
+    const data = { search, rows: listRows(await api(search ? `/api/conversations?q=${encodeURIComponent(search)}` : "/api/conversations")) };
+    Object.assign(listState, { data, at: new Date() });
+    return data;
   },
+  // Shown at once and reloaded behind it, since new conversations may have appeared meanwhile.
+  cached: () => (listState.data && listState.data.search === listSearch
+    ? { data: listState.data, at: listState.at, stale: true, scrollY: listState.scrollY } : null),
+  leave: () => { listState.scrollY = window.scrollY; },
   head(route, data) {
     const count = h("span", { class: "count", "aria-live": "polite" }, listCount(app.phase === "ready" ? data : null));
     const project = h("input", { id: "list-filter", type: "search", placeholder: "Filter by project path", value: listFilter, "aria-label": "Filter by project",
-      oninput: (e) => { listFilter = e.target.value; show({ keepScroll: true }); } });
+      oninput: (e) => { listFilter = e.target.value; listState.page = 0; show({ keepScroll: true }); } });
     const search = h("input", { id: "list-search", type: "search", placeholder: "Word or phrase in the title or messages", value: listSearchDraft,
       "aria-label": "Search conversations",
       oninput: (e) => {
@@ -422,15 +498,19 @@ VIEWS.list = {
       const why = [listFilter && `a project matching “${listFilter}”`, search && `“${search}” in its title or messages`];
       return emptyState("No matching conversations", `No conversation has ${why.filter(Boolean).join(" and ")}.`);
     }
+    const now = Date.now();
     return h("div", { class: "section" }, renderTable([
       { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
       { key: "title", label: "Title", cls: "wrap",
         render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
-      pathCol("project", "Project"),
+      { key: "project", label: "Project", cls: "path", sortValue: (r) => pathTail(r.project),
+        render: (r) => h("span", { class: "mono", title: r.project }, breakable(shortPath(r.project))) },
       { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
       { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
       { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
-    ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); } }));
+    ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); },
+      group: { key: "modified", label: (r) => dateGroup(r.modified, now) },
+      pageSize: LIST_PAGE_SIZE, page: listState.page, onPage: (page) => { listState.page = page; } }));
   },
 };
 
@@ -445,9 +525,91 @@ async function refreshList() {
   }
 }
 
-async function loadConversation(route, path) {
-  const [data] = await Promise.all([api(`/api/conversations/${encodeURIComponent(route.id)}${path}`), refreshList()]);
+// ---------- conversation cache: every tab of the open conversation, kept until the list is shown again ----------
+// path (API suffix) -> { promise, data, at, stale }; data stays undefined until the first answer.
+const convCache = { id: null, entries: new Map() };
+const PREFETCHED = ["", "/messages", "/last-response", "/bash", "/files"];
+
+function convEntries(id) {
+  if (convCache.id !== id) Object.assign(convCache, { id, entries: new Map() });
+  return convCache.entries;
+}
+
+function clearConvCache() {
+  Object.assign(convCache, { id: null, entries: new Map() });
+  messagesState.anchor = null;
+}
+
+// Tab counts and the fallback title come from whichever answer arrives first, prefetched or not; true when one changed.
+function noteConvData(id, path, data) {
+  if (path === "") {
+    const main = (data.conversations || []).find((c) => c.kind === "main");
+    if (!main || !main.task || convTasks.get(id) === main.task) return false;
+    convTasks.set(id, main.task);
+    return true;
+  }
+  if (path === "/messages") return setCount(id, "messages", visibleMessages(data.messages || []).length);
+  if (path === "/bash") return setCount(id, "bash", (data.bash_commands || []).length);
+  if (path === "/files") return setCount(id, "files", Object.keys(data.files || {}).length);
+  return false;
+}
+
+function fetchConv(id, path, force) {
+  const entries = convEntries(id);
+  const old = entries.get(path);
+  if (old && !force && !old.stale) return old.promise;
+  const entry = { data: old ? old.data : undefined, at: old ? old.at : null, stale: false };
+  entry.promise = api(`/api/conversations/${encodeURIComponent(id)}${path}`).then((data) => {
+    if (entries.get(path) === entry) Object.assign(entry, { data, at: new Date() });
+    if (noteConvData(id, path, data)) redrawConvHead(id);
+    return data;
+  }, (err) => {
+    if (entries.get(path) === entry) entries.delete(path);
+    throw err;
+  });
+  entries.set(path, entry);
+  return entry.promise;
+}
+
+function peekConv(id, path) {
+  const entry = convCache.id === id ? convCache.entries.get(path) : null;
+  return entry && entry.data !== undefined ? { data: entry.data, at: entry.at, stale: entry.stale } : null;
+}
+
+// Failures stay silent here: the tab that needs the data asks again and shows the error.
+function prefetchConv(id) {
+  for (const path of PREFETCHED) {
+    if (!convEntries(id).has(path)) fetchConv(id, path, false).catch(() => {});
+  }
+}
+
+// A refresh reloads the current tab and marks the others stale; they redraw at once and reload behind when opened.
+async function loadConversation(route, path, { refresh = false, revalidate = false } = {}) {
+  const entries = convEntries(route.id);
+  if (refresh && !revalidate) for (const [key, entry] of entries) if (key !== path) entry.stale = true;
+  const [data] = await Promise.all([fetchConv(route.id, path, refresh),
+    (refresh && !revalidate) || !convRows.has(route.id) ? refreshList() : null]);
+  prefetchConv(route.id);
   return data;
+}
+
+function convView(path, spec) {
+  const pathOf = typeof path === "function" ? path : () => path;
+  return {
+    head: convHead,
+    load: (route, opts) => loadConversation(route, pathOf(route), opts),
+    cached: (route) => peekConv(route.id, pathOf(route)),
+    keepNodes: true,
+    ...spec,
+  };
+}
+
+function redrawConvHead(id) {
+  const route = app.route;
+  if (!route || route.id !== id || !$("conv-head")) return;
+  $("conv-head").replaceWith(convHead(route));
+  drawConvNav();
+  document.title = `${VIEWS[route.view].title(route, app.data)} · claude-tokens`;
 }
 
 function convHead(route) {
@@ -460,13 +622,31 @@ function convHead(route) {
     meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmt(row.size_kb)} KB · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
   }
-  return [h("div", { class: "page-head" },
-    h("div", { class: "crumb" }, h("a", { href: "#/" }, "← Conversations")),
+  return h("div", { class: "page-head", id: "conv-head" },
     h("h1", {}, title),
-    h("div", { class: "meta" }, meta)),
-  h("nav", { class: "tabs", "aria-label": "Conversation views" }, TABS.map(([key, label]) => h("a", {
-    href: convHref(route.id, key), "aria-current": route.view === key ? "page" : null,
-  }, label, counts[key] != null ? h("span", { class: "n" }, fmt(counts[key])) : null)))];
+    h("div", { class: "meta" }, meta));
+}
+
+// The tabs live in the app bar, so they stay on screen however far the page scrolls;
+// inside a conversation a back button takes the place of the main nav.
+const SHORT_TABS = { response: "Response", bash: "Bash" };
+
+function drawConvNav() {
+  const nav = $("conv-nav"), route = app.route;
+  nav.hidden = !route || !route.id;
+  $("nav-back").hidden = nav.hidden;
+  $("nav-main").hidden = !nav.hidden;
+  if (nav.hidden) {
+    nav.replaceChildren();
+    return;
+  }
+  const counts = convCounts.get(route.id) || {};
+  nav.replaceChildren(...TABS.map(([key, label]) => h("a", {
+    href: convHref(route.id, key), title: label, "aria-current": route.view === key ? "page" : null,
+  }, SHORT_TABS[key] || label, counts[key] != null ? h("span", { class: "n" }, fmt(counts[key])) : null)));
+  // On a phone the tabs scroll sideways; keep the current one in view.
+  const current = nav.querySelector("[aria-current]");
+  if (current && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = current.offsetLeft - nav.offsetLeft - 24;
 }
 
 const convTitle = (route) => (convRows.get(route.id) || {}).title || convTasks.get(route.id) || "Conversation";
@@ -491,15 +671,8 @@ function tokenColumns() {
   ];
 }
 
-VIEWS.report = {
+VIEWS.report = convView("", {
   title: convTitle,
-  load: async (route) => {
-    const data = await loadConversation(route, "");
-    const main = (data.conversations || []).find((c) => c.kind === "main");
-    if (main && main.task) convTasks.set(route.id, main.task);
-    return data;
-  },
-  head: convHead,
   render(data) {
     const scopes = data.conversations || [];
     const byModel = data.by_model || [];
@@ -585,11 +758,13 @@ VIEWS.report = {
 
     return [stats, ...pricingNotices(data), usage, models, context, cold];
   },
-};
+});
 
 // ---------- content views (R7) ----------
 function setCount(id, key, n) {
-  convCounts.set(id, { ...(convCounts.get(id) || {}), [key]: n });
+  const counts = convCounts.get(id) || {};
+  convCounts.set(id, { ...counts, [key]: n });
+  return counts[key] !== n;
 }
 
 // Tags and attributes that the 'self'-only CSP would block anyway (inline styles, remote media) are dropped up front.
@@ -625,10 +800,8 @@ function renderMarkdown(markdown, cls = "card md") {
   return box;
 }
 
-VIEWS.response = {
+VIEWS.response = convView("/last-response", {
   title: (route) => `Last response · ${convTitle(route)}`,
-  load: (route) => loadConversation(route, "/last-response"),
-  head: convHead,
   render(data) {
     if (!data.last_response) {
       return emptyState("No text response", "The main conversation has no assistant text response yet. "
@@ -638,7 +811,7 @@ VIEWS.response = {
     box.prepend(copyButton(data.last_response, "Copy the response as Markdown"));
     return [h("div", { class: "meta" }, "Last assistant text response of the main conversation · rendered Markdown"), box];
   },
-};
+});
 
 const sourceLabel = (source) => (source === "main" ? "main" : `subagent ${source.slice(0, 8)}`);
 const sourceChip = (source) => h("span", { class: source === "main" ? "chip main" : "chip", title: source === "main" ? "Main conversation" : `Subagent ${source}` },
@@ -669,14 +842,8 @@ function bashItems(commands) {
   return items;
 }
 
-VIEWS.bash = {
+VIEWS.bash = convView("/bash", {
   title: (route) => `Bash commands · ${convTitle(route)}`,
-  load: async (route) => {
-    const data = await loadConversation(route, "/bash");
-    setCount(route.id, "bash", (data.bash_commands || []).length);
-    return data;
-  },
-  head: convHead,
   render(data, route) {
     const commands = (data.bash_commands || []).map((c) => ({ ...c, source: c.source || "main", when: parseStamp(c.timestamp) }));
     if (!commands.length) return emptyState("No Bash commands", "Neither the main conversation nor its subagents ran any Bash command.");
@@ -706,16 +873,10 @@ VIEWS.bash = {
       h("div", { class: "toolbar" }, h("div", { class: "filters" }, h("label", { class: "field" }, "Source", source), h("label", { class: "field" }, "Search", text)), count),
       list];
   },
-};
+});
 
-VIEWS.files = {
+VIEWS.files = convView("/files", {
   title: (route) => `Files · ${convTitle(route)}`,
-  load: async (route) => {
-    const data = await loadConversation(route, "/files");
-    setCount(route.id, "files", Object.keys(data.files || {}).length);
-    return data;
-  },
-  head: convHead,
   render(data) {
     const rows = Object.entries(data.files || {}).map(([file, t]) => ({
       file, Read: t.Read || 0, Write: t.Write || 0, Edit: t.Edit || 0, sources: Array.isArray(t.sources) ? t.sources : [],
@@ -731,10 +892,11 @@ VIEWS.files = {
       ], rows, { id: "files", sortKey: "file", dir: 1 }),
       h("div", { class: "count" }, `${fmt(rows.length)} distinct file${rows.length === 1 ? "" : "s"}`)];
   },
-};
+});
 
 // ---------- conversation messages ----------
-const messagesState = { id: null, source: "main", toBottom: false };
+// anchor: the message at the top of the screen when the tab was left, to come back to the same place.
+const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null };
 const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results" };
 
 const withSource = (path, source) => (source === "main" ? path : `${path}?source=${encodeURIComponent(source)}`);
@@ -838,17 +1000,46 @@ const ellipsis = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : 
 const sourceOption = (s) => `${s.id === "main" ? "main" : `subagent ${s.id.slice(0, 8)}`} · ${ellipsis(String(s.task || ""), 60)}`;
 const visibleMessages = (messages) => messages.filter((m) => m.kind !== "tool_result");
 
-VIEWS.messages = {
+// Off-screen messages have an estimated height (content-visibility), so positions move as the ones in view get laid out;
+// the target is applied again until the page height settles.
+function settleScroll(target) {
+  let last = -1, stable = 0, frames = 0;
+  const step = () => {
+    const end = document.documentElement.scrollHeight;
+    window.scrollTo(0, target());
+    stable = end === last ? stable + 1 : 0;
+    last = end;
+    if (stable < 2 && ++frames < 30) requestAnimationFrame(step);
+  };
+  step();
+}
+
+const scrollToEnd = () => settleScroll(() => document.documentElement.scrollHeight);
+
+function topMessage() {
+  const top = Math.max(0, document.querySelector(".appbar").getBoundingClientRect().bottom);
+  for (const el of document.querySelectorAll(".msgs > li")) {
+    const box = el.getBoundingClientRect();
+    if (box.bottom > top) return { el, offset: box.top };
+  }
+  return null;
+}
+
+function messagesPath(route) {
+  if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main", anchor: null });
+  return withSource("/messages", messagesState.source);
+}
+
+VIEWS.messages = convView(messagesPath, {
   title: (route) => `Conversation · ${convTitle(route)}`,
-  load: async (route, { refresh }) => {
-    if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main" });
+  load: (route, opts) => {
     // A fresh open starts at the latest message; a refresh keeps the reader where they are.
-    if (!refresh) messagesState.toBottom = true;
-    const data = await loadConversation(route, withSource("/messages", messagesState.source));
-    if (data.source === "main") setCount(route.id, "messages", visibleMessages(data.messages || []).length);
-    return data;
+    if (!opts.refresh) Object.assign(messagesState, { toBottom: true, restore: false });
+    return loadConversation(route, messagesPath(route), opts);
   },
-  head: convHead,
+  // Coming back from another tab reattaches the same nodes, so the anchor is still in the page; otherwise start at the end.
+  enter: () => Object.assign(messagesState, { toBottom: true, restore: true }),
+  leave: () => { messagesState.anchor = topMessage(); },
   render(data) {
     let n = 0;
     // Same numbering as the CLI: tool results are not counted, since they render under their call.
@@ -869,7 +1060,7 @@ VIEWS.messages = {
     const toolbar = h("div", { class: "toolbar" },
       h("div", { class: "filters" }, h("label", { class: "field" }, "Source", source),
         h("button", { class: "btn", type: "button", onclick: () => window.scrollTo(0, 0) }, "↑ First"),
-        h("button", { class: "btn", type: "button", onclick: () => window.scrollTo(0, document.documentElement.scrollHeight) }, "↓ Last")),
+        h("button", { class: "btn", type: "button", onclick: scrollToEnd }, "↓ Last")),
       h("span", { class: "count" }, `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
         + money(cost, responses.some((m) => m.price_estimated))));
     const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
@@ -877,11 +1068,12 @@ VIEWS.messages = {
     return [meta, toolbar, h("ol", { class: "msgs" }, messageItems(shown, tools))];
   },
   after: () => {
-    if (!messagesState.toBottom) return;
-    messagesState.toBottom = false;
-    window.scrollTo(0, document.documentElement.scrollHeight);
+    const { anchor, restore, toBottom } = messagesState;
+    Object.assign(messagesState, { anchor: null, restore: false, toBottom: false });
+    if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
+    else if (toBottom) scrollToEnd();
   },
-};
+});
 
 // ---------- totals (R5, R8) ----------
 let totalsFilter = "";
@@ -1125,14 +1317,15 @@ const app = { route: null, seq: 0, busy: false, phase: "loading", data: null, er
 function updateBar() {
   const loaded = $("loaded");
   if (app.busy) loaded.textContent = "Loading…";
-  else if (app.failedAt) loaded.textContent = `Load failed at ${utcTime(app.failedAt)} UTC`;
-  else loaded.textContent = app.loadedAt ? `Loaded at ${utcTime(app.loadedAt)} UTC` : "Loaded at --:--:-- UTC";
+  else if (app.failedAt) loaded.textContent = `Failed at ${utcTime(app.failedAt)} UTC`;
+  else loaded.textContent = app.loadedAt ? `${utcTime(app.loadedAt)} UTC` : "--:--:-- UTC";
   $("refresh").disabled = app.busy;
   const totals = !!app.route && app.route.view === "totals";
   for (const [id, on] of [["nav-list", !totals], ["nav-totals", totals]]) {
     if (on) $(id).setAttribute("aria-current", "page");
     else $(id).removeAttribute("aria-current");
   }
+  drawConvNav();
 }
 
 function runCleanups() {
@@ -1140,6 +1333,9 @@ function runCleanups() {
     try { fn(); } catch (e) { console.error(e); }
   }
 }
+
+// Body nodes per data object of a keepNodes view: going back to a tab reattaches them instead of rendering again.
+let renderedBodies = new WeakMap();
 
 function show({ keepScroll = false } = {}) {
   const route = app.route, view = VIEWS[route.view];
@@ -1152,7 +1348,11 @@ function show({ keepScroll = false } = {}) {
   let body;
   if (app.phase === "loading") body = view.loading ? view.loading(route) : skeleton(8);
   else if (app.phase === "error") body = errorState(app.error, () => load({ refresh: false }));
-  else body = view.render(app.data, route);
+  else if (!view.keepNodes) body = view.render(app.data, route);
+  else {
+    body = renderedBodies.get(app.data) || view.render(app.data, route);
+    renderedBodies.set(app.data, body);
+  }
   $("main").replaceChildren(...[head, body].flat(Infinity).filter(Boolean));
   document.title = `${view.title(route, app.data)} · claude-tokens`;
   if (app.phase === "ready" && view.after) {
@@ -1168,7 +1368,8 @@ function show({ keepScroll = false } = {}) {
   updateBar();
 }
 
-async function load({ refresh }) {
+// revalidate: reload a view drawn from cache, without marking the other tabs stale as a refresh does.
+async function load({ refresh, revalidate = false }) {
   const route = app.route, view = VIEWS[route.view], seq = ++app.seq;
   app.busy = true;
   if (!refresh || app.phase !== "ready") {
@@ -1178,7 +1379,7 @@ async function load({ refresh }) {
     updateBar();
   }
   try {
-    const data = await view.load(route, { refresh });
+    const data = await view.load(route, { refresh, revalidate });
     if (seq !== app.seq) return;
     Object.assign(app, { phase: "ready", data, error: null, loadedAt: new Date(), failedAt: null, busy: false });
     show({ keepScroll: refresh });
@@ -1191,10 +1392,27 @@ async function load({ refresh }) {
 }
 
 function navigate() {
-  app.route = parseRoute(location.hash);
-  app.data = null;
-  load({ refresh: false });
+  const leaving = app.route && VIEWS[app.route.view];
+  if (leaving && leaving.leave) leaving.leave();
+  const route = parseRoute(location.hash);
+  if (route.view === "list") clearConvCache();
+  app.route = route;
+  const view = VIEWS[route.view];
+  const hit = view.cached ? view.cached(route) : null;
+  if (!hit) {
+    app.data = null;
+    load({ refresh: false });
+    window.scrollTo(0, 0);
+    return;
+  }
+  app.seq++;
+  Object.assign(app, { phase: "ready", data: hit.data, error: null, loadedAt: hit.at, failedAt: null, busy: false });
+  if (view.enter) view.enter(route);
   window.scrollTo(0, 0);
+  show();
+  if (hit.scrollY) window.scrollTo(0, hit.scrollY);
+  if (hit.stale) load({ refresh: true, revalidate: true });
+  else if (route.id) prefetchConv(route.id);
 }
 
 function setAutoRefresh(on) {
@@ -1202,13 +1420,24 @@ function setAutoRefresh(on) {
   app.timer = on ? setInterval(() => { if (!app.busy) load({ refresh: true }); }, 30000) : null;
 }
 
+function updateToTop() {
+  $("to-top").hidden = window.scrollY < window.innerHeight;
+}
+
 function boot() {
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  document.body.append(h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
+    onclick: () => window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "↑"));
+  window.addEventListener("scroll", updateToTop, { passive: true });
   const auto = $("auto");
   auto.checked = false;
   auto.addEventListener("change", () => setAutoRefresh(auto.checked));
   $("refresh").addEventListener("click", () => load({ refresh: true }));
   window.addEventListener("hashchange", navigate);
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (app.route) show({ keepScroll: true }); });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    renderedBodies = new WeakMap();
+    if (app.route) show({ keepScroll: true });
+  });
   navigate();
 }
 

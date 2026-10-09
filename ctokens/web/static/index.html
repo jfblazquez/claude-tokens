@@ -18,15 +18,17 @@
 <body>
 <header class="appbar">
   <div class="appbar-in">
-    <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true">$</span>claude-tokens</a>
-    <nav class="nav" aria-label="Main">
+    <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true">$</span><span class="brand-name">claude-tokens</span></a>
+    <a class="btn back-btn" id="nav-back" href="#/" title="Back to conversations" hidden>← <span class="lbl">Conversations</span></a>
+    <nav class="nav" id="nav-main" aria-label="Main">
       <a id="nav-list" href="#/">Conversations</a>
       <a id="nav-totals" href="#/totals">Totals</a>
     </nav>
+    <nav class="conv-nav" id="conv-nav" aria-label="Conversation views" hidden></nav>
     <div class="bar-right">
-      <span class="loaded" id="loaded" aria-live="polite">Loaded at --:--:-- UTC</span>
+      <span class="loaded" id="loaded" title="Loaded at" aria-live="polite">--:--:-- UTC</span>
       <button class="btn" id="refresh" type="button">Refresh</button>
-      <label class="switch"><input type="checkbox" id="auto" role="switch" autocomplete="off"> Auto-refresh 30 s</label>
+      <label class="switch" title="Refresh every 30 seconds"><input type="checkbox" id="auto" role="switch" autocomplete="off"> Auto 30 s</label>
     </div>
   </div>
 </header>
