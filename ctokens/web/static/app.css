@@ -234,6 +234,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .msg.user { background: var(--accent-soft); border-left-color: var(--accent); }
 .msg.aside { background: var(--surface-2); }
 .msg.failed { border-left-color: var(--err-fg); }
+.msgs.light > li.flow, .msgs.light details.blk, .msgs.light details.think { display: none; }
 .msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); color: var(--muted); font-size: var(--t-sm); }
 .msg-head b { color: var(--fg); font-weight: 650; }
 .msg-head .n, .msg-head time, .msg-head .notime { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -273,7 +274,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 @media (max-width: 640px) {
   /* Two short rows stay on screen: the brand name, load time and auto-refresh switch give way to the tabs. */
   .appbar-in { gap: var(--s2) var(--s3); padding-block: var(--s2); }
-  .brand-name, .loaded, .switch, .back-btn .lbl { display: none; }
+  .brand-name, .loaded, .appbar .switch, .back-btn .lbl { display: none; }
   .conv-nav { order: 1; width: 100%; overflow-x: auto; }
   .msg { padding: var(--s3); }
   .ustats { width: 100%; margin-left: 0; column-gap: var(--s3); }

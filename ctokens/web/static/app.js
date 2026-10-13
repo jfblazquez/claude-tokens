@@ -907,7 +907,8 @@ VIEWS.files = convView("/files", {
 
 // ---------- conversation messages ----------
 // anchor: the message at the top of the screen when the tab was left, to come back to the same place.
-const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null };
+// light: only the user's prompts and the model's text, hiding thinking, tool calls, results and injected messages.
+const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null, light: false };
 const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results" };
 
 const withSource = (path, source) => (source === "main" ? path : `${path}?source=${encodeURIComponent(source)}`);
@@ -1004,7 +1005,8 @@ function messageItem(m, tools, showModel) {
     : h("span", { class: "notime" }, "—");
   const num = m.n ? h("span", { class: "n" }, `#${m.n}`) : null;
   if (m.role === "assistant") {
-    const item = h("li", { class: m.kind === "error" ? "msg failed" : "msg" },
+    const flow = m.blocks.some((b) => b.type === "text") ? "" : " flow";
+    const item = h("li", { class: (m.kind === "error" ? "msg failed" : "msg") + flow },
       h("div", { class: "msg-head" }, num, time, h("span", { class: "model", title: m.model }, swatch(m.model), showModel ? m.model : null),
         m.kind === "error" ? h("span", { class: "badge" }, "API error") : null,
         m.stop_reason && !ROUTINE_STOPS.has(m.stop_reason) ? h("span", { class: "badge warn" }, m.stop_reason) : null,
@@ -1016,7 +1018,7 @@ function messageItem(m, tools, showModel) {
     return item;
   }
   const collapsed = m.kind === "meta" || m.kind === "summary";
-  return h("li", { class: collapsed ? "msg aside" : "msg user" },
+  return h("li", { class: (collapsed ? "msg aside" : "msg user") + (m.kind === "prompt" ? "" : " flow") },
     h("div", { class: "msg-head" }, num, time, h("b", {}, KIND_LABELS[m.kind])),
     h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)));
 }
@@ -1066,6 +1068,17 @@ function topMessage() {
   return null;
 }
 
+// Keeps the message at the top of the screen in place; if it gets hidden, the next one shown takes its place.
+function setLight(light) {
+  messagesState.light = light;
+  const anchor = topMessage(), list = document.querySelector(".msgs");
+  if (!list) return;
+  list.classList.toggle("light", light);
+  let el = anchor && anchor.el;
+  while (el && !el.getClientRects().length) el = el.nextElementSibling;
+  if (el) settleScroll(() => el.getBoundingClientRect().top + window.scrollY - anchor.offset);
+}
+
 function messagesPath(route) {
   if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main", anchor: null });
   return withSource("/messages", messagesState.source);
@@ -1096,12 +1109,15 @@ VIEWS.messages = convView(messagesPath, {
     const toolbar = h("div", { class: "toolbar" },
       h("div", { class: "filters" }, h("label", { class: "field" }, "Source", source),
         h("button", { class: "btn", type: "button", onclick: () => window.scrollTo(0, 0) }, "↑ First"),
-        h("button", { class: "btn", type: "button", onclick: scrollToEnd }, "↓ Last")),
+        h("button", { class: "btn", type: "button", onclick: scrollToEnd }, "↓ Last"),
+        h("label", { class: "switch", title: "Show only the user's prompts and the model's replies" },
+          h("input", { type: "checkbox", role: "switch", autocomplete: "off", checked: messagesState.light, onchange: (e) => setLight(e.target.checked) }),
+          "Prompts and replies only")),
       h("span", { class: "count" }, `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
         + money(cost, responses.some((m) => m.price_estimated))));
     const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
     if (!shown.length) return [meta, toolbar, emptyState("No messages", "This log has no user or assistant messages yet.")];
-    return [meta, toolbar, h("ol", { class: "msgs" }, messageItems(shown, tools))];
+    return [meta, toolbar, h("ol", { class: messagesState.light ? "msgs light" : "msgs" }, messageItems(shown, tools))];
   },
   after: () => {
     const { anchor, restore, toBottom } = messagesState;
