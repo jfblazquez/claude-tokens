@@ -133,6 +133,8 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .chip.main { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .meter { display: inline-block; width: 90px; height: 6px; border-radius: 3px; background: var(--grid); vertical-align: middle;
   margin-right: 8px; overflow: hidden; }
+.stack { display: flex; height: 14px; margin-bottom: var(--s3); overflow: hidden; border-radius: 4px; background: var(--grid); }
+.stack > i { display: block; height: 100%; }
 .meter > i { display: block; height: 100%; background: var(--accent); }
 
 /* Notices and states (R11.5) */
@@ -259,6 +261,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .think > summary:hover { color: var(--fg); }
 .think > .blk-body { border-top: 0; padding: var(--s1) 0 0; }
 .blk-body { display: grid; gap: var(--s2); min-width: 0; padding: var(--s2) 10px var(--s3); border-top: 1px solid var(--border); }
+.blk-body pre code, .blk-body pre code.hljs { padding: 0; background: none; font-size: inherit; overflow: visible; }
 .blk-body .lbl { margin-bottom: 2px; color: var(--muted); font-family: var(--mono); font-size: var(--t-xs); }
 .blk-body pre { margin: 0; max-height: 420px; overflow: auto; padding: 6px 10px; background: var(--code-bg); border-radius: 6px;
   font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }

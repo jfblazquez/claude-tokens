@@ -277,7 +277,25 @@ keeps the message you were reading when you switch to another tab and back. A
 round **↑** button at the bottom right of every page goes back to the top.
 
 In the **Conversation** tab a collapsed Bash call shows its description, or the
-first 100 characters of the command when it has none.
+first 100 characters of the command when it has none. Opened tool calls are
+syntax-highlighted: Bash commands as shell, Write/Edit text and Read results by
+file extension. Other results are recognised by their own markers (JSON, diffs,
+`#!` scripts, XML), or take the language of the files the command reads
+(`cat`, `sed -n`, `grep`, `git show`... including `"$f"` set in the same
+command) or that `path:line:` prefixes name, when highlight.js agrees the text
+reads like it. Anything else stays plain text: guessing from the text alone, or
+from files a command merely runs or mentions, takes logs for Python and git
+output for C++.
+
+The usage report adds a **Context breakdown** of the main conversation's last
+context: system prompt and tools, user prompts, injected context (skill output,
+subagent reports...), model text (output), model tool calls, thinking, tool
+results per language (and images) and what the log does not show. Each context
+grows by exactly the previous output (thinking stays in context) plus what
+arrived since, so only the split of that growth among its blocks is estimated
+(by characters, up to 1.5 tokens per character; the rest is tools loaded on
+demand, attachments such as nested CLAUDE.md files, or pasted images). The
+system prompt and tools are the first context minus its messages.
 
 Double-click a conversation id, project path, projects folder, file path, tool
 name or a code block in the last response to copy it to the clipboard. Bash

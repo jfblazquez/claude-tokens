@@ -745,8 +745,10 @@ VIEWS.report = convView("", {
         { key: "cache_read_tokens", label: "Cache read", num: true, render: (r) => fmt(r.cache_read_tokens) },
         { key: "cache_write_tokens", label: "Cache write", num: true, render: (r) => fmt(r.cache_write_tokens) },
         { key: "last_output_tokens", label: "Last output", num: true, render: (r) => fmt(r.last_output_tokens) },
-      ], data.main_context_snapshot || [], { id: "report-context" }),
-      h("p", { class: "footnote" }, "System prompt, tools, memory, skills and messages are not broken down in the JSONL."));
+      ], data.main_context_snapshot || [], { id: "report-context" }));
+    const breakdown = h("section", { class: "section" },
+      sectionHead("Context breakdown", "Main conversation · what the last observed context is made of, estimated"),
+      h("div", { id: "context-breakdown" }, h("p", { class: "footnote" }, "Reading the messages…")));
 
     const cold = h("section", { class: "section" }, sectionHead("Cold-summary estimate", "What summarizing this context would cost without cache"),
       renderTable([
@@ -756,7 +758,16 @@ VIEWS.report = convView("", {
         { key: "estimated_cold_summary_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cold_summary_cost_usd, r.price_estimated) },
       ], data.cold_summary_estimate || [], { id: "report-cold" }));
 
-    return [stats, ...pricingNotices(data), usage, models, context, cold];
+    return [stats, ...pricingNotices(data), usage, models, context, breakdown, cold];
+  },
+  after: (data, route) => {
+    const box = $("context-breakdown");
+    if (!box || box.dataset.done) return null;
+    let cancelled = false;
+    fillBreakdown(box, route.id, () => cancelled || !box.isConnected).catch(() => {
+      if (!cancelled) box.replaceChildren(h("p", { class: "footnote" }, "The messages could not be read to break the context down."));
+    });
+    return () => { cancelled = true; };
   },
 });
 
@@ -909,10 +920,39 @@ function lazyDetails(cls, summary, build, title = null) {
   return box;
 }
 
-const clippedPre = (item) => [h("pre", {}, item.text), item.size > item.text.length
+// ---------- code languages (analysis.js) ----------
+const highlighting = () => typeof hljs !== "undefined" && typeof detectLanguage === "function";
+const coloured = (lang) => !!lang && lang !== "plaintext" && highlighting() && !!hljs.getLanguage(lang);
+const languageName = (lang) => (highlighting() && hljs.getLanguage(lang) ? hljs.getLanguage(lang).name : lang);
+// tool_use id -> language of its result: detection is the slow part of opening a block and of the context breakdown.
+const resultLanguages = new Map();
+
+function toolCalls(messages) {
+  const calls = new Map();
+  for (const m of messages) for (const b of m.blocks) if (b.type === "tool_use") calls.set(b.id, b);
+  return calls;
+}
+
+function languageOfResult(result, call) {
+  if (!highlighting()) return null;
+  const id = result.tool_use_id;
+  if (!id) return resultLanguage(hljs, result, call);
+  if (!resultLanguages.has(id)) resultLanguages.set(id, resultLanguage(hljs, result, call));
+  return resultLanguages.get(id);
+}
+
+function codePre(text, lang) {
+  if (!coloured(lang)) return h("pre", {}, text);
+  const code = h("code", { class: `language-${lang}` }, text);
+  hljs.highlightElement(code);
+  return h("pre", {}, code);
+}
+
+const clippedPre = (item, lang = null) => [codePre(item.text, lang), item.size > item.text.length
   ? h("div", { class: "footnote" }, `Showing the first ${fmt(item.text.length)} of ${fmt(item.size)} characters`) : null];
 
-const labelled = (label, item) => h("div", {}, h("div", { class: "lbl" }, label), clippedPre(item));
+const labelled = (label, item, lang = null) => h("div", {},
+  h("div", { class: "lbl" }, coloured(lang) ? `${label} · ${languageName(lang)}` : label), clippedPre(item, lang));
 
 // The figures that change from one response to the next stand out; the rest stay small and muted.
 function usageStats(m) {
@@ -940,18 +980,19 @@ function toolBlock(block, result) {
   return lazyDetails(failed ? "blk failed" : "blk",
     [h("span", { class: "chip" }, block.name), failed ? h("span", { class: "badge" }, "error") : null,
       result ? null : h("span", { class: "muted" }, "no result"), block.summary ? h("span", { class: "mono sum" }, block.summary) : null],
-    () => [block.input.map((f) => labelled(f.name, f)), result ? labelled(failed ? "result (error)" : "result", result) : null],
+    () => [block.input.map((f) => labelled(f.name, f, highlighting() ? inputLanguage(hljs, block, f.name) : null)),
+      result ? labelled(failed ? "result (error)" : "result", result, languageOfResult(result, block)) : null],
     block.summary || null);
 }
 
-// tools: tool_use id -> its result, plus the ids of every tool_use, so results render under the call that made them.
+// tools: tool_use id -> its result and its call, so results render under the call that made them.
 function messageBlocks(m, tools) {
   return m.blocks.map((b) => {
     if (b.type === "text") return m.role === "assistant" ? renderMarkdown(b.text, "md") : h("pre", { class: "prompt" }, b.text);
     if (b.type === "thinking") return lazyDetails("think", "Thinking", () => h("pre", {}, b.text));
     if (b.type === "tool_use") return toolBlock(b, tools.results.get(b.id));
     if (b.type === "tool_result" && !tools.calls.has(b.tool_use_id)) {
-      return lazyDetails(b.is_error ? "blk failed" : "blk", "Tool result", () => clippedPre(b));
+      return lazyDetails(b.is_error ? "blk failed" : "blk", "Tool result", () => clippedPre(b, languageOfResult(b, null)));
     }
     return null;
   });
@@ -1044,13 +1085,8 @@ VIEWS.messages = convView(messagesPath, {
     let n = 0;
     // Same numbering as the CLI: tool results are not counted, since they render under their call.
     const messages = (data.messages || []).map((m) => ({ ...m, n: m.kind === "tool_result" ? null : ++n, when: parseStamp(m.timestamp) }));
-    const tools = { results: new Map(), calls: new Set() };
-    for (const m of messages) {
-      for (const b of m.blocks) {
-        if (b.type === "tool_result") tools.results.set(b.tool_use_id, b);
-        if (b.type === "tool_use") tools.calls.add(b.id);
-      }
-    }
+    const tools = { results: new Map(), calls: toolCalls(messages) };
+    for (const m of messages) for (const b of m.blocks) if (b.type === "tool_result") tools.results.set(b.tool_use_id, b);
     const shown = messages.filter((m) => !(m.kind === "tool_result" && m.blocks.every((b) => tools.calls.has(b.tool_use_id))));
     const responses = messages.filter((m) => m.role === "assistant");
     const cost = responses.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0);
@@ -1074,6 +1110,69 @@ VIEWS.messages = convView(messagesPath, {
     else if (toBottom) scrollToEnd();
   },
 });
+
+// ---------- context breakdown (analysis.js) ----------
+const CONTEXT_PARTS = {
+  system: "System prompt, tools & setup", prompt: "User prompts", meta: "Injected context (skill output, subagent reports…)", summary: "Compaction summary",
+  text: "Model text (Output)", tool_use: "Model tool calls", thinking: "Thinking", other: "Not in the log: loaded tools, attachments…", result: "Tool results",
+};
+const PART_SLOTS = { system: 7, prompt: 2, meta: 6, summary: 4, text: 1, tool_use: 5, thinking: 3, other: 7 };
+const DETECT_SLICE_MS = 40;
+
+const partLabel = (key) => (key.startsWith("result:") ? `Tool results · ${languageName(key.slice(7))}` : CONTEXT_PARTS[key] || key);
+
+// Tool results share one hue, lighter as they shrink, so every language reads as part of the same group.
+function partColors(rows) {
+  const { palette, surface } = colorState, colors = {};
+  let rank = 0;
+  for (const r of rows) {
+    if (r.key.startsWith("result")) colors[r.key] = mixHex(palette[0], surface, Math.min(0.75, 0.2 * rank++));
+    else colors[r.key] = r.key === "other" ? mixHex(palette[7], surface, 0.5) : palette[PART_SLOTS[r.key]];
+  }
+  return colors;
+}
+
+// Detection runs in slices so that a long conversation does not freeze the page.
+async function fillBreakdown(box, id, cancelled) {
+  const messages = (await fetchConv(id, "/messages", false)).messages || [];
+  const calls = toolCalls(messages);
+  const languageOf = (b) => languageOfResult(b, calls.get(b.tool_use_id));
+  let slice = performance.now();
+  for (const m of messages) {
+    for (const b of m.blocks) {
+      if (b.type !== "tool_result") continue;
+      languageOf(b);
+      if (performance.now() - slice < DETECT_SLICE_MS) continue;
+      await new Promise((resolve) => setTimeout(resolve));
+      if (cancelled()) return;
+      slice = performance.now();
+    }
+  }
+  if (cancelled()) return;
+  const keyOf = (m, b) => (b.type === "tool_result" ? (languageOf(b) ? `result:${languageOf(b)}` : "result") : m.kind);
+  box.replaceChildren(...breakdownView(contextBreakdown(messages, keyOf)));
+  box.dataset.done = "1";
+}
+
+function breakdownView(breakdown) {
+  if (!breakdown) return [h("p", { class: "footnote" }, "No response with token usage to break down.")];
+  const { context, rows } = breakdown, colors = partColors(rows);
+  const share = (r) => r.tokens / context;
+  const bar = h("div", { class: "stack", role: "img", "aria-label": "Context breakdown" }, rows.map((r) => h("i", {
+    title: `${partLabel(r.key)}: ${fmt(r.tokens)} (${pct(share(r))})`, css: { width: `${share(r) * 100}%`, background: colors[r.key] } })));
+  const table = renderTable([
+    { key: "key", label: "Part", sortValue: (r) => partLabel(r.key),
+      render: (r) => [h("span", { class: "sw", "aria-hidden": "true", css: { background: colors[r.key] } }), partLabel(r.key)] },
+    { key: "tokens", label: "Tokens", num: true, render: (r) => fmt(r.tokens) },
+    { key: "share", label: "Context", num: true, sortValue: share, render: (r) => pct(share(r)) },
+  ], rows, { id: "report-breakdown", footer: ["Total", fmt(context), pct(1)] });
+  return [bar, table, h("p", { class: "footnote" },
+    "Each context grows by the previous output (thinking included) plus what arrived since: that growth is exact and is split "
+    + "among the new blocks by characters, up to 1.5 tokens per character; the rest is context the log does not show (tools "
+    + "loaded on demand, attachments, pasted images). The system prompt and tools are the first context minus its messages. "
+    + "A result counts as code when the command read files of that language (or it is JSON, a diff or a script) and it reads "
+    + "like it; anything else is plain text.")];
+}
 
 // ---------- totals (R5, R8) ----------
 let totalsFilter = "";
