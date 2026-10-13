@@ -325,7 +325,7 @@ class MessagesTest(ContentTest):
         first = messages[1]
         self.assertEqual([b["type"] for b in first["blocks"]], ["text", "tool_use"])
         self.assertEqual(first["blocks"][1], {"type": "tool_use", "id": "toolu_A1", "name": "Bash",
-                                              "summary": "git status --short", "input": [
+                                              "summary": "Show working tree status", "input": [
                                                   {"name": "command", "text": "git status --short", "size": 18},
                                                   {"name": "description", "text": "Show working tree status", "size": 24}]})
         self.assertEqual(first["usage"], {"input": 120, "output": 900, "cache_read": 40000, "cache_write_5m": 0,
@@ -390,6 +390,16 @@ class MessagesTest(ContentTest):
         ], {})
         blocks = [b for m in transcript(path, self.prices) for b in m["blocks"]]
         self.assertEqual([b["summary"] for b in blocks], ["Which port?", "src", ""])
+
+    def test_bash_summary_prefers_the_description(self):
+        use, long = usage(1, 1), "echo " + "x" * 200
+        path = self.conversation("bash", [
+            assistant("m1", "claude-opus-5-5", None, "e1", [tool("t1", "Bash", command="ls", description="List"),
+                                                            tool("t2", "Bash", command="git  status\n--short"),
+                                                            tool("t3", "Bash", command=long, description="  ")], use),
+        ], {})
+        blocks = transcript(path, self.prices)[0]["blocks"]
+        self.assertEqual([b["summary"] for b in blocks], ["List", "git status --short", long[:100] + "..."])
 
     def test_text_numbers_only_the_messages_the_web_ui_shows(self):
         use = usage(1, 1)

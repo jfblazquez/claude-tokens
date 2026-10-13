@@ -276,6 +276,9 @@ button, so they stay on screen however far you scroll. The **Conversation** tab
 keeps the message you were reading when you switch to another tab and back. A
 round **↑** button at the bottom right of every page goes back to the top.
 
+In the **Conversation** tab a collapsed Bash call shows its description, or the
+first 100 characters of the command when it has none.
+
 Double-click a conversation id, project path, projects folder, file path, tool
 name or a code block in the last response to copy it to the clipboard. Bash
 commands and the last response have a clipboard button, and the conversation

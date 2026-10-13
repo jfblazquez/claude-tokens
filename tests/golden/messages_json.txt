@@ -58,7 +58,7 @@
           "type": "tool_use",
           "id": "toolu_A1",
           "name": "Bash",
-          "summary": "git status --short",
+          "summary": "Show working tree status",
           "input": [
             {
               "name": "command",
@@ -173,7 +173,7 @@
           "type": "tool_use",
           "id": "toolu_A5",
           "name": "Bash",
-          "summary": "python3 -m unittest -v",
+          "summary": "Run tests",
           "input": [
             {
               "name": "command",
