@@ -279,7 +279,10 @@ round **↑** button at the bottom right of every page goes back to the top.
 In the **Conversation** tab a collapsed Bash call shows its description, or the
 first 100 characters of the command when it has none. **Prompts and replies
 only** hides thinking, tool calls, tool results and injected messages, to follow
-the conversation lightly; the full flow is shown by default. Opened tool calls are
+the conversation lightly; the full flow is shown by default. A refresh (or auto
+refresh) keeps the message you are reading in place; when new messages arrive,
+a **Read new messages** button near the bottom of the screen takes you to the
+first one, and goes away once you scroll to them. Opened tool calls are
 syntax-highlighted: Bash commands as shell, Write/Edit text and Read results by
 file extension. Other results are recognised by their own markers (JSON, diffs,
 `#!` scripts, XML), or take the language of the files the command reads

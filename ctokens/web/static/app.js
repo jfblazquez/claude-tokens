@@ -908,7 +908,10 @@ VIEWS.files = convView("/files", {
 // ---------- conversation messages ----------
 // anchor: the message at the top of the screen when the tab was left, to come back to the same place.
 // light: only the user's prompts and the model's text, hiding thinking, tool calls, results and injected messages.
-const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null, light: false };
+// keep: the message at the top of the screen before a refresh redraws the list; unread: log index of the first message
+// that arrived since, while the reader has not reached it.
+const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null, light: false, keep: null,
+  unread: null };
 const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results" };
 
 const withSource = (path, source) => (source === "main" ? path : `${path}?source=${encodeURIComponent(source)}`);
@@ -1033,7 +1036,9 @@ function messageItems(messages, tools) {
       day = today;
       model = null;
     }
-    items.push(messageItem(m, tools, m.role === "assistant" && m.model !== model));
+    const item = messageItem(m, tools, m.role === "assistant" && m.model !== model);
+    item.dataset.i = m.i;
+    items.push(item);
     if (m.role === "assistant") model = m.model;
   }
   return items;
@@ -1043,8 +1048,8 @@ const ellipsis = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : 
 const sourceOption = (s) => `${s.id === "main" ? "main" : `subagent ${s.id.slice(0, 8)}`} · ${ellipsis(String(s.task || ""), 60)}`;
 const visibleMessages = (messages) => messages.filter((m) => m.kind !== "tool_result");
 
-// Off-screen messages have an estimated height (content-visibility), so positions move as the ones in view get laid out;
-// the target is applied again until the page height settles.
+// Markdown, code highlighting and fonts may still change heights in the first frames, so the target is applied again
+// until the page height settles.
 function settleScroll(target) {
   let last = -1, stable = 0, frames = 0;
   const step = () => {
@@ -1079,8 +1084,55 @@ function setLight(light) {
   if (el) settleScroll(() => el.getBoundingClientRect().top + window.scrollY - anchor.offset);
 }
 
+// The first message shown at or after a log index, skipping those the light view hides.
+function shownFrom(index) {
+  for (const el of document.querySelectorAll(".msgs > li[data-i]")) {
+    if (Number(el.dataset.i) >= index && el.getClientRects().length) return el;
+  }
+  return null;
+}
+
+const NEW_TOP_GAP = 8;
+// A new message counts as read once its top reaches the upper part of the screen, not as soon as it peeks in at the bottom.
+const READ_MARGIN = "0px 0px -40% 0px";
+
+function readNew() {
+  const el = messagesState.unread == null ? null : shownFrom(messagesState.unread);
+  messagesState.unread = null;
+  dropNewNotice();
+  const below = () => document.querySelector(".appbar").getBoundingClientRect().bottom + NEW_TOP_GAP;
+  if (el) settleScroll(() => el.getBoundingClientRect().top + window.scrollY - below());
+}
+
+function dropNewNotice() {
+  const notice = $("new-messages");
+  if (notice) {
+    if (notice.observer) notice.observer.disconnect();
+    notice.remove();
+  }
+}
+
+// Shown near the bottom of the screen until the reader clicks it or scrolls the first new message into view.
+function showNewNotice() {
+  dropNewNotice();
+  const first = shownFrom(messagesState.unread);
+  if (!first) return;
+  const count = [...document.querySelectorAll(".msgs > li[data-i]")]
+    .filter((el) => Number(el.dataset.i) >= messagesState.unread && el.getClientRects().length).length;
+  const notice = h("button", { class: "btn new-messages", id: "new-messages", type: "button", onclick: readNew },
+    `↓ Read new messages (${fmt(count)})`);
+  notice.observer = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) {
+      messagesState.unread = null;
+      dropNewNotice();
+    }
+  }, { rootMargin: READ_MARGIN });
+  notice.observer.observe(first);
+  $("main").append(notice);
+}
+
 function messagesPath(route) {
-  if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main", anchor: null });
+  if (messagesState.id !== route.id) Object.assign(messagesState, { id: route.id, source: "main", anchor: null, unread: null });
   return withSource("/messages", messagesState.source);
 }
 
@@ -1097,7 +1149,15 @@ VIEWS.messages = convView(messagesPath, {
   render(data) {
     let n = 0;
     // Same numbering as the CLI: tool results are not counted, since they render under their call.
-    const messages = (data.messages || []).map((m) => ({ ...m, n: m.kind === "tool_result" ? null : ++n, when: parseStamp(m.timestamp) }));
+    const messages = (data.messages || []).map((m, i) => ({ ...m, i, n: m.kind === "tool_result" ? null : ++n, when: parseStamp(m.timestamp) }));
+    // A refresh draws a new list over the one on screen: remember which message the reader was at, and what is new.
+    const key = `${data.source}|${messages.length}`, old = document.querySelector(".msgs");
+    const [oldSource, oldCount] = old && messagesState.id === app.route.id ? old.dataset.key.split("|") : [];
+    if (oldSource === data.source) {
+      const top = topMessage();
+      messagesState.keep = top && top.el.dataset.i != null ? { i: Number(top.el.dataset.i), offset: top.offset } : null;
+      if (messages.length > Number(oldCount) && messagesState.unread == null) messagesState.unread = Number(oldCount);
+    }
     const tools = { results: new Map(), calls: toolCalls(messages) };
     for (const m of messages) for (const b of m.blocks) if (b.type === "tool_result") tools.results.set(b.tool_use_id, b);
     const shown = messages.filter((m) => !(m.kind === "tool_result" && m.blocks.every((b) => tools.calls.has(b.tool_use_id))));
@@ -1117,13 +1177,17 @@ VIEWS.messages = convView(messagesPath, {
         + money(cost, responses.some((m) => m.price_estimated))));
     const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
     if (!shown.length) return [meta, toolbar, emptyState("No messages", "This log has no user or assistant messages yet.")];
-    return [meta, toolbar, h("ol", { class: messagesState.light ? "msgs light" : "msgs" }, messageItems(shown, tools))];
+    return [meta, toolbar, h("ol", { class: messagesState.light ? "msgs light" : "msgs", "data-key": key }, messageItems(shown, tools))];
   },
   after: () => {
-    const { anchor, restore, toBottom } = messagesState;
-    Object.assign(messagesState, { anchor: null, restore: false, toBottom: false });
-    if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
+    const { anchor, restore, toBottom, keep, unread } = messagesState;
+    Object.assign(messagesState, { anchor: null, restore: false, toBottom: false, keep: null });
+    const kept = keep && shownFrom(keep.i);
+    if (kept) settleScroll(() => kept.getBoundingClientRect().top + window.scrollY - keep.offset);
+    else if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
     else if (toBottom) scrollToEnd();
+    if (unread != null) requestAnimationFrame(showNewNotice);
+    return dropNewNotice;
   },
 });
 

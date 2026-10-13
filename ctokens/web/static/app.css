@@ -89,6 +89,8 @@ details.footnote > div { margin-top: var(--s1); overflow-wrap: anywhere; }
 .to-top { position: fixed; right: var(--s4); bottom: var(--s4); z-index: 6; width: 40px; height: 40px; padding: 0; border-radius: 50%;
   font-size: var(--t-lg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.18); }
 .to-top[hidden] { display: none; }
+.new-messages { position: fixed; left: 50%; bottom: var(--s6); z-index: 6; transform: translateX(-50%);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2); }
 
 /* Stats */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s3); }
@@ -197,7 +199,8 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
   border-bottom: 1px solid var(--border); min-width: 0; }
 .cmds li:last-child { border-bottom: 0; }
 /* Long lists skip layout and paint of the items off screen; "auto" remembers each size once it has been seen. */
-.cmds li, .msgs > li { content-visibility: auto; contain-intrinsic-size: auto 90px; }
+/* Messages vary too much in height for an estimate: with one, the scrollbar and scroll positions jump. */
+.cmds li { content-visibility: auto; contain-intrinsic-size: auto 90px; }
 .cmds li.day { display: block; padding-block: var(--s2); background: var(--surface-2); color: var(--muted); font-size: var(--t-xs);
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-variant-numeric: tabular-nums; }
 .cmds time, .cmds .notime { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
