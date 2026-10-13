@@ -89,6 +89,8 @@ details.footnote > div { margin-top: var(--s1); overflow-wrap: anywhere; }
 .to-top { position: fixed; right: var(--s4); bottom: var(--s4); z-index: 6; width: 40px; height: 40px; padding: 0; border-radius: 50%;
   font-size: var(--t-lg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.18); }
 .to-top[hidden] { display: none; }
+.new-messages { position: fixed; left: 50%; bottom: var(--s6); z-index: 6; transform: translateX(-50%);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2); }
 
 /* Stats */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s3); }
@@ -133,6 +135,8 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .chip.main { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .meter { display: inline-block; width: 90px; height: 6px; border-radius: 3px; background: var(--grid); vertical-align: middle;
   margin-right: 8px; overflow: hidden; }
+.stack { display: flex; height: 14px; margin-bottom: var(--s3); overflow: hidden; border-radius: 4px; background: var(--grid); }
+.stack > i { display: block; height: 100%; }
 .meter > i { display: block; height: 100%; background: var(--accent); }
 
 /* Notices and states (R11.5) */
@@ -195,7 +199,8 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
   border-bottom: 1px solid var(--border); min-width: 0; }
 .cmds li:last-child { border-bottom: 0; }
 /* Long lists skip layout and paint of the items off screen; "auto" remembers each size once it has been seen. */
-.cmds li, .msgs > li { content-visibility: auto; contain-intrinsic-size: auto 90px; }
+/* Messages vary too much in height for an estimate: with one, the scrollbar and scroll positions jump. */
+.cmds li { content-visibility: auto; contain-intrinsic-size: auto 90px; }
 .cmds li.day { display: block; padding-block: var(--s2); background: var(--surface-2); color: var(--muted); font-size: var(--t-xs);
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-variant-numeric: tabular-nums; }
 .cmds time, .cmds .notime { font-family: var(--mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
@@ -232,6 +237,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .msg.user { background: var(--accent-soft); border-left-color: var(--accent); }
 .msg.aside { background: var(--surface-2); }
 .msg.failed { border-left-color: var(--err-fg); }
+.msgs.light > li.flow, .msgs.light details.blk, .msgs.light details.think { display: none; }
 .msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); color: var(--muted); font-size: var(--t-sm); }
 .msg-head b { color: var(--fg); font-weight: 650; }
 .msg-head .n, .msg-head time, .msg-head .notime { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -259,6 +265,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .think > summary:hover { color: var(--fg); }
 .think > .blk-body { border-top: 0; padding: var(--s1) 0 0; }
 .blk-body { display: grid; gap: var(--s2); min-width: 0; padding: var(--s2) 10px var(--s3); border-top: 1px solid var(--border); }
+.blk-body pre code, .blk-body pre code.hljs { padding: 0; background: none; font-size: inherit; overflow: visible; }
 .blk-body .lbl { margin-bottom: 2px; color: var(--muted); font-family: var(--mono); font-size: var(--t-xs); }
 .blk-body pre { margin: 0; max-height: 420px; overflow: auto; padding: 6px 10px; background: var(--code-bg); border-radius: 6px;
   font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -270,7 +277,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 @media (max-width: 640px) {
   /* Two short rows stay on screen: the brand name, load time and auto-refresh switch give way to the tabs. */
   .appbar-in { gap: var(--s2) var(--s3); padding-block: var(--s2); }
-  .brand-name, .loaded, .switch, .back-btn .lbl { display: none; }
+  .brand-name, .loaded, .appbar .switch, .back-btn .lbl { display: none; }
   .conv-nav { order: 1; width: 100%; overflow-x: auto; }
   .msg { padding: var(--s3); }
   .ustats { width: 100%; margin-left: 0; column-gap: var(--s3); }

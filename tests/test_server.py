@@ -189,7 +189,7 @@ class StaticFilesTest(ServerTestCase):
         types = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8"}
         self.assertEqual(sorted(STATIC_FILES), sorted([
-            "/", "/static/app.js", "/static/app.css", "/static/vendor/chart.umd.min.js",
+            "/", "/static/app.js", "/static/analysis.js", "/static/app.css", "/static/vendor/chart.umd.min.js",
             "/static/vendor/marked.min.js", "/static/vendor/purify.min.js", "/static/vendor/highlight.min.js",
             "/static/vendor/hljs-light.css", "/static/vendor/hljs-dark.css"]))
         for route, name in STATIC_FILES.items():

@@ -11,6 +11,7 @@ from .pricing import estimated_cost, rate_of, usage_key
 # Tool inputs and results can hold whole files; the transcript keeps their head and the original length.
 CLIP = 4000
 SUMMARY_KEYS = ("command", "file_path", "path", "pattern", "skill", "description", "prompt", "url", "query")
+BASH_SUMMARY = 100
 
 
 def last_response(path):
@@ -104,8 +105,19 @@ def first_text(value):
     return next((text for text in map(first_text, values) if text), "")
 
 
-def tool_summary(data):
+def bash_summary(data):
+    """The Bash description, else the head of the command."""
+    description = " ".join(str(data.get("description") or "").split())
+    if description:
+        return description
+    command = " ".join(str(data.get("command") or "").split())
+    return command if len(command) <= BASH_SUMMARY else command[:BASH_SUMMARY] + "..."
+
+
+def tool_summary(name, data):
     """The most telling input field (command, path, pattern...), else the first text anywhere in the input."""
+    if name == "Bash" and isinstance(data, dict):
+        return bash_summary(data)
     known = [data.get(key) for key in SUMMARY_KEYS] if isinstance(data, dict) else []
     return short(first_text(known) or first_text(data), 200)
 
@@ -125,7 +137,7 @@ def message_blocks(content):
             data = block.get("input")
             fields = data.items() if isinstance(data, dict) else [("input", data)]
             blocks.append({"type": "tool_use", "id": block.get("id"), "name": str(block.get("name") or "unknown"),
-                           "summary": tool_summary(data),
+                           "summary": tool_summary(block.get("name"), data),
                            "input": [{"name": str(name), **clipped(value)} for name, value in fields]})
         elif kind == "tool_result":
             blocks.append({"type": "tool_result", "tool_use_id": block.get("tool_use_id"),
