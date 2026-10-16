@@ -57,9 +57,26 @@ def task_from_log(path):
     return "(no task summary available)"
 
 
+def usage_record(usage):
+    """Token counts of one usage dict, by FIELDS."""
+    creation = usage.get("cache_creation") or {}
+    five = int(creation.get("ephemeral_5m_input_tokens") or 0)
+    hour = int(creation.get("ephemeral_1h_input_tokens") or 0)
+    # Undifferentiated legacy cache writes are assumed to be the API default: 5m.
+    five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
+    return {"input": int(usage.get("input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
+            "cache_read": int(usage.get("cache_read_input_tokens") or 0), "cache_write_5m": five, "cache_write_1h": hour}
+
+
+def response_identity(event, message):
+    """A persisted stream writes several events per API response; message.id identifies it, else the event uuid."""
+    identity = message.get("id") or event.get("uuid")
+    return identity if isinstance(identity, str) else object()
+
+
 def parse_log(path, kind, identifier, task):
     models = defaultdict(zero)
-    seen, records, duplicates, last_context, raw_outputs = set(), 0, 0, {}, defaultdict(int)
+    responses, records, duplicates, last_context, raw_outputs = {}, 0, 0, {}, defaultdict(int)
     max_context = defaultdict(int)
     for event in lines(path):
         message = event.get("message")
@@ -68,37 +85,24 @@ def parse_log(path, kind, identifier, task):
             continue
         model = str(message.get("model") or "modelo-desconocido")
         raw_outputs[model] += int(usage.get("output_tokens") or 0)
-        # A persisted stream may write several event UUIDs for one API response.
-        # Anthropic's message.id identifies that response; fall back to event UUID.
-        identity = message.get("id") or event.get("uuid")
-        if isinstance(identity, str) and identity in seen:
-            duplicates += 1
+        identity = response_identity(event, message)
+        duplicates += identity in responses
+        # Later events of a response carry the final output_tokens; earlier ones only a partial count.
+        responses[identity] = model, usage_record(usage)
+    for model, record in responses.values():
+        if not any(record.values()):
             continue
-        if isinstance(identity, str):
-            seen.add(identity)
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        cache_read = int(usage.get("cache_read_input_tokens") or 0)
-        creation = usage.get("cache_creation") or {}
-        five = int(creation.get("ephemeral_5m_input_tokens") or 0)
-        hour = int(creation.get("ephemeral_1h_input_tokens") or 0)
-        # Undifferentiated legacy cache writes are assumed to be the API default: 5m.
-        five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
-        if not any((input_tokens, output_tokens, cache_read, five, hour)):
-            continue
-        tokens = models[usage_key(model, input_tokens + cache_read + five + hour)]
-        tokens["input"] += input_tokens
-        tokens["output"] += output_tokens
-        tokens["cache_read"] += cache_read
-        tokens["cache_write_5m"] += five
-        tokens["cache_write_1h"] += hour
-        context_tokens = input_tokens + cache_read + five + hour
+        writes = record["cache_write_5m"] + record["cache_write_1h"]
+        context_tokens = record["input"] + record["cache_read"] + writes
+        tokens = models[usage_key(model, context_tokens)]
+        for field in FIELDS:
+            tokens[field] += record[field]
         max_context[model] = max(max_context[model], context_tokens)
         last_context[model] = {
-            "model": model, "input_tokens": input_tokens, "cache_read_tokens": cache_read,
-            "cache_write_tokens": five + hour,
+            "model": model, "input_tokens": record["input"], "cache_read_tokens": record["cache_read"],
+            "cache_write_tokens": writes,
             "context_tokens": context_tokens,
-            "last_output_tokens": output_tokens,
+            "last_output_tokens": record["output"],
         }
         records += 1
     for model, snapshot in last_context.items():
@@ -108,11 +112,15 @@ def parse_log(path, kind, identifier, task):
             "context_snapshot": list(last_context.values()), "raw_output_tokens": dict(raw_outputs)}
 
 
+def subagent_logs(main):
+    """Subagent logs of a conversation, sorted by path; workflow agents live in subagents/workflows/<run>/."""
+    folder = main.parent / main.stem / "subagents"
+    return sorted(folder.rglob("agent-*.jsonl")) if folder.is_dir() else []
+
+
 def conversation_sources(main):
     """("main", main) followed by (subagent id, path) for each subagent log, sorted by path."""
-    folder = main.parent / main.stem / "subagents"
-    subagents = sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
-    return [("main", main)] + [(path.stem.removeprefix("agent-"), path) for path in subagents]
+    return [("main", main)] + [(path.stem.removeprefix("agent-"), path) for path in subagent_logs(main)]
 
 
 def subagent_task(path):
@@ -147,7 +155,8 @@ def tool_uses(message, seen):
 
 def file_stats(path):
     """Token totals plus tool/skill/time metrics of one log; pure, so the result can be cached per file."""
-    models, daily_models, seen, seen_tools = defaultdict(zero), defaultdict(lambda: defaultdict(zero)), set(), set()
+    models, daily_models = defaultdict(zero), defaultdict(lambda: defaultdict(zero))
+    days, usages, seen_tools = {}, {}, set()
     tools, skills, responses, window = Counter(), Counter(), Counter(), None
     for event in lines(path):
         stamp = parse_timestamp(event.get("timestamp"))
@@ -166,25 +175,20 @@ def file_stats(path):
                     skills[str(skill)] += 1
         day = stamp.strftime("%Y-%m-%d") if stamp else None
         if event.get("type") == "assistant":
-            identity = message.get("id") or event.get("uuid")
-            if isinstance(identity, str):
-                if identity in seen:
-                    continue
-                seen.add(identity)
-            if day:
-                responses[day] += 1
+            identity = response_identity(event, message)
+            if identity not in days:
+                days[identity] = day
+                if day:
+                    responses[day] += 1
+            day = days[identity]
+        else:
+            identity = object()
         usage = message.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        model = str(message.get("model") or "modelo-desconocido")
-        creation = usage.get("cache_creation") or {}
-        five = int(creation.get("ephemeral_5m_input_tokens") or 0)
-        hour = int(creation.get("ephemeral_1h_input_tokens") or 0)
-        five += max(0, int(usage.get("cache_creation_input_tokens") or 0) - five - hour)
-        record = {"input": int(usage.get("input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
-                  "cache_read": int(usage.get("cache_read_input_tokens") or 0),
-                  "cache_write_5m": five, "cache_write_1h": hour}
-        key = usage_key(model, record["input"] + record["cache_read"] + five + hour)
+        if isinstance(usage, dict):
+            # Later events of a response carry the final output_tokens; earlier ones only a partial count.
+            usages[identity] = day, str(message.get("model") or "modelo-desconocido"), usage_record(usage)
+    for day, model, record in usages.values():
+        key = usage_key(model, sum(record[field] for field in FIELDS if field != "output"))
         for tokens in (models[key], daily_models[day][key]):
             for field in FIELDS:
                 tokens[field] += record[field]

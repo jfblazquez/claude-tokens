@@ -5,7 +5,8 @@ import json
 import re
 from datetime import datetime
 
-from .logs import conversation_sources, lines, parse_timestamp, short, subagent_task, task_from_log, tool_uses
+from .logs import (conversation_sources, lines, parse_timestamp, response_identity, short, subagent_task, task_from_log,
+                   tool_uses)
 from .pricing import estimated_cost, rate_of, usage_key
 
 # Tool inputs and results can hold whole files; the transcript keeps their head and the original length.
@@ -192,14 +193,15 @@ def transcript(path, prices):
             if blocks:
                 messages.append({"role": "user", "kind": user_kind(event, blocks), "timestamp": timestamp, "blocks": blocks})
             continue
-        # Usage is taken from the first event of a response, as parse_log does.
-        identity = message.get("id") or event.get("uuid")
-        entry = responses.get(identity) if isinstance(identity, str) else None
+        identity = response_identity(event, message)
+        entry = responses.get(identity)
         if entry is None:
-            entry = response_entry(event, message, timestamp, prices)
+            entry = responses[identity] = response_entry(event, message, timestamp, prices)
             messages.append(entry)
-            if isinstance(identity, str):
-                responses[identity] = entry
+        else:
+            # Usage is taken from the last event of a response, as parse_log does.
+            latest = response_entry(event, message, timestamp, prices)
+            entry.update({key: latest[key] for key in ("usage", "estimated_cost_usd", "price_estimated", "stop_reason")})
         entry["blocks"] += [block for block in blocks if block not in entry["blocks"]]
     return messages
 

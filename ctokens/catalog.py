@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .logs import lines
+from .logs import lines, subagent_logs
 
 
 def default_projects_dir():
@@ -22,11 +22,6 @@ def project_path_of(path):
         if isinstance(cwd, str) and cwd:
             return cwd
     return "/" + path.parent.name.lstrip("-").replace("-", "/")
-
-
-def count_subagents(path):
-    folder = path.parent / path.stem / "subagents"
-    return len(list(folder.glob("*.jsonl"))) if folder.is_dir() else 0
 
 
 def session_title(path, tail=131072):
@@ -92,7 +87,7 @@ def list_conversations(projects_dir, project_filter=None, project_of=project_pat
             stat = path.stat()
             conversations.append({
                 "path": path, "mtime": stat.st_mtime, "size_kb": stat.st_size / 1024,
-                "subagents": count_subagents(path), "project": cwd, "title": title,
+                "subagents": len(subagent_logs(path)), "project": cwd, "title": title,
             })
     conversations.sort(key=lambda row: row["mtime"], reverse=True)
     return conversations
