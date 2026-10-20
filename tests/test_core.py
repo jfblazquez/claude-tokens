@@ -47,6 +47,15 @@ class SourcesTest(CoreTest):
     def test_no_subagents_folder(self):
         self.assertEqual(conversation_sources(self.conv_b), [("main", self.conv_b)])
 
+    def test_workflow_agents_are_sources_but_their_journal_is_not(self):
+        main = Path(self.tmp.name) / "workflow" / "wf.jsonl"
+        write_jsonl(main, [], 0)
+        run = main.parent / "wf" / "subagents" / "workflows" / "wf_0123abcd-456"
+        agent = run / "agent-a0000000000000001.jsonl"
+        write_jsonl(agent, [], 0)
+        write_jsonl(run / "journal.jsonl", [{"type": "launched"}], 0)
+        self.assertEqual(conversation_sources(main), [("main", main), ("a0000000000000001", agent)])
+
     def test_discover_uses_the_injected_parser(self):
         calls = []
 
@@ -129,6 +138,28 @@ class FileStatsTest(CoreTest):
         path = Path(self.tmp.name) / "no-stamps.jsonl"
         path.write_text('{"type": "summary"}\n', encoding="utf-8")
         self.assertIsNone(file_stats(path)["window"])
+
+
+class StreamUsageTest(CoreTest):
+    def test_final_output_comes_from_the_last_event_of_a_response(self):
+        path = Path(self.tmp.name) / "stream.jsonl"
+        write_jsonl(path, [
+            assistant("m1", "claude-opus-5-5", "2026-09-28T23:59:59.000Z", "e1", [text("Partial.")], usage(2, 16, 500)),
+            assistant("m1", "claude-opus-5-5", "2026-09-29T00:00:01.000Z", "e2", [text("Final.")], usage(2, 283, 500)),
+        ], 0)
+        parsed = parse_log(path, "main", "main", "")
+        self.assertEqual(parsed["models"]["claude-opus-5-5"]["output"], 283)
+        self.assertEqual((parsed["records"], parsed["skipped_duplicates"]), (1, 1))
+        self.assertEqual(parsed["raw_output_tokens"], {"claude-opus-5-5": 299})
+        self.assertEqual(parsed["context_snapshot"][0]["last_output_tokens"], 283)
+        stats = file_stats(path)
+        self.assertEqual(stats["models"]["claude-opus-5-5"]["output"], 283)
+        # The response stays on the day of its first event.
+        self.assertEqual(stats["responses"], Counter({"2026-09-28": 1}))
+        self.assertEqual(list(stats["daily_models"]), ["2026-09-28"])
+        [message] = transcript(path, load_prices(None))
+        self.assertEqual((message["usage"]["output"], message["timestamp"]), (283, "2026-09-28T23:59:59.000Z"))
+        self.assertEqual([b["text"] for b in message["blocks"]], ["Partial.", "Final."])
 
 
 class ScanTotalsTest(CoreTest):

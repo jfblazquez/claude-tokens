@@ -1,7 +1,8 @@
 # claude-tokens
 
 Dependency-free utility that summarizes tokens and estimated cost from a Claude
-Code JSONL conversation and the JSONL files in `<session>/subagents/`.
+Code JSONL conversation and its subagent logs: `<session>/subagents/agent-*.jsonl`
+and, for workflow agents, `<session>/subagents/workflows/<run>/agent-*.jsonl`.
 
 ```bash
 python3 claude_tokens.py /path/to/conversation.jsonl
@@ -133,6 +134,8 @@ conversation, followed by model aggregates.
 
 It de-duplicates assistant events by `message.id` (falling back to `uuid`),
 because a JSONL can persist the same streamed API response multiple times.
+Usage is taken from the last event of each response: earlier events can carry a
+partial `output_tokens` count.
 The model aggregate also displays `output in persisted events` when it differs
 from the de-duplicated output. This is a diagnostic value for comparisons with
 tools that aggregate stream events; it is not used in the cost calculation.
