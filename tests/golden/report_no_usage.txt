@@ -1,14 +1,14 @@
 --- exit 0
 --- stdout
 Conversation usage
- Scope | ID | Task | Model | Total | Input | Output | Cache read | Cache write 5m/1h | Cost 
--------+----+------+-------+-------+-------+--------+------------+-------------------+------
+ Scope | ID | Task | Model | Total | Input | Output | Cache read | Cache write | Cost 
+-------+----+------+-------+-------+-------+--------+------------+-------------+------
 
 Duplicates skipped: none
 
 Summary by model
- Model | Total | Input | Output | Raw output* | Cache read | Cache write 5m/1h | Cost 
--------+-------+-------+--------+-------------+------------+-------------------+------
+ Model | Total | Input | Output | Raw output* | Cache read | Cache write | Cost 
+-------+-------+-------+--------+-------------+------------+-------------+------
 * Raw output is shown only when persisted stream events differ from de-duplicated API responses.
 
 Last observed context (main conversation)
@@ -21,5 +21,5 @@ Cold-summary estimate (without cache)
  Model | Cold input | Assumed output | Cost 
 -------+------------+----------------+------
 
-Estimated cost: $0.0000
+Estimated cost: $0.00
 --- stderr

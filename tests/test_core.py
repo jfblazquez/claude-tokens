@@ -14,7 +14,7 @@ from ctokens.content import CLIP, bash_commands, conversation_messages, last_res
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
 from ctokens.pricing import estimated_cost, load_prices, rate_of, usage_key
 from ctokens.reports import report, scan_totals, totals_report
-from ctokens.text import messages_text
+from ctokens.text import cache_write, fmt, fmt_bytes, messages_text, money
 
 
 class CoreTest(unittest.TestCase):
@@ -449,3 +449,24 @@ class MessagesTest(ContentTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HumanNumbersTest(unittest.TestCase):
+    def test_counts(self):
+        cases = {0: "0", 950: "950", 1000: "1K", 1500: "1.5K", 161344: "161.34K", 999999: "1M", 1284902: "1.28M",
+                 1836911842: "1.84B"}
+        self.assertEqual({n: fmt(n) for n in cases}, cases)
+
+    def test_bytes(self):
+        cases = {0: "0 B", 1023: "1023 B", 1024: "1 KB", 2796432: "2.67 MB", 5 * 1024 ** 3: "5 GB"}
+        self.assertEqual({n: fmt_bytes(n) for n in cases}, cases)
+
+    def test_money(self):
+        cases = {0: "$0.00", 0.086: "$0.09", 0.0052: "$0.005", 0.1472: "$0.1", 0.0096: "$0.01", 0.96: "$1.00",
+                 0.0004: "$0.0004", 0.0000123: "$0.00001", 2.9871: "$2.99", 1989.123: "$1989.12"}
+        self.assertEqual({n: money(n) for n in cases}, cases)
+        self.assertEqual(money(0.25, estimated=True), "~$0.3")
+
+    def test_cache_write(self):
+        self.assertEqual([cache_write(1030, 0), cache_write(0, 2000), cache_write(1030, 2000), cache_write(0, 0)],
+                         ["1.03K (5m)", "2K (1h)", "1.03K (5m) + 2K (1h)", "0"])

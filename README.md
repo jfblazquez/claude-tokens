@@ -16,7 +16,8 @@ without extension); it is located automatically under the projects folder.
 If you omit the conversation, it browses the Claude projects folder
 (`~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`) and shows an
 interactive picker with the most recent conversations first: the session GUID
-(the JSONL filename, i.e. the session id), size in KB, number of subagents used,
+(the JSONL filename, i.e. the session id), size on disk (the log plus its
+session folder: subagent logs and saved tool results), number of subagents used,
 project path, and the session title (its rename/`aiTitle`, blank when the
 session was never named). The list is paged 10 at a time: type a
 number to analyze that conversation, press Enter for the next 10, `a` to show
@@ -31,13 +32,13 @@ python3 claude_tokens.py --projects-dir /other/projects
 The picker looks like this (data below is illustrative):
 
 ```
- #  | Date             | GUID                                 | Size KB | Subagents | Project                       | Title
-----+------------------+--------------------------------------+---------+-----------+-------------------------------+------------------------------------
- 1  | 2026-01-15 18:42 | d91dbfb9-4ca2-495a-aa23-938757a38997 | 246     | 0         | /home/dev/projects/webfilter  | Add request-cache invalidation
- 2  | 2026-01-15 17:10 | 4a2f8c1e-7b6d-4e9a-9f03-1c2d3e4f5a6b | 3.377   | 12        | /home/dev/projects/webfilter  | Migrate parser to streaming API
- 3  | 2026-01-15 09:58 | 8e7d6c5b-4a39-4281-b0f1-2a3b4c5d6e7f | 152     | 1         | /home/dev/projects/api-gateway | Fix flaky auth integration test
- 4  | 2026-01-14 20:31 | 1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9 | 4       | 0         | /home/dev/projects/api-gateway |
- 5  | 2026-01-14 11:05 | f0e1d2c3-b4a5-4967-8879-0a1b2c3d4e5f | 799     | 3         | /home/dev/projects/dashboard  | Redesign metrics landing page
+ #  | Date             | GUID                                 | Size      | Subagents | Project                       | Title
+----+------------------+--------------------------------------+-----------+-----------+-------------------------------+------------------------------------
+ 1  | 2026-01-15 18:42 | d91dbfb9-4ca2-495a-aa23-938757a38997 | 246.12 KB | 0         | /home/dev/projects/webfilter  | Add request-cache invalidation
+ 2  | 2026-01-15 17:10 | 4a2f8c1e-7b6d-4e9a-9f03-1c2d3e4f5a6b | 7.85 MB   | 12        | /home/dev/projects/webfilter  | Migrate parser to streaming API
+ 3  | 2026-01-15 09:58 | 8e7d6c5b-4a39-4281-b0f1-2a3b4c5d6e7f | 301.5 KB  | 1         | /home/dev/projects/api-gateway | Fix flaky auth integration test
+ 4  | 2026-01-14 20:31 | 1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9 | 4.2 KB    | 0         | /home/dev/projects/api-gateway |
+ 5  | 2026-01-14 11:05 | f0e1d2c3-b4a5-4967-8879-0a1b2c3d4e5f | 1.37 MB   | 3         | /home/dev/projects/dashboard  | Redesign metrics landing page
 
 Select 1-42, Enter for next 10, 'a' for all, 'q' to quit:
 ```
@@ -46,16 +47,16 @@ After you pick one (or pass a path directly) it prints the usage report:
 
 ```
 Conversation usage
-Scope    | ID    | Task                     | Model           | Total     | Input  | Output | Cache read | Cache write 5m/1h | Cost
----------+-------+--------------------------+-----------------+-----------+--------+--------+------------+-------------------+--------
-main     | main  | Add request-cache inva…  | claude-opus-4-8 | 1.284.902 | 12.430 | 48.117 | 1.180.355  | 44.000/0          | $2.9871
+Scope    | ID    | Task                     | Model           | Total | Input  | Output | Cache read | Cache write | Cost
+---------+-------+--------------------------+-----------------+-------+--------+--------+------------+-------------+------
+main     | main  | Add request-cache inva…  | claude-opus-4-8 | 1.28M | 12.43K | 48.12K | 1.18M      | 44K (5m)    | $2.99
 
 Summary by model
-Model           | Total     | Input  | Output | Raw output* | Cache read | Cache write 5m/1h | Cost
-----------------+-----------+--------+--------+-------------+------------+-------------------+--------
-claude-opus-4-8 | 1.284.902 | 12.430 | 48.117 |             | 1.180.355  | 44.000/0          | $2.9871
+Model           | Total | Input  | Output | Raw output* | Cache read | Cache write | Cost
+----------------+-------+--------+--------+-------------+------------+-------------+------
+claude-opus-4-8 | 1.28M | 12.43K | 48.12K |             | 1.18M      | 44K (5m)    | $2.99
 
-Estimated cost: $2.9871
+Estimated cost: $2.99
 ```
 
 ## Overall usage (`--totals`)
@@ -79,23 +80,23 @@ Example (illustrative data — real paths/names are not shown here):
 ```
 Overall usage (projects folder)
   Time window : 31 days (2026-01-01 → 2026-01-31), 23 active days
-  Busiest day : 2026-01-14 (1.371 responses)
+  Busiest day : 2026-01-14 (1.37K responses)
   Volume      : 192 conversations across 14 projects, 127 subagents
-  Tokens      : 1.836.911.842 total, 8.172.167 generated (output)
+  Tokens      : 1.84B total, 8.17M generated (output)
   Cache hits  : 97.7% of input tokens served from cache
-  Total cost  : $1989.12 ($10.3600 per conversation)
+  Total cost  : $1989.12 ($10.36 per conversation)
 
 Usage by model
-Model           | Total tokens  | % tokens | Cost     | % cost
-----------------+---------------+----------+----------+--------
-claude-fable-5  | 759.984.932   | 41.4%    | $1175.74 | 59.1%
-claude-opus-4-8 | 949.413.549   | 51.7%    | $772.53  | 38.8%
-claude-sonnet-5 | 105.567.607   | 5.7%     | $37.44   | 1.9%
+Model           | Total tokens | % tokens | Cost     | % cost
+----------------+--------------+----------+----------+--------
+claude-fable-5  | 759.98M      | 41.4%    | $1175.74 | 59.1%
+claude-opus-4-8 | 949.41M      | 51.7%    | $772.53  | 38.8%
+claude-sonnet-5 | 105.57M      | 5.7%     | $37.44   | 1.9%
 
 Top tools
 Tool | Calls | % of calls
 -----+-------+------------
-Bash | 1.155 | 48.8%
+Bash | 1.16K | 48.8%
 Read | 606   | 25.6%
 Edit | 346   | 14.6%
 
@@ -108,8 +109,8 @@ code-review:pr  | 3
 Top projects by cost
 Project                       | Conversations | Total tokens | Cost
 ------------------------------+---------------+--------------+---------
-/home/dev/projects/webfilter  | 32            | 910.166.272  | $775.22
-/home/dev/projects/api-gateway | 99           | 400.175.203  | $463.74
+/home/dev/projects/webfilter  | 32            | 910.17M      | $775.22
+/home/dev/projects/api-gateway | 99           | 400.18M      | $463.74
 ```
 
 Metrics reported: time window (span, active days, busiest day), total cost and
@@ -188,7 +189,7 @@ and each file has `sources`. A block repeated in the log is counted once.
 of one subagent with `--source`, in log order. The log writes one event per
 content block, so the events of one API response are merged into one message.
 Each response shows its model, input, output (and how much of it was thinking),
-cache read, cache write 5m/1h, context size and estimated cost. The costs add
+cache read, cache write (per 5m/1h tier), context size and estimated cost. The costs add
 up to the usage report. With `--json` each message also has its blocks: text,
 thinking, tool calls and tool results. Tool inputs and results keep their first
 4.000 characters and their original length.

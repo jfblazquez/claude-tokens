@@ -1,7 +1,9 @@
 """Plain-text rendering for the terminal."""
 from __future__ import annotations
 
+import math
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 
 from .logs import short
 
@@ -11,15 +13,43 @@ from .logs import short
 ANSI = {"reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m", "cyan": "\033[36m"}
 
 
+def fixed(value, digits):
+    """value with digits decimals, ties away from zero like JavaScript's toFixed (Python's format rounds them to even)."""
+    return str(Decimal(value).quantize(Decimal(1).scaleb(-digits), ROUND_HALF_UP))
+
+
+def scaled(number, base, units):
+    """number in the largest unit that keeps it under base, with at most two decimals: 950, 1.5K, 12.35M."""
+    value, unit = float(number), 0
+    while abs(float(fixed(value, 2))) >= base and unit < len(units) - 1:
+        value, unit = value / base, unit + 1
+    return fixed(value, 2).rstrip("0").rstrip(".") + units[unit]
+
+
 def fmt(number):
-    return f"{number:,}".replace(",", ".")
+    return scaled(number, 1000, ("", "K", "M", "B"))
 
 
-def money(amount, estimated=False, digits=4):
-    """Costs priced from a family fallback are prefixed with ~."""
+def fmt_bytes(number):
+    return scaled(number, 1024, (" B", " KB", " MB", " GB", " TB"))
+
+
+def money(amount, estimated=False):
+    """Two decimals from $1 up; under $1, rounded at the first non-zero decimal ($0.086 → $0.09); ~ marks a fallback."""
     if amount is None:
         return "N/D"
-    return f"{'~' if estimated else ''}${amount:.{digits}f}"
+    text = fixed(amount, 2)
+    if amount and abs(amount) < 1:
+        digits = min(8, -math.floor(math.log10(abs(amount))))
+        rounded = fixed(amount, digits)
+        text = rounded.rstrip("0") if 0 < abs(float(rounded)) < 1 else fixed(float(rounded), 2)
+    return f"{'~' if estimated else ''}${text}"
+
+
+def cache_write(five, hour):
+    """Only the cache tiers that were written: 1.03K (5m), or 1.03K (5m) + 2K (1h)."""
+    parts = [f"{fmt(tokens)} ({tier})" for tokens, tier in ((five, "5m"), (hour, "1h")) if tokens]
+    return " + ".join(parts) or "0"
 
 
 def guessed_notice(models):
@@ -70,10 +100,10 @@ def report_text(data):
             conversation_rows.append([
                 row["kind"], row["id"], short(row["task"], 48), model, fmt(item["total_tokens"]),
                 fmt(item["input"]), fmt(item["output"]), fmt(item["cache_read"]),
-                f"{fmt(item['cache_write_5m'])}/{fmt(item['cache_write_1h'])}", price,
+                cache_write(item["cache_write_5m"], item["cache_write_1h"]), price,
             ])
     print("Conversation usage")
-    table(["Scope", "ID", "Task", "Model", "Total", "Input", "Output", "Cache read", "Cache write 5m/1h", "Cost"], conversation_rows)
+    table(["Scope", "ID", "Task", "Model", "Total", "Input", "Output", "Cache read", "Cache write", "Cost"], conversation_rows)
     duplicates = ", ".join(f"{row['id']}={row['skipped_duplicates']}" for row in data["conversations"] if row["skipped_duplicates"])
     print("\nDuplicates skipped: " + (duplicates or "none"))
 
@@ -83,8 +113,8 @@ def report_text(data):
         price = money(row["estimated_cost_usd"], row.get("price_estimated"))
         raw = "" if row["raw_output_tokens"] == row["output"] else fmt(row["raw_output_tokens"])
         model_rows.append([row["model"], fmt(row["total_tokens"]), fmt(row["input"]), fmt(row["output"]), raw,
-                           fmt(row["cache_read"]), f"{fmt(row['cache_write_5m'])}/{fmt(row['cache_write_1h'])}", price])
-    table(["Model", "Total", "Input", "Output", "Raw output*", "Cache read", "Cache write 5m/1h", "Cost"], model_rows)
+                           fmt(row["cache_read"]), cache_write(row["cache_write_5m"], row["cache_write_1h"]), price])
+    table(["Model", "Total", "Input", "Output", "Raw output*", "Cache read", "Cache write", "Cost"], model_rows)
     print("* Raw output is shown only when persisted stream events differ from de-duplicated API responses.")
 
     print("\nLast observed context (main conversation)")
@@ -104,7 +134,7 @@ def report_text(data):
         price = money(row["estimated_cold_summary_cost_usd"], row.get("price_estimated"))
         summary_rows.append([row["model"], fmt(row["context_tokens"]), fmt(row["assumed_summary_output_tokens"]), price])
     table(["Model", "Cold input", "Assumed output", "Cost"], summary_rows)
-    print(f"\nEstimated cost: ${data['estimated_total_cost_usd']:.4f}")
+    print(f"\nEstimated cost: {money(data['estimated_total_cost_usd'])}")
     if data["unknown_price_models"]:
         print("Models without pricing: " + ", ".join(data["unknown_price_models"]))
     if data.get("guessed_price_models"):
@@ -122,13 +152,13 @@ def totals_text(data, top=15):
           f"{fmt(data['projects_count'])} projects, {fmt(data['subagents'])} subagents")
     print(f"  Tokens      : {fmt(data['total_tokens'])} total, {fmt(data['output_tokens'])} generated (output)")
     print(f"  Cache hits  : {data['cache_hit_ratio']:.1%} of input tokens served from cache")
-    print(f"  Total cost  : ${data['estimated_total_cost_usd']:.2f} "
-          f"(${data['cost_per_conversation_usd']:.4f} per conversation)")
+    print(f"  Total cost  : {money(data['estimated_total_cost_usd'])} "
+          f"({money(data['cost_per_conversation_usd'])} per conversation)")
 
     print("\nUsage by model")
     rows = []
     for row in data["by_model"]:
-        cost = money(row["estimated_cost_usd"], row.get("price_estimated"), digits=2)
+        cost = money(row["estimated_cost_usd"], row.get("price_estimated"))
         pct_cost = "N/D" if row["pct_cost"] is None else f"{row['pct_cost']:.1%}"
         rows.append([row["model"], fmt(row["total_tokens"]), f"{row['pct_tokens']:.1%}", cost, pct_cost])
     table(["Model", "Total tokens", "% tokens", "Cost", "% cost"], rows)
@@ -151,7 +181,7 @@ def totals_text(data, top=15):
     rows = []
     for row in sorted(data["projects"], key=lambda r: r["estimated_cost_usd"], reverse=True)[:top]:
         rows.append([row["project"], fmt(row["conversations"]), fmt(row["total_tokens"]),
-                     f"${row['estimated_cost_usd']:.2f}"])
+                     money(row["estimated_cost_usd"])])
     table(["Project", "Conversations", "Total tokens", "Cost"], rows)
 
     if data["unknown_price_models"]:
@@ -186,7 +216,7 @@ def messages_text(data):
             u = message["usage"]
             output = fmt(u["output"]) + (f" ({fmt(u['thinking'])} th)" if u["thinking"] else "")
             row += [message["model"], fmt(u["input"]), output, fmt(u["cache_read"]),
-                    f"{fmt(u['cache_write_5m'])}/{fmt(u['cache_write_1h'])}", fmt(u["context"]),
+                    cache_write(u["cache_write_5m"], u["cache_write_1h"]), fmt(u["context"]),
                     money(message["estimated_cost_usd"], message["price_estimated"])]
             cost += message["estimated_cost_usd"] or 0
             guessed = guessed or message["price_estimated"]
@@ -195,7 +225,7 @@ def messages_text(data):
         rows.append(row + [message_preview(message)])
     task = next((s["task"] for s in data["sources"] if s["id"] == data["source"]), "")
     print(f"Messages ({data['source']}): {task}")
-    table(["#", "Time (UTC)", "Role", "Model", "Input", "Output", "Cache read", "Cache write 5m/1h", "Context", "Cost",
+    table(["#", "Time (UTC)", "Role", "Model", "Input", "Output", "Cache read", "Cache write", "Context", "Cost",
            "Content"], rows)
     responses = sum(m["role"] == "assistant" for m in shown)
     print(f"\n{fmt(len(rows))} message(s), {fmt(responses)} response(s). Estimated cost: {money(cost, guessed)}")
@@ -206,6 +236,6 @@ def show_page(conversations, start, end):
     for index in range(start, end):
         row = conversations[index]
         when = datetime.fromtimestamp(row["mtime"]).strftime("%Y-%m-%d %H:%M")
-        rows.append([index + 1, when, row["path"].stem, f"{row['size_kb']:,.0f}".replace(",", "."),
+        rows.append([index + 1, when, row["path"].stem, fmt_bytes(row["size_bytes"]),
                      row["subagents"], row["project"], short(row["title"], 50)])
-    table(["#", "Date", "GUID", "Size KB", "Subagents", "Project", "Title"], rows)
+    table(["#", "Date", "GUID", "Size", "Subagents", "Project", "Title"], rows)

@@ -24,13 +24,15 @@ class ConversationRowsTest(unittest.TestCase):
         rows = conversation_rows(self.projects)
         self.assertEqual([row["id"] for row in rows], [CONV_A, CONV_B, AMBIGUOUS, AMBIGUOUS, CONV_EMPTY])
         first = rows[0]
-        self.assertEqual(set(first), {"id", "modified", "size_kb", "subagents", "project", "title"})
+        self.assertEqual(set(first), {"id", "modified", "size_bytes", "subagents", "project", "title"})
         self.assertEqual(first["modified"], "2026-09-21T14:28:20Z")
         self.assertEqual(first["subagents"], 2)
         self.assertEqual(first["project"], "/home/dev/projects/api-gateway")
         self.assertEqual(first["title"], "Add request-cache invalidation")
-        size = (self.projects / API / f"{CONV_A}.jsonl").stat().st_size / 1024
-        self.assertEqual(first["size_kb"], round(size, 1))
+        session = self.projects / API / CONV_A
+        size = session.with_suffix(".jsonl").stat().st_size + sum(f.stat().st_size for f in session.rglob("*") if f.is_file())
+        self.assertGreater(size, session.with_suffix(".jsonl").stat().st_size)
+        self.assertEqual(first["size_bytes"], size)
 
     @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset")
     def test_modified_is_utc_regardless_of_tz(self):
