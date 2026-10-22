@@ -26,14 +26,33 @@ const $ = (id) => document.getElementById(id);
 const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 // ---------- formatting, as in the CLI (ctokens/text.py) ----------
-function fmt(n) {
+function exact(n) {
   if (n == null || Number.isNaN(n)) return "N/D";
   return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 }
 
-function money(amount, estimated, digits = 4) {
+// The largest unit that keeps n under base, with at most two decimals: 950, 1.5K, 12.35M.
+function scaled(n, base, units) {
+  if (n == null || Number.isNaN(n)) return "N/D";
+  let value = Number(n), unit = 0;
+  while (Math.abs(Number(value.toFixed(2))) >= base && unit < units.length - 1) { value /= base; unit += 1; }
+  return String(Number(value.toFixed(2))) + units[unit];
+}
+
+const fmt = (n) => scaled(n, 1000, ["", "K", "M", "B"]);
+const fmtBytes = (n) => scaled(n, 1024, [" B", " KB", " MB", " GB", " TB"]);
+
+// Two decimals from $1 up; under $1, rounded at the first non-zero decimal ($0.086 → $0.09).
+function money(amount, estimated) {
   if (amount == null) return "N/D";
-  return `${estimated ? "~" : ""}$${Number(amount).toFixed(digits)}`;
+  const value = Number(amount);
+  let text = value.toFixed(2);
+  if (value && Math.abs(value) < 1) {
+    const digits = Math.min(8, -Math.floor(Math.log10(Math.abs(value))));
+    const rounded = Number(value.toFixed(digits));
+    text = rounded && Math.abs(rounded) < 1 ? rounded.toFixed(digits).replace(/0+$/, "") : rounded.toFixed(2);
+  }
+  return `${estimated ? "~" : ""}$${text}`;
 }
 
 const pct = (x) => (x == null ? "N/D" : `${(x * 100).toFixed(1)}%`);
@@ -223,7 +242,9 @@ function renderTable(columns, rows, opts = {}) {
       body.push(h("tr", {
         class: cls(opts.onRow && "link"),
         onclick: opts.onRow ? (e) => { if (!e.target.closest("a")) opts.onRow(r); } : null,
-      }, columns.map((c) => h("td", { class: cls(c.num && "num", c.cls) }, c.render ? c.render(r) : r[c.key]))));
+      }, columns.map((c) => h("td", { class: cls(c.num && "num", c.cls),
+        title: c.num && Number.isInteger(r[c.key]) && Math.abs(r[c.key]) >= 1000 ? exact(r[c.key]) : null },
+      c.render ? c.render(r) : r[c.key]))));
     }
     const foot = opts.footer
       ? h("tfoot", {}, h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: cls(columns[i] && columns[i].num && "num") }, cell))))
@@ -505,7 +526,7 @@ VIEWS.list = {
         render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
       { key: "project", label: "Project", cls: "path", sortValue: (r) => pathTail(r.project),
         render: (r) => h("span", { class: "mono", title: r.project }, breakable(shortPath(r.project))) },
-      { key: "size_kb", label: "Size KB", num: true, render: (r) => fmt(r.size_kb) },
+      { key: "size_bytes", label: "Size", num: true, render: (r) => fmtBytes(r.size_bytes) },
       { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
       { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
     ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); },
@@ -620,7 +641,7 @@ function convHead(route) {
     resume ? copyButton(resume, resume, "Copy resume") : null)];
   if (row) {
     meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
-      h("span", {}, `${fmt(row.size_kb)} KB · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
+      h("span", {}, `${fmtBytes(row.size_bytes)} · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
   }
   return h("div", { class: "page-head", id: "conv-head" },
     h("h1", {}, title),
@@ -652,7 +673,9 @@ function drawConvNav() {
 const convTitle = (route) => (convRows.get(route.id) || {}).title || convTasks.get(route.id) || "Conversation";
 
 // ---------- usage report (R4) ----------
-const cacheWrite = (r) => `${fmt(r.cache_write_5m)}/${fmt(r.cache_write_1h)}`;
+// Only the cache tiers that were written: 1.03K (5m), or 1.03K (5m) + 2K (1h).
+const cacheWrite = (five, hour) => [[five, "5m"], [hour, "1h"]].filter(([n]) => n).map(([n, tier]) => `${fmt(n)} (${tier})`).join(" + ") || "0";
+const cacheWriteOf = (r) => cacheWrite(r.cache_write_5m, r.cache_write_1h);
 const sumBy = (rows, key) => rows.reduce((s, r) => s + (r[key] || 0), 0);
 
 function stat(label, value, detail) {
@@ -692,7 +715,7 @@ VIEWS.report = convView("", {
       stat("Estimated cost", money(data.estimated_total_cost_usd, guessed),
         [guessed ? "~ includes a guessed price" : "", unknown ? "excludes models without pricing" : ""].filter(Boolean).join(" · ")
           || "main + subagents"),
-      stat("Total tokens", compact(tokens), `${fmt(tokens)} total · ${fmt(sumBy(byModel, "output"))} output`),
+      stat("Total tokens", fmt(tokens), `${fmt(sumBy(byModel, "output"))} output`),
       stat("Scopes", `1 + ${subagents}`, "main + subagents"),
       stat("Served from cache", pct(tokens ? sumBy(byModel, "cache_read") / tokens : null), "of all tokens"));
 
@@ -710,7 +733,7 @@ VIEWS.report = convView("", {
         { key: "model", label: "Model", render: (r) => modelCell(r.model) },
         ...tokenColumns(),
         { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
-        { key: "cache_write", label: "Cache write 5m/1h", num: true, render: cacheWrite, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
+        { key: "cache_write", label: "Cache write", num: true, render: cacheWriteOf, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
         { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
       ], scopeRows, { id: "report-scopes" }),
       dupNote);
@@ -722,11 +745,11 @@ VIEWS.report = convView("", {
       showRaw ? { key: "raw_output_tokens", label: "Raw output*", num: true,
         render: (r) => (r.raw_output_tokens === r.output ? "" : fmt(r.raw_output_tokens)) } : null,
       { key: "cache_read", label: "Cache read", num: true, render: (r) => fmt(r.cache_read) },
-      { key: "cache_write", label: "Cache write 5m/1h", num: true, render: cacheWrite, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
+      { key: "cache_write", label: "Cache write", num: true, render: cacheWriteOf, sortValue: (r) => r.cache_write_5m + r.cache_write_1h },
       { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
     ].filter(Boolean);
     const footer = ["Total", fmt(tokens), fmt(sumBy(byModel, "input")), fmt(sumBy(byModel, "output")), showRaw ? "" : null,
-      fmt(sumBy(byModel, "cache_read")), `${fmt(sumBy(byModel, "cache_write_5m"))}/${fmt(sumBy(byModel, "cache_write_1h"))}`,
+      fmt(sumBy(byModel, "cache_read")), cacheWrite(sumBy(byModel, "cache_write_5m"), sumBy(byModel, "cache_write_1h")),
       money(data.estimated_total_cost_usd, guessed)].filter((c) => c !== null);
     const models = h("section", { class: "section" }, sectionHead("Summary by model"),
       renderTable(modelColumns, byModel, { id: "report-models", footer }),
@@ -958,22 +981,21 @@ const clippedPre = (item, lang = null) => [codePre(item.text, lang), item.size >
 const labelled = (label, item, lang = null) => h("div", {},
   h("div", { class: "lbl" }, coloured(lang) ? `${label} · ${languageName(lang)}` : label), clippedPre(item, lang));
 
-// The figures that change from one response to the next stand out; the rest stay small and muted.
 function usageStats(m) {
   const u = m.usage;
   const items = [
-    ["Context", fmt(u.context), "key"],
-    ["Output", u.thinking ? `${fmt(u.output)} (${fmt(u.thinking)} thinking)` : fmt(u.output), "key"],
-    ["Cost", money(m.estimated_cost_usd, m.price_estimated), "key"],
+    ["Context", fmt(u.context)],
+    ["Output", u.thinking ? `${fmt(u.output)} (${fmt(u.thinking)} thinking)` : fmt(u.output)],
+    ["Cost", money(m.estimated_cost_usd, m.price_estimated)],
     ["Input", fmt(u.input)],
     ["Cache read", fmt(u.cache_read)],
-    ["Cache write 5m/1h", `${fmt(u.cache_write_5m)}/${fmt(u.cache_write_1h)}`],
+    ["Cache write", cacheWrite(u.cache_write_5m, u.cache_write_1h)],
     u.web_search_requests ? ["Web searches", fmt(u.web_search_requests)] : null,
     u.web_fetch_requests ? ["Web fetches", fmt(u.web_fetch_requests)] : null,
     u.speed && u.speed !== "standard" ? ["Speed", u.speed] : null,
     u.service_tier && u.service_tier !== "standard" ? ["Tier", u.service_tier] : null,
   ].filter(Boolean);
-  return h("dl", { class: "ustats" }, items.map(([k, v, cls]) => h("div", { class: cls }, h("dt", {}, k), h("dd", {}, v))));
+  return h("dl", { class: "ustats" }, items.map(([k, v]) => h("div", {}, h("dt", {}, k), h("dd", {}, v))));
 }
 
 const ROUTINE_STOPS = new Set(["tool_use", "end_turn", "stop_sequence"]);
@@ -1258,14 +1280,7 @@ function breakdownView(breakdown) {
 let totalsFilter = "";
 let totalsDraft = "";
 
-function compact(n) {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} B`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} M`;
-  return fmt(n);
-}
-
 const hasGuessed = (T, day) => Object.keys(day.models || {}).some((m) => (T.guessed_price_models || []).includes(m));
-const moneyShort = (v, estimated) => money(v, estimated, v && Math.abs(v) < 0.01 ? 4 : 2);
 const DAY_MS = 864e5, MAX_FILLED_DAYS = 1000;
 
 // Days without usage are added as zeros so the day axis keeps its real spacing.
@@ -1333,8 +1348,8 @@ VIEWS.totals = {
     const guessed = (T.guessed_price_models || []).length > 0;
     const w = T.window || {};
     const stats = h("div", { class: "stats" },
-      stat("Total cost", money(T.estimated_total_cost_usd, guessed, 2), `${money(T.cost_per_conversation_usd, false, 4)} per conversation`),
-      stat("Tokens", compact(T.total_tokens), `${fmt(T.total_tokens)} total · ${fmt(T.output_tokens)} generated`),
+      stat("Total cost", money(T.estimated_total_cost_usd, guessed), `${money(T.cost_per_conversation_usd, false)} per conversation`),
+      stat("Tokens", fmt(T.total_tokens), `${fmt(T.output_tokens)} generated`),
       stat("Volume", fmt(T.conversations), `conversations · ${fmt(T.subagents)} subagents · ${fmt(T.projects_count)} projects`),
       stat("Cache hits", pct(T.cache_hit_ratio), "of input tokens served from cache"),
       stat("Time window", w.start ? `${fmt(w.span_days)} days` : "—", w.start
@@ -1346,7 +1361,7 @@ VIEWS.totals = {
     const legend = h("div", { class: "legend" }, models.map((m) => h("span", {}, swatch(m), m)));
     const charts = h("div", { class: "charts" },
       chartCard("Daily cost by model", undated
-        ? `Undated records (no timestamp, not plotted): ${moneyShort(undated.estimated_cost_usd, hasGuessed(T, undated))} · ${fmt(undated.total_tokens)} tokens`
+        ? `Undated records (no timestamp, not plotted): ${money(undated.estimated_cost_usd, hasGuessed(T, undated))} · ${fmt(undated.total_tokens)} tokens`
         : "Stacked by model · days in UTC",
       h("div", { class: "chart-stack" }, legend, chartBox("c-daily", "Daily cost by model", "tall")), true),
       chartCard("Model share", "Percentage of cost and of tokens per model",
@@ -1360,14 +1375,14 @@ VIEWS.totals = {
       { key: "model", label: "Model", render: (r) => modelCell(r.model) },
       { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
       { key: "pct_tokens", label: "% tokens", num: true, render: (r) => pct(r.pct_tokens) },
-      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated, 2) },
+      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, r.price_estimated) },
       { key: "pct_cost", label: "% cost", num: true, render: (r) => pct(r.pct_cost) },
     ], T.by_model || [], { id: "totals-models", sortKey: "estimated_cost_usd" }));
     const projectTable = h("section", { class: "section" }, sectionHead("Projects by cost"), renderTable([
       pathCol("project", "Project", true),
       { key: "conversations", label: "Conversations", num: true, render: (r) => fmt(r.conversations) },
       { key: "total_tokens", label: "Total tokens", num: true, render: (r) => fmt(r.total_tokens) },
-      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false, 2) },
+      { key: "estimated_cost_usd", label: "Cost", num: true, render: (r) => money(r.estimated_cost_usd, false) },
     ], T.projects || [], { id: "totals-projects", sortKey: "estimated_cost_usd" }));
     const toolRows = topEntries(T.tools, Infinity).map(([tool, calls]) => ({ tool, calls, share: T.tool_calls ? calls / T.tool_calls : 0 }));
     const skillRows = topEntries(T.skills, Infinity).map(([skill, n]) => ({ skill, n }));
@@ -1395,8 +1410,8 @@ function drawCharts(T) {
   Chart.defaults.color = fg;
   const charts = [];
   const guessed = new Set(T.guessed_price_models || []);
-  // Chart.js groups thousands by browser locale; ticks use the same separator as the tables instead.
-  const tickNum = (v) => (Number.isInteger(v) ? fmt(v) : String(v));
+  // Chart.js groups thousands by browser locale; ticks use the same K/M/B units as the tables instead.
+  const tickNum = fmt;
   const axis = (title, extra = {}, ticks = {}) => ({
     grid: { color: grid, drawTicks: false }, border: { color: grid },
     ticks: { color: fg, padding: 6, maxRotation: 0, autoSkipPadding: 10, ...ticks },
@@ -1432,9 +1447,9 @@ function drawCharts(T) {
         title: dayTitle,
         label: (i) => {
           const entry = days[i.dataIndex].models[i.dataset.label];
-          return ` ${i.dataset.label}: ${entry && entry.estimated_cost_usd == null ? "N/D" : moneyShort(i.raw, guessed.has(i.dataset.label))}`;
+          return ` ${i.dataset.label}: ${entry && entry.estimated_cost_usd == null ? "N/D" : money(i.raw, guessed.has(i.dataset.label))}`;
         },
-        footer: (items) => `Day total: ${moneyShort(days[items[0].dataIndex].estimated_cost_usd, hasGuessed(T, days[items[0].dataIndex]))}`,
+        footer: (items) => `Day total: ${money(days[items[0].dataIndex].estimated_cost_usd, hasGuessed(T, days[items[0].dataIndex]))}`,
       } } } },
   }, days.length ? null : "No dated usage");
 
@@ -1467,7 +1482,7 @@ function drawCharts(T) {
 
   const projects = [...(T.projects || [])].sort((a, b) => b.estimated_cost_usd - a.estimated_cost_usd).slice(0, 15);
   hbar("c-projects", { names: projects.map((p) => String(p.project).split("/").filter(Boolean).pop() || p.project),
-    values: projects.map((p) => p.estimated_cost_usd), color: accent, format: (v) => moneyShort(v, false), title: "Cost (USD)",
+    values: projects.map((p) => p.estimated_cost_usd), color: accent, format: (v) => money(v, false), title: "Cost (USD)",
     fullNames: projects.map((p) => p.project), empty: "No projects" });
   const tools = topEntries(T.tools), skills = topEntries(T.skills);
   hbar("c-tools", { names: tools.map((t) => t[0]), values: tools.map((t) => t[1]), color: accent, format: fmt,

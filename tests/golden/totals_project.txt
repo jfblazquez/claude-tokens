@@ -4,16 +4,16 @@ Overall usage (projects folder)
   Time window : 4 days (2026-09-27 → 2026-09-30), 3 active days
   Busiest day : 2026-09-29 (1 responses)
   Volume      : 2 conversations across 1 projects, 0 subagents
-  Tokens      : 23.080 total, 1.120 generated (output)
+  Tokens      : 23.08K total, 1.12K generated (output)
   Cache hits  : 91.1% of input tokens served from cache
-  Total cost  : $0.01 ($0.0070 per conversation)
+  Total cost  : $0.01 ($0.007 per conversation)
 
 Usage by model
- Model             | Total tokens | % tokens | Cost   | % cost 
--------------------+--------------+----------+--------+--------
- claude-sonnet-5-6 | 22.350       | 96.8%    | ~$0.01 | 99.2%  
- claude-haiku-4-5  | 30           | 0.1%     | $0.00  | 0.8%   
- acme-model-1      | 700          | 3.0%     | N/D    | N/D    
+ Model             | Total tokens | % tokens | Cost    | % cost 
+-------------------+--------------+----------+---------+--------
+ claude-sonnet-5-6 | 22.35K       | 96.8%    | ~$0.01  | 99.2%  
+ claude-haiku-4-5  | 30           | 0.1%     | $0.0001 | 0.8%   
+ acme-model-1      | 700          | 3.0%     | N/D     | N/D    
 
 Top tools
  Tool | Calls | % of calls 
@@ -25,7 +25,7 @@ Skills used
 Top projects by cost
  Project                            | Conversations | Total tokens | Cost  
 ------------------------------------+---------------+--------------+-------
- /home/dev/projects/billing-service | 2             | 23.080       | $0.01 
+ /home/dev/projects/billing-service | 2             | 23.08K       | $0.01 
 
 Models without pricing: acme-model-1
 

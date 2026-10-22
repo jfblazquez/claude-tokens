@@ -245,9 +245,8 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .msg-head .model .sw { margin-right: 6px; }
 .ustats { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); margin: 0 0 0 auto; font-size: var(--t-xs); }
 .ustats div { display: flex; gap: 5px; white-space: nowrap; }
-.ustats dd { margin: 0; font-variant-numeric: tabular-nums; }
-.ustats .key { font-size: var(--t-sm); }
-.ustats .key dd { color: var(--fg); font-weight: 650; }
+.ustats dt { color: var(--muted); }
+.ustats dd { margin: 0; color: var(--fg); font-variant-numeric: tabular-nums; }
 .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
 .msg-body { display: grid; gap: var(--s2); min-width: 0; }
 .msg .md { padding: 0; }

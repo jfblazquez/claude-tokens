@@ -69,6 +69,13 @@ def normalized(text):
 CONVERSATION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
+def conversation_bytes(main):
+    """The log plus its session folder (subagent logs, saved tool results), as du --apparent-size counts it."""
+    folder = main.parent / main.stem
+    extra = sum(path.stat().st_size for path in folder.rglob("*") if path.is_file()) if folder.is_dir() else 0
+    return main.stat().st_size + extra
+
+
 def list_conversations(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title,
                        search=None, text_of=conversation_text):
     """Top-level session logs across every project, most recent first; search matches the title or the text."""
@@ -86,7 +93,7 @@ def list_conversations(projects_dir, project_filter=None, project_of=project_pat
                 continue
             stat = path.stat()
             conversations.append({
-                "path": path, "mtime": stat.st_mtime, "size_kb": stat.st_size / 1024,
+                "path": path, "mtime": stat.st_mtime, "size_bytes": conversation_bytes(path),
                 "subagents": len(subagent_logs(path)), "project": cwd, "title": title,
             })
     conversations.sort(key=lambda row: row["mtime"], reverse=True)
@@ -98,7 +105,7 @@ def conversation_rows(projects_dir, project_filter=None, project_of=project_path
     """The picker's list as JSON-ready dicts; modified is ISO 8601 UTC."""
     return [{"id": row["path"].stem,
              "modified": datetime.fromtimestamp(row["mtime"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-             "size_kb": round(row["size_kb"], 1), "subagents": row["subagents"],
+             "size_bytes": row["size_bytes"], "subagents": row["subagents"],
              "project": row["project"], "title": row["title"]}
             for row in list_conversations(projects_dir, project_filter, project_of, title_of, search, text_of)]
 
