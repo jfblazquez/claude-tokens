@@ -135,6 +135,9 @@ def report_text(data):
         summary_rows.append([row["model"], fmt(row["context_tokens"]), fmt(row["assumed_summary_output_tokens"]), price])
     table(["Model", "Cold input", "Assumed output", "Cost"], summary_rows)
     print(f"\nEstimated cost: {money(data['estimated_total_cost_usd'])}")
+    claude_code = data.get("claude_code") or {}
+    if claude_code.get("cost_usd") is not None:
+        print(f"Claude Code's own estimate: {money(claude_code['cost_usd'])}")
     if data["unknown_price_models"]:
         print("Models without pricing: " + ", ".join(data["unknown_price_models"]))
     if data.get("guessed_price_models"):
@@ -190,11 +193,13 @@ def totals_text(data, top=15):
         print("\n" + guessed_notice(data["guessed_price_models"]))
 
 
-ROLE_LABELS = {"prompt": "user", "meta": "meta", "summary": "summary",
+ROLE_LABELS = {"prompt": "user", "meta": "meta", "summary": "summary", "notification": "notice",
                "response": "assistant", "error": "api error"}
 
 
 def message_preview(message):
+    if message.get("title"):
+        return short(message["title"], 60)
     blocks = message["blocks"]
     texts = [b["text"] for b in blocks if b["type"] == "text"]
     if texts:
@@ -202,13 +207,15 @@ def message_preview(message):
     tools = [b["name"] for b in blocks if b["type"] == "tool_use"]
     if tools:
         return "→ " + ", ".join(tools)
+    if any(b["type"] == "image" for b in blocks):
+        return "[image]"
     return "(thinking)"
 
 
 def messages_text(data):
     rows, cost, guessed = [], 0, False
-    # Tool results are shown under the call that made them in the web UI, so neither view numbers them.
-    shown = [m for m in data["messages"] if m["kind"] != "tool_result"]
+    # Tool results are shown under the call that made them in the web UI, so neither view numbers them; nor events.
+    shown = [m for m in data["messages"] if m["kind"] != "tool_result" and m["role"] != "event"]
     for index, message in enumerate(shown, 1):
         when = (message["timestamp"] or "")[:19].replace("T", " ")
         row = [index, when, ROLE_LABELS[message["kind"]]]

@@ -237,7 +237,25 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .msg.user { background: var(--accent-soft); border-left-color: var(--accent); }
 .msg.aside { background: var(--surface-2); }
 .msg.failed { border-left-color: var(--err-fg); }
-.msgs.light > li.flow, .msgs.light details.blk, .msgs.light details.think { display: none; }
+/* Detail levels: an element tagged vN is shown from level N up; level 1 also hides tools, thinking and non-prompt messages. */
+.msgs.lvl-1 > li.flow, .msgs.lvl-1 details.blk, .msgs.lvl-1 details.think,
+.msgs.lvl-1 .v2, .msgs.lvl-1 .v3, .msgs.lvl-1 .v4, .msgs.lvl-1 .v5,
+.msgs.lvl-2 .v3, .msgs.lvl-2 .v4, .msgs.lvl-2 .v5,
+.msgs.lvl-3 .v4, .msgs.lvl-3 .v5,
+.msgs.lvl-4 .v5 { display: none; }
+.field.level input { width: 110px; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+.level-name { min-width: 11em; color: var(--fg); }
+.msg.event { padding: var(--s1) var(--s4); background: none; border-style: dashed; border-left-style: solid; }
+.event-text { color: var(--fg); overflow-wrap: anywhere; min-width: 0; }
+.msg.event .msg-head { flex-wrap: wrap; }
+.msg.event .msg-head > details.blk { flex: 1; min-width: 0; }
+.extras { font-size: var(--t-xs); }
+.img-block { margin: 0; display: grid; gap: 2px; justify-items: start; }
+.img-row { display: flex; flex-wrap: wrap; gap: var(--s3); }
+.img-block img { max-width: min(100%, 360px); max-height: 240px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); cursor: zoom-in; }
+.img-block img.full { max-width: 100%; max-height: none; cursor: zoom-out; }
+.img-block figcaption { color: var(--muted); font-family: var(--mono); font-size: var(--t-xs); }
 .msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); color: var(--muted); font-size: var(--t-sm); }
 .msg-head b { color: var(--fg); font-weight: 650; }
 .msg-head .n, .msg-head time, .msg-head .notime { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }

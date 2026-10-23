@@ -57,6 +57,7 @@
         "claude-sonnet-5-6": 800,
         "acme-model-1": 600
       },
+      "claude_code": null,
       "estimated_cost_usd": null
     }
   ],
@@ -137,6 +138,7 @@
     }
   ],
   "estimated_total_cost_usd": 0.01385,
+  "claude_code": null,
   "unknown_price_models": [
     "acme-model-1"
   ],

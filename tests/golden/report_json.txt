@@ -35,6 +35,7 @@
       "raw_output_tokens": {
         "claude-haiku-4-5": 1000
       },
+      "claude_code": null,
       "estimated_cost_usd": 0.0052
     },
     {
@@ -70,6 +71,7 @@
       "raw_output_tokens": {
         "claude-sonnet-5-5": 1400
       },
+      "claude_code": null,
       "estimated_cost_usd": 0.0189
     },
     {
@@ -106,6 +108,7 @@
       "raw_output_tokens": {
         "claude-opus-5-5": 12300
       },
+      "claude_code": null,
       "estimated_cost_usd": 0.147176
     }
   ],
@@ -175,6 +178,7 @@
     }
   ],
   "estimated_total_cost_usd": 0.171276,
+  "claude_code": null,
   "unknown_price_models": [],
   "guessed_price_models": []
 }

@@ -169,6 +169,10 @@ const image = [{ role: "user", kind: "prompt", blocks: [text(10)] }, { role: "as
   { role: "user", kind: "tool_result", blocks: [result("[image]"), result("y".repeat(100))] },
   { role: "assistant", usage: usage(2500, 0), blocks: [] }];
 assert.deepStrictEqual(parts(image, keyOf), { system: 997, "result:image": 1470, "result:cpp": 30, prompt: 3 });
+const pasted = [{ role: "user", kind: "prompt", blocks: [text(10)] }, { role: "assistant", usage: usage(1000, 0), blocks: [] },
+  { role: "user", kind: "prompt", blocks: [{ type: "image", media_type: "image/png", bytes: 9000 }, text(100)] },
+  { role: "assistant", usage: usage(2500, 0), blocks: [] }];
+assert.deepStrictEqual(parts(pasted, keyOf), { prompt: 1503, system: 997 });
 
 // A compaction summary starts the context over.
 const compacted = [...messages, { role: "user", kind: "summary", blocks: [text(200, "s")] },

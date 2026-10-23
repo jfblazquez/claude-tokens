@@ -715,6 +715,7 @@ VIEWS.report = convView("", {
       stat("Estimated cost", money(data.estimated_total_cost_usd, guessed),
         [guessed ? "~ includes a guessed price" : "", unknown ? "excludes models without pricing" : ""].filter(Boolean).join(" · ")
           || "main + subagents"),
+      claudeCodeStat(data.claude_code),
       stat("Total tokens", fmt(tokens), `${fmt(sumBy(byModel, "output"))} output`),
       stat("Scopes", `1 + ${subagents}`, "main + subagents"),
       stat("Served from cache", pct(tokens ? sumBy(byModel, "cache_read") / tokens : null), "of all tokens"));
@@ -930,12 +931,27 @@ VIEWS.files = convView("/files", {
 
 // ---------- conversation messages ----------
 // anchor: the message at the top of the screen when the tab was left, to come back to the same place.
-// light: only the user's prompts and the model's text, hiding thinking, tool calls, results and injected messages.
+// level: how much is shown, from 1 (prompts and replies) to 5 (everything in the log); see LEVELS.
 // keep: the message at the top of the screen before a refresh redraws the list; unread: log index of the first message
 // that arrived since, while the reader has not reached it.
-const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null, light: false, keep: null,
+const LEVEL_KEY = "ctokens.messages.level";
+const LEVELS = [null, "Prompts and replies", "Tools and notices", "Turns and compactions", "Commands and hooks", "Everything"];
+
+function storedLevel() {
+  try {
+    const level = Number(localStorage.getItem(LEVEL_KEY));
+    return Number.isInteger(level) && level >= 1 && level < LEVELS.length ? level : 2;
+  } catch (e) {
+    return 2;
+  }
+}
+
+const messagesState = { id: null, source: "main", toBottom: false, restore: false, anchor: null, level: storedLevel(), keep: null,
   unread: null };
-const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results" };
+const KIND_LABELS = { prompt: "User", meta: "Injected context", summary: "Compaction summary", tool_result: "Tool results",
+  notification: "Notification" };
+// Level from which each event kind is shown; blocks and messages without one are tagged where they are built.
+const EVENT_LEVELS = { refusal: 1, compaction: 3, turn: 3, command: 4, recap: 4, info: 4, hook: 4, attachment: 5, system: 5 };
 
 const withSource = (path, source) => (source === "main" ? path : `${path}?source=${encodeURIComponent(source)}`);
 
@@ -975,6 +991,32 @@ function codePre(text, lang) {
   return h("pre", {}, code);
 }
 
+function fmtDuration(ms) {
+  if (ms == null) return "N/D";
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${Number(seconds.toFixed(seconds < 10 ? 1 : 0))} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+// Click toggles between the thumbnail and the image at its own size.
+function imageBlock(b) {
+  const caption = [b.media_type || "image", b.bytes != null ? fmtBytes(b.bytes) : null].filter(Boolean).join(" · ");
+  if (!b.data || !IMAGE_TYPES.has(b.media_type)) return h("span", { class: "chip" }, `${caption} · not in the log`);
+  const img = h("img", { src: `data:${b.media_type};base64,${b.data}`, alt: "Image from the conversation", loading: "lazy",
+    title: "Click to toggle full size", onclick: () => img.classList.toggle("full") });
+  return h("figure", { class: "img-block" }, img, h("figcaption", {}, caption));
+}
+
+// Outside the collapsed tool block, so they show without opening it.
+const resultImages = (result) => (result && result.images && result.images.length
+  ? h("div", { class: "img-row v2" }, result.images.map(imageBlock)) : null);
+// A result that is nothing but its images: the "[image]" placeholders say nothing the thumbnails do not.
+const onlyImages = (result) => !!(result.images && /^(\s*\[image\])+\s*$/.test(result.text));
+
 const clippedPre = (item, lang = null) => [codePre(item.text, lang), item.size > item.text.length
   ? h("div", { class: "footnote" }, `Showing the first ${fmt(item.text.length)} of ${fmt(item.size)} characters`) : null];
 
@@ -998,16 +1040,31 @@ function usageStats(m) {
   return h("dl", { class: "ustats" }, items.map(([k, v]) => h("div", {}, h("dt", {}, k), h("dd", {}, v))));
 }
 
+// Claude Code's own running total, from the last cost-state record of the main log.
+function claudeCodeStat(cc) {
+  if (!cc || cc.cost_usd == null) return null;
+  const lines = cc.lines_added != null ? `+${fmt(cc.lines_added)} −${fmt(cc.lines_removed)} lines` : null;
+  const api = cc.api_duration_ms != null ? `API ${fmtDuration(cc.api_duration_ms)}` : null;
+  return stat("Claude Code's estimate", money(cc.cost_usd, false), [lines, api].filter(Boolean).join(" · ") || "its own running total");
+}
+
 const ROUTINE_STOPS = new Set(["tool_use", "end_turn", "stop_sequence"]);
 const cacheMiss = (u) => u.cache_read === 0 && u.cache_write_5m + u.cache_write_1h > 0;
+
+function permissionChip(result) {
+  const p = result && result.permission;
+  return p ? h("span", { class: "chip v5", title: "Permission decision" }, p.reason ? `${p.decision} · ${p.reason}` : p.decision) : null;
+}
 
 function toolBlock(block, result) {
   const failed = !!(result && result.is_error);
   return lazyDetails(failed ? "blk failed" : "blk",
     [h("span", { class: "chip" }, block.name), failed ? h("span", { class: "badge" }, "error") : null,
-      result ? null : h("span", { class: "muted" }, "no result"), block.summary ? h("span", { class: "mono sum" }, block.summary) : null],
+      result ? null : h("span", { class: "muted" }, "no result"), permissionChip(result),
+      block.summary ? h("span", { class: "mono sum" }, block.summary) : null],
     () => [block.input.map((f) => labelled(f.name, f, highlighting() ? inputLanguage(hljs, block, f.name) : null)),
-      result ? labelled(failed ? "result (error)" : "result", result, languageOfResult(result, block)) : null],
+      result && result.patch ? labelled("patch", result.patch, "diff") : null,
+      result && !onlyImages(result) ? labelled(failed ? "result (error)" : "result", result, languageOfResult(result, block)) : null],
     block.summary || null);
 }
 
@@ -1016,18 +1073,50 @@ function messageBlocks(m, tools) {
   return m.blocks.map((b) => {
     if (b.type === "text") return m.role === "assistant" ? renderMarkdown(b.text, "md") : h("pre", { class: "prompt" }, b.text);
     if (b.type === "thinking") return lazyDetails("think", "Thinking", () => h("pre", {}, b.text));
-    if (b.type === "tool_use") return toolBlock(b, tools.results.get(b.id));
+    if (b.type === "image") return imageBlock(b);
+    if (b.type === "tool_use") return [toolBlock(b, tools.results.get(b.id)), resultImages(tools.results.get(b.id))];
     if (b.type === "tool_result" && !tools.calls.has(b.tool_use_id)) {
-      return lazyDetails(b.is_error ? "blk failed" : "blk", "Tool result", () => clippedPre(b, languageOfResult(b, null)));
+      return [lazyDetails(b.is_error ? "blk failed" : "blk", ["Tool result", permissionChip(b)],
+        () => [b.patch ? labelled("patch", b.patch, "diff") : null, onlyImages(b) ? null : clippedPre(b, languageOfResult(b, null))]),
+      resultImages(b)];
     }
     return null;
   });
+}
+
+const lineText = (text) => h("span", { class: "event-text" }, text);
+
+function eventBody(m) {
+  if (m.kind === "refusal") return [h("b", {}, "Refused"), m.category ? h("span", { class: "badge" }, m.category) : null, lineText(m.text)];
+  if (m.kind === "compaction") {
+    return [h("b", {}, "Compaction"), m.trigger ? h("span", { class: "chip" }, m.trigger) : null,
+      lineText(`${fmt(m.pre_tokens)} → ${fmt(m.post_tokens)} tokens · took ${fmtDuration(m.duration_ms)}`)];
+  }
+  if (m.kind === "turn") return [h("b", {}, "Turn"), lineText(`took ${fmtDuration(m.duration_ms)}`)];
+  if (m.kind === "command") return [h("b", {}, "Command"), h("span", { class: "mono event-text" }, m.text)];
+  if (m.kind === "recap") return [h("b", {}, "Recap"), lineText(m.text)];
+  if (m.kind === "info") return [h("b", {}, "Info"), lineText(m.text)];
+  if (m.kind === "hook") return [h("b", {}, m.name ? `Hook · ${m.name}` : "Hook"), lineText(m.text)];
+  return [lazyDetails("blk", [h("span", { class: "chip" }, m.kind === "system" ? `system · ${m.name}` : m.name)], () => clippedPre(m))];
+}
+
+function eventItem(m, time) {
+  const level = EVENT_LEVELS[m.kind] || 5;
+  return h("li", { class: `msg event${m.kind === "refusal" ? " failed" : ""}${level > 1 ? ` v${level}` : ""}` },
+    h("div", { class: "msg-head" }, time, eventBody(m)));
+}
+
+// Shown from level 3: time spent thinking and the effort the response ran with.
+function responseExtras(m) {
+  const parts = [m.thinking_ms ? `thinking ${fmtDuration(m.thinking_ms)}` : null, m.effort ? `effort ${m.effort}` : null].filter(Boolean);
+  return parts.length ? h("span", { class: "v3 extras" }, parts.join(" · ")) : null;
 }
 
 // showModel: the model name is written only when it differs from the previous response; the swatch is always there.
 function messageItem(m, tools, showModel) {
   const time = m.when ? h("time", { datetime: m.when.toISOString(), title: `${m.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(m.when))
     : h("span", { class: "notime" }, "—");
+  if (m.role === "event") return eventItem(m, time);
   const num = m.n ? h("span", { class: "n" }, `#${m.n}`) : null;
   if (m.role === "assistant") {
     const flow = m.blocks.some((b) => b.type === "text") ? "" : " flow";
@@ -1037,14 +1126,16 @@ function messageItem(m, tools, showModel) {
         m.stop_reason && !ROUTINE_STOPS.has(m.stop_reason) ? h("span", { class: "badge warn" }, m.stop_reason) : null,
         cacheMiss(m.usage) ? h("span", { class: "badge warn", title: "Nothing was read from cache: the whole context was written again" },
           "cache miss") : null,
-        usageStats(m)),
+        responseExtras(m), usageStats(m)),
       h("div", { class: "msg-body" }, messageBlocks(m, tools)));
     item.style.borderLeftColor = colorOf(m.model);
     return item;
   }
-  const collapsed = m.kind === "meta" || m.kind === "summary";
+  const collapsed = m.kind === "meta" || m.kind === "summary" || m.kind === "notification";
   return h("li", { class: (collapsed ? "msg aside" : "msg user") + (m.kind === "prompt" ? "" : " flow") },
-    h("div", { class: "msg-head" }, num, time, h("b", {}, KIND_LABELS[m.kind])),
+    h("div", { class: "msg-head" }, num, time, h("b", {}, KIND_LABELS[m.kind]),
+      m.queued ? h("span", { class: "badge warn", title: "Typed while the model was still working" }, "sent mid-turn") : null,
+      m.title ? h("span", { class: "event-text" }, m.title) : null),
     h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)));
 }
 
@@ -1068,7 +1159,8 @@ function messageItems(messages, tools) {
 
 const ellipsis = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
 const sourceOption = (s) => `${s.id === "main" ? "main" : `subagent ${s.id.slice(0, 8)}`} · ${ellipsis(String(s.task || ""), 60)}`;
-const visibleMessages = (messages) => messages.filter((m) => m.kind !== "tool_result");
+const numbered = (m) => m.kind !== "tool_result" && m.role !== "event";
+const visibleMessages = (messages) => messages.filter(numbered);
 
 // Markdown, code highlighting and fonts may still change heights in the first frames, so the target is applied again
 // until the page height settles.
@@ -1096,17 +1188,22 @@ function topMessage() {
 }
 
 // Keeps the message at the top of the screen in place; if it gets hidden, the next one shown takes its place.
-function setLight(light) {
-  messagesState.light = light;
+function setLevel(level) {
+  messagesState.level = level;
+  try {
+    localStorage.setItem(LEVEL_KEY, String(level));
+  } catch (e) { /* the level then lasts for this page only */ }
+  const name = $("level-name");
+  if (name) name.textContent = LEVELS[level];
   const anchor = topMessage(), list = document.querySelector(".msgs");
   if (!list) return;
-  list.classList.toggle("light", light);
+  list.className = `msgs lvl-${level}`;
   let el = anchor && anchor.el;
   while (el && !el.getClientRects().length) el = el.nextElementSibling;
   if (el) settleScroll(() => el.getBoundingClientRect().top + window.scrollY - anchor.offset);
 }
 
-// The first message shown at or after a log index, skipping those the light view hides.
+// The first message shown at or after a log index, skipping those the current level hides.
 function shownFrom(index) {
   for (const el of document.querySelectorAll(".msgs > li[data-i]")) {
     if (Number(el.dataset.i) >= index && el.getClientRects().length) return el;
@@ -1170,8 +1267,9 @@ VIEWS.messages = convView(messagesPath, {
   leave: () => { messagesState.anchor = topMessage(); },
   render(data) {
     let n = 0;
-    // Same numbering as the CLI: tool results are not counted, since they render under their call.
-    const messages = (data.messages || []).map((m, i) => ({ ...m, i, n: m.kind === "tool_result" ? null : ++n, when: parseStamp(m.timestamp) }));
+    // Same numbering as the CLI: tool results are not counted, since they render under their call, nor are events.
+    const messages = (data.messages || []).map((m, i) => ({ ...m, blocks: m.blocks || [], i,
+      n: numbered(m) ? ++n : null, when: parseStamp(m.timestamp) }));
     // A refresh draws a new list over the one on screen: remember which message the reader was at, and what is new.
     const key = `${data.source}|${messages.length}`, old = document.querySelector(".msgs");
     const [oldSource, oldCount] = old && messagesState.id === app.route.id ? old.dataset.key.split("|") : [];
@@ -1192,14 +1290,16 @@ VIEWS.messages = convView(messagesPath, {
       h("div", { class: "filters" }, h("label", { class: "field" }, "Source", source),
         h("button", { class: "btn", type: "button", onclick: () => window.scrollTo(0, 0) }, "↑ First"),
         h("button", { class: "btn", type: "button", onclick: scrollToEnd }, "↓ Last"),
-        h("label", { class: "switch", title: "Show only the user's prompts and the model's replies" },
-          h("input", { type: "checkbox", role: "switch", autocomplete: "off", checked: messagesState.light, onchange: (e) => setLight(e.target.checked) }),
-          "Prompts and replies only")),
+        h("label", { class: "field level", title: "How much of the log is shown; remembered for every conversation" }, "Detail",
+          h("input", { type: "range", min: 1, max: LEVELS.length - 1, step: 1, value: messagesState.level, autocomplete: "off",
+            "aria-valuetext": LEVELS[messagesState.level],
+            oninput: (e) => { setLevel(Number(e.target.value)); e.target.setAttribute("aria-valuetext", LEVELS[messagesState.level]); } }),
+          h("span", { class: "level-name", id: "level-name" }, LEVELS[messagesState.level]))),
       h("span", { class: "count" }, `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
         + money(cost, responses.some((m) => m.price_estimated))));
     const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
     if (!shown.length) return [meta, toolbar, emptyState("No messages", "This log has no user or assistant messages yet.")];
-    return [meta, toolbar, h("ol", { class: messagesState.light ? "msgs light" : "msgs", "data-key": key }, messageItems(shown, tools))];
+    return [meta, toolbar, h("ol", { class: `msgs lvl-${messagesState.level}`, "data-key": key }, messageItems(shown, tools))];
   },
   after: () => {
     const { anchor, restore, toBottom, keep, unread } = messagesState;
@@ -1236,7 +1336,9 @@ function partColors(rows) {
 
 // Detection runs in slices so that a long conversation does not freeze the page.
 async function fillBreakdown(box, id, cancelled) {
-  const messages = (await fetchConv(id, "/messages", false)).messages || [];
+  // Events are not messages sent to the model; mid-turn prompts and notices are, and count as prompts and injected context.
+  const messages = ((await fetchConv(id, "/messages", false)).messages || []).filter((m) => m.role !== "event")
+    .map((m) => (m.kind === "notification" ? { ...m, kind: "meta" } : m));
   const calls = toolCalls(messages);
   const languageOf = (b) => languageOfResult(b, calls.get(b.tool_use_id));
   let slice = performance.now();

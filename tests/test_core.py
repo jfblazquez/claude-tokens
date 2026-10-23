@@ -446,6 +446,77 @@ class MessagesTest(ContentTest):
         self.assertEqual([(r[0].strip(), r[2].strip()) for r in rows], [("1", "user"), ("2", "assistant"), ("3", "assistant")])
         self.assertIn("3 message(s), 2 response(s)", out.getvalue())
 
+    def test_images_patches_references_and_permissions(self):
+        png = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+        svg = {"type": "image", "source": {"type": "base64", "media_type": "image/svg+xml", "data": "PHN2Zz4="}}
+        result = dict(tool_result("t1", [png, {"type": "tool_reference", "tool_name": "mcp__jira__get"}]),
+                      permissionDecision={"decision": "accept", "reasonType": "classifier"},
+                      toolUseResult={"structuredPatch": [{"oldStart": 3, "oldLines": 1, "newStart": 3, "newLines": 2,
+                                                          "lines": [" a", "+b"]}]})
+        path = self.conversation("media", [
+            {"type": "user", "uuid": "u1", "message": {"role": "user", "content": [png, svg, text("Look")]}},
+            dict(assistant("m1", "claude-opus-5-5", None, "e1", [{"type": "thinking", "thinking": "Hm"}], usage(1, 1)),
+                 effort="high", thinkingDurationMs=300),
+            dict(assistant("m1", "claude-opus-5-5", None, "e2", [tool("t1", "Edit", file_path="/a")], usage(1, 1)),
+                 effort="high", thinkingDurationMs=200),
+            result,
+        ], {})
+        prompt, response, results = transcript(path, self.prices)
+        self.assertEqual(prompt["blocks"][:2], [
+            {"type": "image", "media_type": "image/png", "bytes": 8, "data": "iVBORw0KGgo="},
+            {"type": "image", "media_type": "image/svg+xml", "bytes": 5, "data": None}])
+        self.assertEqual((response["effort"], response["thinking_ms"]), ("high", 500))
+        block = results["blocks"][0]
+        self.assertEqual(block["text"], "[image]\nmcp__jira__get")
+        self.assertEqual(len(block["images"]), 1)
+        self.assertEqual(block["patch"]["text"], "@@ -3,1 +3,2 @@\n a\n+b")
+        self.assertEqual(block["permission"], {"decision": "accept", "reason": "classifier"})
+
+    def test_attachments_and_system_events(self):
+        def attachment(body, **extra):
+            return {"type": "attachment", "uuid": "a", "attachment": body, **extra}
+
+        def system(subtype, **fields):
+            return {"type": "system", "subtype": subtype, "uuid": "s", "cwd": "/x", **fields}
+
+        notice = "<task-notification>\n<status>completed</status>\n<summary>Build finished</summary>\n</task-notification>"
+        path = self.conversation("events", [
+            attachment({"type": "queued_command", "prompt": "Also check X", "origin": {"kind": "human"}}),
+            attachment({"type": "queued_command", "prompt": notice, "commandMode": "task-notification"}),
+            attachment({"type": "queued_command", "prompt": "Report", "isMeta": True,
+                        "origin": {"kind": "peer", "name": "Explore"}}),
+            attachment({"type": "hook_system_message", "content": "+10 XP", "hookEvent": "Stop"}),
+            attachment({"type": "total_tokens_reminder"}, rendered=[{"content": "<system-reminder>left</system-reminder>"}]),
+            system("compact_boundary", compactMetadata={"trigger": "auto", "preTokens": 900, "postTokens": 30,
+                                                        "durationMs": 5}),
+            system("turn_duration", durationMs=4500, messageCount=7),
+            system("model_refusal_no_fallback", originalModel="m", apiRefusalCategory="cyber",
+                   apiRefusalExplanation="Blocked"),
+            system("local_command", content="<command-name>/model</command-name>\n<command-args>opus</command-args>"),
+            system("local_command", content="<local-command-stdout>Set model</local-command-stdout>"),
+            system("away_summary", content="Recap text"),
+            system("stop_hook_summary", hookCount=1),
+            {"type": "cost-state", "totalCostUSD": 1.5, "totalLinesAdded": 3, "totalLinesRemoved": 1,
+             "totalAPIDuration": 10, "totalDuration": 20},
+        ], {})
+        messages = transcript(path, self.prices)
+        self.assertEqual([(m["role"], m["kind"]) for m in messages], [
+            ("user", "prompt"), ("user", "notification"), ("user", "notification"), ("event", "hook"),
+            ("event", "attachment"), ("event", "compaction"), ("event", "turn"), ("event", "refusal"),
+            ("event", "command"), ("event", "command"), ("event", "recap"), ("event", "system")])
+        self.assertTrue(messages[0]["queued"])
+        self.assertEqual([m["title"] for m in messages[1:3]], ["Build finished · completed", "Message from Explore"])
+        self.assertEqual((messages[4]["name"], messages[4]["text"]), ("total_tokens_reminder", "<system-reminder>left</system-reminder>"))
+        self.assertEqual((messages[5]["pre_tokens"], messages[5]["post_tokens"], messages[6]["duration_ms"]), (900, 30, 4500))
+        self.assertEqual([m["text"] for m in messages[8:10]], ["/model opus", "Set model"])
+        self.assertEqual((messages[11]["name"], messages[11]["text"]), ("stop_hook_summary", '{\n  "hookCount": 1\n}'))
+        self.assertEqual(parse_log(path, "main", "main", "")["claude_code"], {
+            "cost_usd": 1.5, "lines_added": 3, "lines_removed": 1, "api_duration_ms": 10, "duration_ms": 20})
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            messages_text(conversation_messages(path, "main", self.prices))
+        self.assertIn("3 message(s), 0 response(s)", out.getvalue())
+        self.assertIn("Message from Explore", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

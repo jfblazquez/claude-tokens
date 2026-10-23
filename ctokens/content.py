@@ -13,6 +13,13 @@ from .pricing import estimated_cost, rate_of, usage_key
 CLIP = 4000
 SUMMARY_KEYS = ("command", "file_path", "path", "pattern", "skill", "description", "prompt", "url", "query")
 BASH_SUMMARY = 100
+# Only raster types are inlined as data: URIs, and only up to this much base64.
+IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+MAX_IMAGE = 8 << 20
+# Fields every log event repeats; the generic view of an unknown system event leaves them out.
+EVENT_FIELDS = frozenset({"parentUuid", "logicalParentUuid", "isSidechain", "type", "subtype", "uuid", "timestamp",
+                          "userType", "entrypoint", "cwd", "sessionId", "session_id", "version", "gitBranch", "slug",
+                          "agentId", "isMeta", "level"})
 
 
 def last_response(path):
@@ -92,11 +99,28 @@ def clipped(value):
     return {"text": text[:CLIP], "size": len(text)}
 
 
+def result_part(block):
+    if block.get("type") == "text":
+        return block.get("text", "")
+    if block.get("type") == "tool_reference":
+        return str(block.get("tool_name") or "[tool_reference]")
+    return f"[{block.get('type')}]"
+
+
 def result_text(content):
     if isinstance(content, list):
-        return "\n".join(b.get("text", "") if b.get("type") == "text" else f"[{b.get('type')}]"
-                         for b in content if isinstance(b, dict))
+        return "\n".join(result_part(b) for b in content if isinstance(b, dict))
     return content if isinstance(content, str) else ""
+
+
+def image_block(block):
+    """Media type, decoded size and, for inlinable images, the base64 data of an image block."""
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    media, data = source.get("media_type"), source.get("data")
+    data = data if source.get("type") == "base64" and isinstance(data, str) else None
+    size = len(data) * 3 // 4 - data[-2:].count("=") if data else None
+    inline = data if media in IMAGE_TYPES and len(data or "") <= MAX_IMAGE else None
+    return {"type": "image", "media_type": media if isinstance(media, str) else None, "bytes": size, "data": inline}
 
 
 def first_text(value):
@@ -140,10 +164,40 @@ def message_blocks(content):
             blocks.append({"type": "tool_use", "id": block.get("id"), "name": str(block.get("name") or "unknown"),
                            "summary": tool_summary(block.get("name"), data),
                            "input": [{"name": str(name), **clipped(value)} for name, value in fields]})
+        elif kind == "image":
+            blocks.append(image_block(block))
         elif kind == "tool_result":
+            content = block.get("content")
+            images = [image_block(b) for b in content if isinstance(b, dict) and b.get("type") == "image"] \
+                if isinstance(content, list) else []
             blocks.append({"type": "tool_result", "tool_use_id": block.get("tool_use_id"),
-                           "is_error": bool(block.get("is_error")), **clipped(result_text(block.get("content")))})
+                           "is_error": bool(block.get("is_error")), **clipped(result_text(content)),
+                           **({"images": images} if images else {})})
     return blocks
+
+
+def patch_text(hunks):
+    """structuredPatch hunks of an Edit/Write result as a unified diff."""
+    parts = []
+    for hunk in hunks if isinstance(hunks, list) else []:
+        if not isinstance(hunk, dict):
+            continue
+        parts.append(f"@@ -{hunk.get('oldStart')},{hunk.get('oldLines')} +{hunk.get('newStart')},{hunk.get('newLines')} @@")
+        parts += [str(line) for line in hunk.get("lines") or []]
+    return "\n".join(parts)
+
+
+def add_result_details(blocks, event):
+    """The diff of an Edit/Write and the permission decision, both kept outside message.content."""
+    results = [b for b in blocks if b["type"] == "tool_result"]
+    detail = event.get("toolUseResult")
+    patch = patch_text(detail.get("structuredPatch")) if isinstance(detail, dict) else ""
+    if patch and len(results) == 1:
+        results[0]["patch"] = clipped(patch)
+    decision = event.get("permissionDecision")
+    if isinstance(decision, dict) and decision.get("decision"):
+        for block in results:
+            block["permission"] = {"decision": str(decision["decision"]), "reason": decision.get("reasonType")}
 
 
 def user_kind(event, blocks):
@@ -152,6 +206,82 @@ def user_kind(event, blocks):
     if event.get("isMeta"):
         return "meta"
     return "tool_result" if all(b["type"] == "tool_result" for b in blocks) else "prompt"
+
+
+def tag(text, name):
+    match = re.search(f"<{name}>(.*?)</{name}>", text, re.S)
+    return match.group(1).strip() if match else ""
+
+
+def notification_title(attachment, text):
+    origin = attachment.get("origin") if isinstance(attachment.get("origin"), dict) else {}
+    if attachment.get("commandMode") == "task-notification" or text.startswith("<task-notification>"):
+        summary, status = tag(text, "summary") or "Background task", tag(text, "status")
+        return summary if not status or status.lower() in summary.lower() else f"{summary} · {status}"
+    if origin.get("kind") == "peer":
+        return f"Message from {origin.get('name') or 'an agent'}"
+    return "Queued message"
+
+
+def queued_entry(attachment, timestamp):
+    """A prompt typed while the model was working (or a task/agent notice) is logged as a queued_command attachment."""
+    prompt = attachment.get("prompt")
+    blocks = message_blocks(prompt if isinstance(prompt, (str, list)) else "")
+    origin = attachment.get("origin") if isinstance(attachment.get("origin"), dict) else {}
+    if origin.get("kind") == "human" and not attachment.get("isMeta"):
+        return {"role": "user", "kind": "prompt", "queued": True, "timestamp": timestamp, "blocks": blocks}
+    text = prompt if isinstance(prompt, str) else ""
+    return {"role": "user", "kind": "notification", "title": notification_title(attachment, text),
+            "timestamp": timestamp, "blocks": blocks}
+
+
+def rendered_text(event):
+    rendered = event.get("rendered")
+    if isinstance(rendered, list):
+        return "\n".join(str(r.get("content") or "") for r in rendered if isinstance(r, dict))
+    return ""
+
+
+def attachment_entry(event, timestamp):
+    attachment = event.get("attachment")
+    if not isinstance(attachment, dict):
+        return None
+    name = str(attachment.get("type") or "attachment")
+    if name == "queued_command":
+        return queued_entry(attachment, timestamp)
+    if name == "hook_system_message":
+        return {"role": "event", "kind": "hook", "timestamp": timestamp, "name": str(attachment.get("hookEvent") or ""),
+                "text": str(attachment.get("content") or "")}
+    return {"role": "event", "kind": "attachment", "timestamp": timestamp, "name": name,
+            **clipped(rendered_text(event) or attachment)}
+
+
+def local_command(content):
+    name = tag(content, "command-name")
+    if name:
+        return " ".join(part for part in (name, tag(content, "command-args")) if part)
+    return tag(content, "local-command-stdout") or tag(content, "local-command-stderr") or content
+
+
+def system_entry(event, timestamp):
+    subtype, content = event.get("subtype"), str(event.get("content") or "")
+    entry = {"role": "event", "timestamp": timestamp}
+    if subtype == "compact_boundary":
+        meta = event.get("compactMetadata") if isinstance(event.get("compactMetadata"), dict) else {}
+        return {**entry, "kind": "compaction", "trigger": meta.get("trigger"), "pre_tokens": count(meta, "preTokens"),
+                "post_tokens": count(meta, "postTokens"), "duration_ms": count(meta, "durationMs")}
+    if subtype == "turn_duration":
+        return {**entry, "kind": "turn", "duration_ms": count(event, "durationMs"),
+                "message_count": count(event, "messageCount")}
+    if subtype == "model_refusal_no_fallback":
+        return {**entry, "kind": "refusal", "model": event.get("originalModel"),
+                "category": event.get("apiRefusalCategory"), "text": str(event.get("apiRefusalExplanation") or "")}
+    if subtype == "local_command":
+        return {**entry, "kind": "command", "text": local_command(content)}
+    if subtype in ("away_summary", "informational"):
+        return {**entry, "kind": "recap" if subtype == "away_summary" else "info", "text": content}
+    return {**entry, "kind": "system", "name": str(subtype or "system"),
+            **clipped({key: value for key, value in event.items() if key not in EVENT_FIELDS})}
 
 
 def count(mapping, key):
@@ -177,19 +307,27 @@ def response_entry(event, message, timestamp, prices):
                       "web_search_requests": count(server, "web_search_requests"),
                       "web_fetch_requests": count(server, "web_fetch_requests"),
                       "service_tier": usage.get("service_tier"), "speed": usage.get("speed")},
-            "estimated_cost_usd": estimated_cost(tokens, rate), "price_estimated": bool(rate and rate[2]), "blocks": []}
+            "estimated_cost_usd": estimated_cost(tokens, rate), "price_estimated": bool(rate and rate[2]),
+            "effort": event.get("effort") if isinstance(event.get("effort"), str) else None,
+            "thinking_ms": count(event, "thinkingDurationMs"), "blocks": []}
 
 
 def transcript(path, prices):
-    """User and assistant messages of one log in order; the events of one API response become one message."""
+    """Messages and events (role "event") of one log in order; the events of one API response become one message."""
     messages, responses = [], {}
     for event in lines(path):
         kind, message = event.get("type"), event.get("message")
+        timestamp = event.get("timestamp") if parse_timestamp(event.get("timestamp")) else None
+        if kind in ("attachment", "system"):
+            entry = attachment_entry(event, timestamp) if kind == "attachment" else system_entry(event, timestamp)
+            if entry and (entry["role"] == "event" or entry["blocks"]):
+                messages.append(entry)
+            continue
         if kind not in ("user", "assistant") or not isinstance(message, dict):
             continue
-        timestamp = event.get("timestamp") if parse_timestamp(event.get("timestamp")) else None
         blocks = message_blocks(message.get("content"))
         if kind == "user":
+            add_result_details(blocks, event)
             if blocks:
                 messages.append({"role": "user", "kind": user_kind(event, blocks), "timestamp": timestamp, "blocks": blocks})
             continue
@@ -202,6 +340,8 @@ def transcript(path, prices):
             # Usage is taken from the last event of a response, as parse_log does.
             latest = response_entry(event, message, timestamp, prices)
             entry.update({key: latest[key] for key in ("usage", "estimated_cost_usd", "price_estimated", "stop_reason")})
+            if latest["thinking_ms"] is not None:
+                entry["thinking_ms"] = (entry["thinking_ms"] or 0) + latest["thinking_ms"]
         entry["blocks"] += [block for block in blocks if block not in entry["blocks"]]
     return messages
 
