@@ -144,7 +144,8 @@ const callChars = (b) => (b.input || []).reduce((sum, f) => sum + blockChars(f),
 
 // keyOf(message, block) names the category of a user-side block, e.g. "prompt" or "result:cpp".
 function userItems(m, keyOf) {
-  return (m.blocks || []).map((b) => ({ key: keyOf(m, b), chars: blockChars(b), media: MEDIA_RE.test(String(b.text || "")) }));
+  return (m.blocks || []).map((b) => ({ key: keyOf(m, b), chars: blockChars(b),
+    media: b.type === "image" || MEDIA_RE.test(String(b.text || "")) }));
 }
 
 function outputItems(m) {

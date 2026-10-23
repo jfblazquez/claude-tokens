@@ -281,9 +281,25 @@ keeps the message you were reading when you switch to another tab and back. A
 round **↑** button at the bottom right of every page goes back to the top.
 
 In the **Conversation** tab a collapsed Bash call shows its description, or the
-first 100 characters of the command when it has none. **Prompts and replies
-only** hides thinking, tool calls, tool results and injected messages, to follow
-the conversation lightly; the full flow is shown by default. A refresh (or auto
+first 100 characters of the command when it has none. The **Detail** slider
+chooses how much of the log is shown, each level adding to the one before; the
+browser remembers it for every conversation, and level 2 is the default:
+
+1. Prompts (also those typed while the model was working, marked *sent
+   mid-turn*), pasted images, the model's replies, API errors and refusals.
+2. Thinking, tool calls and results (the diff of an Edit or Write, and the tools
+   a ToolSearch loaded), the images tools return (shown under the call, without
+   opening it), injected context, compaction summaries and notifications from
+   background tasks and agents.
+3. Compactions with the tokens before and after, how long each turn took, and
+   the thinking time and effort of each response.
+4. Slash commands, recaps written while you were away, hook messages and
+   informational notices.
+5. Everything else Claude Code logs in the conversation: every attachment
+   (reminders, skill listings, file snapshots...), the remaining system events
+   and the permission decision of each tool call.
+
+A refresh (or auto
 refresh) keeps the message you are reading in place; when new messages arrive,
 a **Read new messages** button near the bottom of the screen takes you to the
 first one, and goes away once you scroll to them. Opened tool calls are
@@ -305,6 +321,10 @@ arrived since, so only the split of that growth among its blocks is estimated
 (by characters, up to 1.5 tokens per character; the rest is tools loaded on
 demand, attachments such as nested CLAUDE.md files, or pasted images). The
 system prompt and tools are the first context minus its messages.
+
+When the log has one, the report also shows **Claude Code's estimate**: the
+running total cost (plus lines added and removed, and API time) that Claude Code
+itself writes to the session, next to the estimate computed here.
 
 Double-click a conversation id, project path, projects folder, file path, tool
 name or a code block in the last response to copy it to the clipboard. Bash

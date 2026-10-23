@@ -74,11 +74,22 @@ def response_identity(event, message):
     return identity if isinstance(identity, str) else object()
 
 
+def claude_code_cost(event):
+    """Claude Code's own running totals for the session, from a cost-state record."""
+    def number(key):
+        return event.get(key) if isinstance(event.get(key), (int, float)) else None
+    return {"cost_usd": number("totalCostUSD"), "lines_added": number("totalLinesAdded"),
+            "lines_removed": number("totalLinesRemoved"), "api_duration_ms": number("totalAPIDuration"),
+            "duration_ms": number("totalDuration")}
+
+
 def parse_log(path, kind, identifier, task):
     models = defaultdict(zero)
     responses, records, duplicates, last_context, raw_outputs = {}, 0, 0, {}, defaultdict(int)
-    max_context = defaultdict(int)
+    max_context, claude_code = defaultdict(int), None
     for event in lines(path):
+        if event.get("type") == "cost-state":
+            claude_code = claude_code_cost(event)
         message = event.get("message")
         usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict):
@@ -109,7 +120,8 @@ def parse_log(path, kind, identifier, task):
         snapshot["observed_max_context_tokens"] = max_context[model]
     return {"id": identifier, "kind": kind, "task": task, "source": str(path),
             "records": records, "skipped_duplicates": duplicates, "models": dict(models),
-            "context_snapshot": list(last_context.values()), "raw_output_tokens": dict(raw_outputs)}
+            "context_snapshot": list(last_context.values()), "raw_output_tokens": dict(raw_outputs),
+            "claude_code": claude_code}
 
 
 def subagent_logs(main):

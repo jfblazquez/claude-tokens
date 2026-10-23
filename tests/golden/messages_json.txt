@@ -49,6 +49,8 @@
       },
       "estimated_cost_usd": 0.05048,
       "price_estimated": false,
+      "effort": null,
+      "thinking_ms": null,
       "blocks": [
         {
           "type": "text",
@@ -95,6 +97,8 @@
       },
       "estimated_cost_usd": 0.04246,
       "price_estimated": false,
+      "effort": null,
+      "thinking_ms": null,
       "blocks": [
         {
           "type": "tool_use",
@@ -155,6 +159,8 @@
       },
       "estimated_cost_usd": 0.054236,
       "price_estimated": false,
+      "effort": null,
+      "thinking_ms": null,
       "blocks": [
         {
           "type": "tool_use",

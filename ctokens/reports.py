@@ -67,6 +67,7 @@ def report(conversations, prices, cold_summary_output, context_window=None):
     return {"conversations": conversations, "by_model": by_model, "main_context_snapshot": main["context_snapshot"],
             "cold_summary_estimate": cold_summaries,
             "estimated_total_cost_usd": sum(x["estimated_cost_usd"] or 0 for x in by_model),
+            "claude_code": main.get("claude_code"),
             "unknown_price_models": sorted(unknown),
             "guessed_price_models": sorted(guessed)}
 
