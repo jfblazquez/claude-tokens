@@ -262,13 +262,18 @@ assistant text contain a word or phrase, ignoring case and line breaks; thinking
 tool calls, tool results and subagents are not searched. The first search after
 start-up reads every log; later ones only re-read the logs that changed.
 
-The list shows 50 conversations per page, grouped by when they were last
-modified (today, yesterday, this week, last week, earlier this month, then by
-month; UTC days, weeks start on Monday) while it is sorted by date. Filter and
-search cover every conversation, not just the current page. Coming back from a
-conversation shows the list at once, on the same page and scroll position, and
-reloads it behind. The project column shows the last two folders of the path;
-hover it for the full path.
+The list shows one card per conversation, 50 per page, most recent first and
+grouped by when they were last modified (today, yesterday, this week, last week,
+earlier this month, then by month; UTC days, weeks start on Monday). Each card
+has the title, the time, the newest recap Claude Code wrote while you were away
+(cut to two lines; hover it for all of it), the project's last folder (hover it
+for the full path), the size and the subagents. Filter and search cover every
+conversation, not just the current page. Coming back from a conversation shows
+the list at once, on the same page and scroll position, and reloads it behind.
+
+Recaps load after the list, the current page first. The server keeps each one
+until its log changes, and the browser stores them, so a reload only asks for
+the conversations modified since. A conversation without recaps shows none.
 
 Opening a conversation loads the other tabs (usage, conversation, last
 response, Bash commands, files) in the background, so switching tabs is
@@ -337,7 +342,7 @@ The screenshots show invented demo data, not real conversations.
 
 | Conversations | Usage report |
 |---|---|
-| ![Conversation list with title, project, size and subagents](docs/images/conversations.png) | ![Usage of one conversation per scope and per model](docs/images/usage.png) |
+| ![Conversation list with title, recap, project, size and subagents](docs/images/conversations.png) | ![Usage of one conversation per scope and per model](docs/images/usage.png) |
 | **Last response** | **Bash commands** |
 | ![Last response rendered as Markdown](docs/images/last-response.png) | ![Bash commands of the main conversation and its subagents, with source and text filters](docs/images/bash.png) |
 | **Files** | |
@@ -365,7 +370,8 @@ The browser libraries (Chart.js, marked, DOMPurify, highlight.js) are bundled in
 `ctokens/web/static/vendor/`, so the UI works offline and loads nothing from
 other sites. `tools/vendor.py` refreshes them.
 
-The JSON API behind the UI returns the same objects as the CLI's `--json`:
+The JSON API behind the UI returns the same objects as the CLI's `--json`, except
+the recaps, which only the UI uses:
 
 | Route | Same as |
 |---|---|
@@ -376,6 +382,7 @@ The JSON API behind the UI returns the same objects as the CLI's `--json`:
 | `GET /api/conversations/<id>/files` | `<id> --files --json` |
 | `GET /api/conversations/<id>/messages?source=` | `<id> --messages --source <source> --json` |
 | `GET /api/totals?project=` | `--totals --json` |
+| `GET /api/recaps?ids=<id>,<id>` | the newest recap of each id (up to 100), as `{"recaps": {"<id>": {"text", "timestamp"} or null}}` |
 
 ## Development
 

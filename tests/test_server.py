@@ -13,9 +13,9 @@ from pathlib import Path
 from unittest import mock
 
 from characterization import DATA, ENV, SCRIPT
-from fixtures import AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE, build_projects, user
+from fixtures import API, AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE, build_projects, user
 
-from ctokens.catalog import conversation_rows
+from ctokens.catalog import conversation_rows, last_recap
 from ctokens.logs import file_stats, parse_log
 from ctokens.pricing import load_prices
 from ctokens.reports import scan_totals, totals_report
@@ -354,6 +354,40 @@ class ApiErrorsTest(ServerTestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
 
 
+class RecapsApiTest(ServerTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        main = cls.projects / API / f"{CONV_A}.jsonl"
+        with main.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "system", "subtype": "away_summary", "timestamp": "2026-09-21T15:00:00.000Z",
+                                "content": "Cache invalidation is done. (disable recaps in /config)"}) + "\n")
+
+    def test_recaps_by_id(self):
+        status, data = self.get_json(f"/api/recaps?ids={CONV_A},{CONV_B},{AMBIGUOUS},99999999-9999-4999-8999-999999999999")
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {"recaps": {
+            CONV_A: {"text": "Cache invalidation is done.", "timestamp": "2026-09-21T15:00:00.000Z"},
+            CONV_B: None, AMBIGUOUS: None, "99999999-9999-4999-8999-999999999999": None}})
+        self.assertEqual(self.get_json("/api/recaps"), (200, {"recaps": {}}))
+        self.assertEqual(self.get_json("/api/recaps?ids=,,"), (200, {"recaps": {}}))
+
+    def test_bad_ids_are_null_and_touch_no_file(self):
+        # A query string is percent-decoded, so "%31..." is CONV_A there.
+        bad = [i for i in BAD_IDS[:-1] if not i.startswith("%31")]
+        with mock.patch.object(Path, "glob", side_effect=AssertionError("glob")) as glob:
+            status, data = self.get_json("/api/recaps?ids=" + ",".join(bad))
+        glob.assert_not_called()
+        self.assertEqual(status, 200)
+        self.assertEqual(set(data["recaps"].values()), {None})
+
+    def test_too_many_ids(self):
+        ids = ",".join([CONV_A] * 100)
+        self.assertEqual(self.get_json(f"/api/recaps?ids={ids}")[0], 200)
+        self.assertEqual(self.get_json(f"/api/recaps?ids={ids},{CONV_B}"),
+                         (400, {"error": "at most 100 ids per request"}))
+
+
 class EmptyFolderTest(unittest.TestCase):
     def test_empty_and_missing_folders(self):
         with tempfile.TemporaryDirectory() as base, mock.patch.object(Handler, "log_message", lambda *a: None):
@@ -568,6 +602,18 @@ class CacheWiringTest(unittest.TestCase):
         rows = self.get("/api/conversations?q=cache")["conversations"]
         self.assertIn(CONV_B, [row["id"] for row in rows])
         self.assertEqual(rows, conversation_rows(self.projects, search="cache"))
+
+    def test_recaps_use_cache(self):
+        main = self.projects / "-home-dev-projects-api-gateway" / f"{CONV_A}.jsonl"
+        with mock.patch("ctokens.web.server.last_recap", wraps=last_recap) as recap:
+            self.assertEqual(self.get(f"/api/recaps?ids={CONV_A}"), {"recaps": {CONV_A: None}})
+            self.assertEqual(self.get(f"/api/recaps?ids={CONV_A}"), {"recaps": {CONV_A: None}})
+            self.assertEqual(recap.call_count, 1)
+            self.touch(main, json.dumps({"type": "system", "subtype": "away_summary", "content": "Later.",
+                                         "timestamp": "2026-10-01T08:00:00.000Z"}))
+            self.assertEqual(self.get(f"/api/recaps?ids={CONV_A}"),
+                             {"recaps": {CONV_A: {"text": "Later.", "timestamp": "2026-10-01T08:00:00.000Z"}}})
+            self.assertEqual(recap.call_count, 2)
 
     def test_concurrent_totals(self):
         expected = self.cli("--totals", "--json")

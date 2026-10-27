@@ -47,6 +47,38 @@ def session_title(path, tail=131072):
     return title
 
 
+RECAP_HINT = re.compile(r"\s*\(disable recaps in /config\)\s*$")
+
+
+def last_recap(path, block=1 << 16):
+    """Newest recap (away_summary) as {"text", "timestamp"}, or None; reads backwards since it is usually near the end."""
+    try:
+        with path.open("rb") as f:
+            end = f.seek(0, 2)
+            rest = b""
+            while end > 0:
+                start = max(0, end - block)
+                f.seek(start)
+                chunk = (f.read(end - start) + rest).split(b"\n")
+                # The first piece may be the tail of a line that starts in the previous block.
+                rest = chunk.pop(0) if start > 0 else b""
+                for line in reversed(chunk):
+                    if b'"away_summary"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "away_summary":
+                        text = RECAP_HINT.sub("", str(event.get("content") or "")).strip()
+                        if text:
+                            return {"text": text, "timestamp": event.get("timestamp")}
+                end = start
+    except OSError:
+        pass
+    return None
+
+
 def conversation_text(path):
     """User prompts and assistant text of a log, whitespace-collapsed and casefolded for phrase search."""
     parts = []

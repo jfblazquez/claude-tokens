@@ -57,6 +57,25 @@ BASH = [
     ("terraform plan -out plan.bin", "Plan infrastructure changes"),
     ("ls -la src", "List source files"),
 ]
+# Recaps for some titles, so the list shows cards with and without one.
+RECAPS = {
+    FEATURED_TITLE: "Rate limiting is in place for `/v1/*` with a Redis token bucket and the tests pass. Next: decide "
+                    "whether to expose the remaining quota in `X-RateLimit-Remaining`.",
+    "Fix flaky router tests": "The flaky test came from a shared event loop; each test now gets its own and the suite "
+                              "passed 50 runs in a row. Next: open the PR.",
+    "Migrate auth middleware to async": "The auth middleware is async and the old sync path is gone. Two integration "
+                                        "tests still time out on CI; next is raising their timeout or mocking the IdP.",
+    "Retry policy for ledger exports": "Exports now retry three times with exponential backoff. Waiting for you to "
+                                       "confirm whether failed exports should page on-call.",
+    "Investigate rounding in VAT totals": "VAT totals were rounded per line instead of per invoice. The fix is ready; "
+                                          "next, check last month's invoices for affected customers.",
+    "Dark mode for the usage page": "Dark mode works on the usage page; the chart colours still need a darker grid. "
+                                    "Next: pick the grid colour with you.",
+    "Backfill September rollups": "September rollups are backfilled up to the 21st; the job stopped on a schema "
+                                  "change. Next: rerun from the 22nd after the migration.",
+    "Terraform plan for the new database": "The plan creates the database, its subnet group and two parameter groups. "
+                                           "Next: review the plan with you before `terraform apply`.",
+}
 SKILLS = ["code-review", "simplify", "security-review", "tdd", "explain-code", "diagnosing-bugs"]
 SUBAGENT_TASKS = ["Explore call sites of the limiter", "Review the rate limit tests", "Security review of the change",
                   "Check the docs for outdated examples", "Benchmark the middleware", "Find similar bugs elsewhere"]
@@ -161,6 +180,9 @@ def conversation(rnd, root, project, title, day, model, steps, skill, tasks, las
         write(sub_dir / f"agent-{sub_id}.jsonl", sub.events, sub.t)
         (sub_dir / f"agent-{sub_id}.meta.json").write_text(json.dumps({"description": task}), encoding="utf-8")
     work(rnd, log, project.files, steps[1])
+    if title in RECAPS:
+        log.events.append({"type": "system", "subtype": "away_summary", "timestamp": stamp(log.t),
+                           "content": f"{RECAPS[title]} (disable recaps in /config)"})
     log.respond([{"type": "text", "text": last}])
     write(folder / f"{conv_id}.jsonl", log.events, log.t)
     return conv_id
