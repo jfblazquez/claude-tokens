@@ -127,6 +127,10 @@ class RepoTest(unittest.TestCase):
                           {"added": None, "deleted": None, "path": "logo.bin"}])
 
 
+def output(events, token):
+    return b"".join(base64.b64decode(d["data"]) for e, d in events if e == "data" and d["id"] == token)
+
+
 def read_until(shell, needle, timeout=10):
     offset, seen, deadline = 0, b"", time.monotonic() + timeout
     while needle not in seen and time.monotonic() < deadline:
@@ -218,10 +222,10 @@ class RepoApiTest(unittest.TestCase):
         cls.env.stop()
         cls.quiet.stop()
 
-    def request(self, method, path, body=None, key=KEY):
+    def request(self, method, path, body=None, key=KEY, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
-            headers = {"Host": f"127.0.0.1:{self.port}", **({"X-Send-Key": key} if key else {})}
+            headers = {"Host": f"127.0.0.1:{self.port}", **({"X-Send-Key": key} if key else {}), **(headers or {})}
             if body is not None:
                 headers["Content-Type"] = "application/json"
                 body = json.dumps(body).encode()
@@ -269,16 +273,41 @@ class RepoApiTest(unittest.TestCase):
         self.assertEqual(data["shell"]["cwd"], str(self.repo))
         self.assertEqual(self.request("POST", f"/api/shells/{token}/resize", {"cols": 91, "rows": 21})[0], 200)
         self.assertEqual(self.request("POST", f"/api/shells/{token}/input", {"data": "stty size; exit 0\n"})[0], 200)
-        status, body = self.request("GET", f"/api/shells/{token}/output")
-        self.assertEqual(status, 200)
-        text = body.decode()
-        chunks = [json.loads(line[6:])["data"] for line in text.splitlines() if line.startswith("data: {\"data\"")]
-        self.assertIn(b"21 91", b"".join(base64.b64decode(c) for c in chunks))
-        self.assertIn("event: exit", text)
+        events = self.stream(f"{token}:0")
+        self.assertIn(b"21 91", output(events, token))
+        self.assertIn(("exit", {"id": token, "code": 0}), events)
+        self.assertEqual(events[-1][0], "end")
         self.assertEqual(self.request("POST", f"/api/shells/{token}/input", {"data": "x"})[0], 409)
         self.assertEqual(self.request("POST", f"/api/shells/{token}/close", {})[0], 200)
         self.assertEqual(self.request("POST", f"/api/shells/{token}/close", {})[0], 404)
-        self.assertEqual(self.request("GET", f"/api/shells/{token}/output")[0], 404)
+        self.assertEqual(self.stream(f"{token}:0"), [("exit", {"id": token, "code": None}), ("end", {})])
+
+    def stream(self, start, last=None):
+        status, body = self.request("GET", f"/api/shells/stream?from={start}",
+                                    headers={"Last-Event-ID": last} if last else None)
+        self.assertEqual(status, 200)
+        return [(block.split("event: ")[1].split("\n")[0], json.loads(block.split("data: ")[1]))
+                for block in body.decode().split("\n\n") if "event: " in block]
+
+    def test_one_stream_for_several_shells(self):
+        tokens = [self.request("POST", f"/api/conversations/{CONV}/shell", {})[1]["shell"]["id"] for _ in range(2)]
+        for n, token in enumerate(tokens):
+            self.request("POST", f"/api/shells/{token}/input", {"data": f"echo shell-{n}-says-hi; exit {n + 4}\n"})
+        events = self.stream(",".join(f"{t}:0" for t in tokens))
+        for n, token in enumerate(tokens):
+            self.assertIn(f"shell-{n}-says-hi".encode(), output(events, token))
+            self.assertIn(("exit", {"id": token, "code": n + 4}), events)
+        # A reconnect sends the offsets reached in Last-Event-ID, so nothing is written twice.
+        reached = ",".join(f"{t}:{max(d['at'] for e, d in events if e == 'data' and d['id'] == t)}" for t in tokens)
+        again = self.stream(",".join(f"{t}:0" for t in tokens), last=reached)
+        self.assertEqual(output(again, tokens[0]) + output(again, tokens[1]), b"")
+        for token in tokens:
+            self.request("POST", f"/api/shells/{token}/close", {})
+
+    def test_stream_needs_shells(self):
+        for start in ("", "bad/token:0", ",".join(f"t{n}:0" for n in range(9))):
+            with self.subTest(start=start):
+                self.assertEqual(self.request("GET", f"/api/shells/stream?from={start}")[0], 400)
 
     def test_shell_actions_need_the_key_and_post(self):
         status, data = self.request("POST", f"/api/conversations/{CONV}/shell", {})

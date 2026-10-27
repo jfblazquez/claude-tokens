@@ -392,6 +392,38 @@ function commitView(conv, item, data) {
 
 // ---------- shells ----------
 let shellCount = 0;
+// One event stream carries every shell of the page: the browser opens at most six connections to a host, shared by
+// all its tabs, and each stream holds one. id -> { offset, write(bytes), exit(code) }.
+const shellStream = { es: null, shells: new Map() };
+
+function streamShells() {
+  if (shellStream.es) shellStream.es.close();
+  shellStream.es = null;
+  const shells = [...shellStream.shells];
+  if (!shells.length || document.hidden) return;
+  const es = new EventSource(`/api/shells/stream?from=${shells.map(([id, sh]) => `${id}:${sh.offset}`).join(",")}`);
+  shellStream.es = es;
+  const shellOf = (e) => {
+    const data = JSON.parse(e.data);
+    return [shellStream.shells.get(data.id), data];
+  };
+  es.addEventListener("data", (e) => {
+    const [sh, data] = shellOf(e);
+    if (!sh) return;
+    sh.offset = data.at;
+    sh.write(Uint8Array.from(atob(data.data), (c) => c.charCodeAt(0)));
+  });
+  es.addEventListener("exit", (e) => {
+    const [sh, data] = shellOf(e);
+    if (!sh) return;
+    shellStream.shells.delete(data.id);
+    sh.exit(data.code);
+  });
+  es.addEventListener("end", () => {
+    es.close();
+    if (shellStream.es === es) shellStream.es = null;
+  });
+}
 
 function measureCell(term, el) {
   const dims = term._core && term._core._renderService && term._core._renderService.dimensions;
@@ -418,7 +450,7 @@ function openShell(conv, cwd) {
     item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen);
     const term = new Terminal({ fontFamily: cssVar("--mono") || "monospace", fontSize: 13, cursorBlink: true, scrollback: 5000,
       theme: terminalTheme(), allowProposedApi: false });
-    const sh = { id: null, queue: "", sending: false, es: null, cols: 80, rows: 24, ended: false };
+    const sh = { id: null, queue: "", sending: false, cols: 80, rows: 24, ended: false };
     let opened = false;
     const fit = () => {
       if (!screen.isConnected || !screen.clientWidth || !screen.clientHeight) return;
@@ -455,7 +487,7 @@ function openShell(conv, cwd) {
       if (item === dock.active || dock.mode === "float") term.focus();
     };
     item.onClose = () => {
-      if (sh.es) sh.es.close();
+      if (sh.id && shellStream.shells.delete(sh.id)) streamShells();
       if (sh.id && !sh.ended) postJson(`/api/shells/${sh.id}/close`, {}).catch(() => {});
       term.dispose();
     };
@@ -470,21 +502,12 @@ function openShell(conv, cwd) {
         return;
       }
       status.textContent = "Running";
-      sh.es = new EventSource(`/api/shells/${sh.id}/output`);
-      sh.es.addEventListener("data", (e) => {
-        const bytes = Uint8Array.from(atob(JSON.parse(e.data).data), (c) => c.charCodeAt(0));
-        term.write(bytes);
-      });
-      sh.es.addEventListener("exit", (e) => {
+      shellStream.shells.set(sh.id, { offset: 0, write: (bytes) => term.write(bytes), exit: (code) => {
         sh.ended = true;
-        sh.es.close();
-        const { code } = JSON.parse(e.data);
-        status.textContent = `Ended (exit code ${code})`;
-        term.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
-      });
-      sh.es.onerror = () => {
-        if (sh.es.readyState === EventSource.CLOSED && !sh.ended) status.textContent = "Disconnected";
-      };
+        status.textContent = code == null ? "Ended" : `Ended (exit code ${code})`;
+        term.write(`\r\n\x1b[2m[${code == null ? "the shell is gone" : `process exited with code ${code}`}]\x1b[0m\r\n`);
+      } });
+      streamShells();
       pump();
       item.onShow();
     });
@@ -673,6 +696,8 @@ function startPanels() {
     };
   }
   document.addEventListener("keydown", escapeClosesPanel);
+  // A hidden tab gives its connection back; the shells pick up from the byte they had reached.
+  document.addEventListener("visibilitychange", streamShells);
   window.addEventListener("resize", () => { if (dock.items.length) drawDock(); });
   const main = $("main");
   linker.observer = new MutationObserver((records) => {

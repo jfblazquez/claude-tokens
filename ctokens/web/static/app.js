@@ -2061,7 +2061,7 @@ function watchConversation() {
   if (stream.id === id && stream.source === source && (stream.es || !id)) return;
   if (stream.es) stream.es.close();
   Object.assign(stream, { id, source, es: null, opened: false, activity: null });
-  if (!id || typeof EventSource === "undefined") return;
+  if (!id || typeof EventSource === "undefined" || document.hidden) return;
   const es = new EventSource(withSource(`/api/conversations/${encodeURIComponent(id)}/events`, source));
   stream.es = es;
   const mine = () => stream.es === es;
@@ -2077,6 +2077,21 @@ function watchConversation() {
     stream.activity = JSON.parse(e.data).text;
     drawComposer();
   });
+}
+
+// A browser opens at most six connections to a host, shared by all its tabs, and each stream holds one; a hidden tab
+// gives its stream back and catches up when shown again.
+function streamWhileVisible() {
+  if (document.hidden) {
+    if (stream.es) stream.es.close();
+    stream.es = null;
+    return;
+  }
+  watchConversation();
+  if (stream.id) {
+    logGrew();
+    fetchLive(stream.id);
+  }
 }
 
 function liveChanged(id, data) {
@@ -2670,6 +2685,7 @@ function boot() {
   auto.addEventListener("change", () => setAutoRefresh(auto.checked));
   $("refresh").addEventListener("click", () => load({ refresh: true }));
   window.addEventListener("hashchange", navigate);
+  document.addEventListener("visibilitychange", streamWhileVisible);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     renderedBodies = new WeakMap();
     if (app.route) show({ keepScroll: true });

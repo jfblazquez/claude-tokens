@@ -41,7 +41,7 @@ def take_terminal():
 
 
 class Shell:
-    def __init__(self, token, conversation_id, cwd, cols, rows):
+    def __init__(self, token, conversation_id, cwd, cols, rows, cond):
         self.token, self.conversation_id, self.cwd = token, conversation_id, cwd
         self.started = time.time()
         master, slave = pty.openpty()
@@ -56,7 +56,8 @@ class Shell:
         finally:
             os.close(slave)
         self.fd = master
-        self.cond = threading.Condition()
+        # Shared by every shell, so one stream can wait for output from any of them.
+        self.cond = cond
         self.buffer = bytearray()
         self.base = 0
         self.code = None
@@ -154,6 +155,7 @@ class Shell:
 class Shells:
     def __init__(self):
         self.lock = threading.Lock()
+        self.cond = threading.Condition()
         self.shells = {}
 
     def open(self, conversation_id, cwd, cols=None, rows=None):
@@ -164,8 +166,28 @@ class Shells:
             if len(self.shells) >= MAX_SHELLS:
                 raise ShellError(f"There are already {MAX_SHELLS} shells open; close one first.")
             token = secrets.token_urlsafe(24)
-            shell = self.shells[token] = Shell(token, conversation_id, str(cwd), clamp(cols, 80), clamp(rows, 24))
+            shell = self.shells[token] = Shell(token, conversation_id, str(cwd), clamp(cols, 80), clamp(rows, 24), self.cond)
         return shell
+
+    def read(self, offsets, timeout):
+        """[(token, offset after the data, data, exited, exit code)] for the shells of {token: offset} with news; waits
+        up to timeout for some. A token no shell has any more comes back as exited, with no code."""
+        shells = {token: self.get(token) for token in offsets}
+
+        def news(token, shell):
+            return shell is None or shell.exited or shell.end > offsets[token]
+
+        with self.cond:
+            if not any(news(t, s) for t, s in shells.items()):
+                self.cond.wait(timeout)
+            changes = []
+            for token, shell in shells.items():
+                if shell is None:
+                    changes.append((token, offsets[token], b"", True, None))
+                elif news(token, shell):
+                    start = max(offsets[token], shell.base)
+                    changes.append((token, shell.end, bytes(shell.buffer[start - shell.base:]), shell.exited, shell.code))
+            return changes
 
     def get(self, token):
         with self.lock:

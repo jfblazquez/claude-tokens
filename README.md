@@ -464,7 +464,9 @@ ignore); `./x` and `../x` only from the folder. Anything else stays plain text.
   one in the file's folder. It is a real terminal: `less`, `vim`, `top`, Ctrl+C
   and job control work, and it follows the panel's size. Closing its tab hangs
   it up; a shell nobody shows for two minutes (the page was closed) is ended, and
-  at most 8 run at once.
+  at most 8 run at once. All the shells of a page share one connection, and a
+  hidden tab closes its streams and catches up when shown again, since a browser
+  opens at most six connections to a host, shared by all its tabs.
 
 They open in a **side panel**, one tab each, that you can widen by dragging its
 edge. Its menu switches every panel to a bottom panel, floating windows (dragged
@@ -560,7 +562,7 @@ counterpart:
 | `GET /api/conversations/<id>/commit?sha=` | with `X-Send-Key`: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
 | `GET /api/conversations/<id>/file?path=` | with `X-Send-Key`: `{path, display, root, size, binary, truncated, text}`, the first 2 MB; `path` absolute or from the folder |
 | `POST /api/conversations/<id>/shell` | body `{"cols", "rows", "cwd"?}` with `X-Send-Key`; `{"shell": {"id", "cwd", "pid", ...}}`, or 409 |
-| `GET /api/shells/<shell id>/output?from=` | server-sent events: `data` (`{"data": base64}`, its `id` the byte offset, so a reconnect resumes) and a last `exit` (`{"code"}`); the last 1 MB is kept |
+| `GET /api/shells/stream?from=<shell id>:<offset>,...` | server-sent events with the output of up to 8 shells on one connection: `data` (`{"id", "at", "data": base64}`, `at` the byte offset reached), `exit` (`{"id", "code"}`, null when the shell is gone) and `end` once none is left; each event's `id` lists the offsets, so a reconnect resumes; the last 1 MB of each shell is kept |
 | `POST /api/shells/<shell id>/input` \| `resize` \| `close` | bodies `{"data": "..."}`, `{"cols", "rows"}` and `{}`, with `X-Send-Key` |
 
 ## Development

@@ -27,7 +27,7 @@ from ..repo import FileIndex, RepoError, find_commits, find_files, read_file, re
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache, TranscriptCache
 from .favorites import Favorites, favorites_path
-from .shells import ShellError, Shells, clamp
+from .shells import MAX_SHELLS, ShellError, Shells, clamp
 
 HOST = "127.0.0.1"
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -53,7 +53,7 @@ ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
 REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
 SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close)")
-SHELL_OUTPUT_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/output")
+SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SHELL_REAP_EVERY = 30.0
 # The events stream checks the log, the session and its status line this often; a new log line shows within a tick.
 EVENT_TICK = 0.25
@@ -110,9 +110,8 @@ class Handler(BaseHTTPRequestHandler):
         events = EVENTS_ROUTE.fullmatch(path)
         if events:
             return self.events(events.group(1), parse_qs(query).get("source", ["main"])[0])
-        output = SHELL_OUTPUT_ROUTE.fullmatch(path)
-        if output:
-            return self.shell_output(output.group(1), parse_qs(query).get("from", [""])[0])
+        if path == "/api/shells/stream":
+            return self.shell_stream(parse_qs(query).get("from", [""])[0])
         try:
             response = self.route(path, query)
         except Exception:
@@ -402,13 +401,17 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def shell_output(self, token, start):
-        """Server-sent events with a shell's output from byte offset start (or Last-Event-ID): data, then exit."""
-        shell = self.server.shells.get(token)
-        if shell is None:
-            return self.respond(json_response(404, {"error": "shell not found"}))
-        resume = self.headers.get("Last-Event-ID") or start
-        offset = int(resume) if resume.isdigit() else 0
+    def shell_stream(self, start):
+        """Server-sent events with the output of several shells, from 'token:offset,...' (or Last-Event-ID, which
+        every event sets to the offsets reached): data and exit per shell, then end once none is left. One stream
+        per page, since a browser opens at most six connections to a host, shared by all its tabs."""
+        offsets = {}
+        for part in (self.headers.get("Last-Event-ID") or start).split(","):
+            token, _, offset = part.partition(":")
+            if SHELL_TOKEN.fullmatch(token):
+                offsets[token] = int(offset) if offset.isdigit() else 0
+        if not offsets or len(offsets) > MAX_SHELLS:
+            return self.respond(json_response(400, {"error": f"expected from=token:offset,... with 1 to {MAX_SHELLS} shells"}))
         self.send_response(200)
         for name, value in (("Content-Type", "text/event-stream; charset=utf-8"), *COMMON_HEADERS.items()):
             self.send_header(name, value)
@@ -417,24 +420,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.close_connection = True
         started = time.monotonic()
-        shell.attach()
+        shells = self.server.shells
+        attached = [shell for shell in map(shells.get, offsets) if shell is not None]
+        for shell in attached:
+            shell.attach()
+
+        def event(name, data):
+            last = ",".join(f"{t}:{o}" for t, o in offsets.items())
+            self.wfile.write(f"id: {last}\nevent: {name}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
+
         try:
-            while not self.server.stopping.is_set() and time.monotonic() - started < STREAM_LIFETIME:
-                offset, data, exited = shell.read(offset, HEARTBEAT)
-                if data:
-                    payload = json.dumps({"data": base64.b64encode(data).decode("ascii")})
-                    self.wfile.write(f"id: {offset}\nevent: data\ndata: {payload}\n\n".encode("utf-8"))
-                elif exited:
-                    self.wfile.write(f"event: exit\ndata: {json.dumps({'code': shell.code})}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-                    return
-                else:
+            while offsets and not self.server.stopping.is_set() and time.monotonic() - started < STREAM_LIFETIME:
+                changes = shells.read(offsets, HEARTBEAT)
+                for token, offset, data, exited, code in changes:
+                    if data:
+                        offsets[token] = offset
+                        event("data", {"id": token, "at": offset, "data": base64.b64encode(data).decode("ascii")})
+                    elif exited:
+                        del offsets[token]
+                        event("exit", {"id": token, "code": code})
+                if not changes:
                     self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+            if not offsets:
+                self.wfile.write(b"event: end\ndata: {}\n\n")
                 self.wfile.flush()
         except OSError:
             pass
         finally:
-            shell.detach()
+            for shell in attached:
+                shell.detach()
 
     def static(self, name):
         try:
