@@ -813,7 +813,7 @@ function conversationCard(row, now) {
     h("div", { class: "conv-top" },
       h("span", { class: "conv-title" }, liveBadge(row.live, false, row.id),
         titleText(row.id, row.title, "card", href, h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
-      h("time", { class: "conv-when", datetime: row.modified, title: `${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
+      h("time", { class: "conv-when", datetime: row.modified, title: `Last message ${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
     row.new ? h("p", { class: "recap" }, "No messages yet") : recapLine(row),
     h("div", { class: "conv-meta" },
       h("span", { class: "project", title: row.project }, icon("folder"), lastFolder(row.project)),

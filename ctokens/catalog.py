@@ -99,30 +99,65 @@ def save_title(path, session_id, title):
 RECAP_HINT = re.compile(r"\s*\(disable recaps in /config\)\s*$")
 
 
+def reversed_lines(path, block=1 << 16):
+    """The lines of a file from the last one up, read in blocks from its end."""
+    with path.open("rb") as f:
+        end = f.seek(0, 2)
+        rest = b""
+        while end > 0:
+            start = max(0, end - block)
+            f.seek(start)
+            chunk = (f.read(end - start) + rest).split(b"\n")
+            # The first piece may be the tail of a line that starts in the previous block.
+            rest = chunk.pop(0) if start > 0 else b""
+            yield from reversed(chunk)
+            end = start
+
+
 def last_recap(path, block=1 << 16):
     """Newest recap (away_summary) as {"text", "timestamp"}, or None; reads backwards since it is usually near the end."""
     try:
-        with path.open("rb") as f:
-            end = f.seek(0, 2)
-            rest = b""
-            while end > 0:
-                start = max(0, end - block)
-                f.seek(start)
-                chunk = (f.read(end - start) + rest).split(b"\n")
-                # The first piece may be the tail of a line that starts in the previous block.
-                rest = chunk.pop(0) if start > 0 else b""
-                for line in reversed(chunk):
-                    if b'"away_summary"' not in line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "away_summary":
-                        text = RECAP_HINT.sub("", str(event.get("content") or "")).strip()
-                        if text:
-                            return {"text": text, "timestamp": event.get("timestamp")}
-                end = start
+        for line in reversed_lines(path, block):
+            if b'"away_summary"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "away_summary":
+                text = RECAP_HINT.sub("", str(event.get("content") or "")).strip()
+                if text:
+                    return {"text": text, "timestamp": event.get("timestamp")}
+    except OSError:
+        pass
+    return None
+
+
+def epoch(stamp):
+    """Seconds since the epoch of an ISO 8601 timestamp such as 2026-10-14T20:07:11.452Z; None when it is not one."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        when = datetime.fromisoformat(stamp[:-1] + "+00:00" if stamp.endswith("Z") else stamp)
+    except ValueError:
+        return None
+    return when.timestamp() if when.tzinfo else None
+
+
+def last_activity(path, block=1 << 16):
+    """Epoch seconds of the newest event with a timestamp, or None. Resuming a session appends its title, mode and
+    bridge lines, which carry none: they move the file's mtime without anything being said."""
+    try:
+        for line in reversed_lines(path, block):
+            if b'"timestamp"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            when = epoch(event.get("timestamp")) if isinstance(event, dict) else None
+            if when is not None:
+                return when
     except OSError:
         pass
     return None
@@ -157,9 +192,17 @@ def conversation_bytes(main):
     return main.stat().st_size + extra
 
 
+def active_time(path, activity_of=last_activity):
+    """When the conversation last had activity; a log is never written after its mtime, so a later timestamp (clock
+    skew) yields to it, as does a log without any."""
+    mtime = path.stat().st_mtime
+    active = activity_of(path)
+    return mtime if active is None else min(active, mtime)
+
+
 def list_conversations(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title,
-                       search=None, text_of=conversation_text):
-    """Top-level session logs across every project, most recent first; search matches the title or the text."""
+                       search=None, text_of=conversation_text, activity_of=last_activity):
+    """Top-level session logs across every project, most recently active first; search matches the title or the text."""
     phrase = normalized(search or "")
     conversations = []
     for project in projects_dir.iterdir() if projects_dir.is_dir() else []:
@@ -172,23 +215,25 @@ def list_conversations(projects_dir, project_filter=None, project_of=project_pat
             title = title_of(path)
             if phrase and phrase not in normalized(title) and phrase not in text_of(path):
                 continue
-            stat = path.stat()
             conversations.append({
-                "path": path, "mtime": stat.st_mtime, "size_bytes": conversation_bytes(path),
+                "path": path, "active": active_time(path, activity_of), "size_bytes": conversation_bytes(path),
                 "subagents": len(subagent_logs(path)), "project": cwd, "title": title,
             })
-    conversations.sort(key=lambda row: row["mtime"], reverse=True)
+    conversations.sort(key=lambda row: row["active"], reverse=True)
     return conversations
 
 
+def iso_utc(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def conversation_rows(projects_dir, project_filter=None, project_of=project_path_of, title_of=session_title,
-                      search=None, text_of=conversation_text):
-    """The picker's list as JSON-ready dicts; modified is ISO 8601 UTC."""
-    return [{"id": row["path"].stem,
-             "modified": datetime.fromtimestamp(row["mtime"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      search=None, text_of=conversation_text, activity_of=last_activity):
+    """The picker's list as JSON-ready dicts; modified is the last activity, ISO 8601 UTC."""
+    return [{"id": row["path"].stem, "modified": iso_utc(row["active"]),
              "size_bytes": row["size_bytes"], "subagents": row["subagents"],
              "project": row["project"], "title": row["title"]}
-            for row in list_conversations(projects_dir, project_filter, project_of, title_of, search, text_of)]
+            for row in list_conversations(projects_dir, project_filter, project_of, title_of, search, text_of, activity_of)]
 
 
 def find_conversation(conversation_id, projects_dir):

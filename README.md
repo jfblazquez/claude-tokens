@@ -263,8 +263,11 @@ tool calls, tool results and subagents are not searched. The first search after
 start-up reads every log; later ones only re-read the logs that changed.
 
 The list shows one card per conversation, 50 per page, most recent first and
-grouped by when they were last modified (today, yesterday, this week, last week,
-earlier this month, then by month; UTC days, weeks start on Monday). Each card
+grouped by the time of their last message (today, yesterday, this week, last week,
+earlier this month, then by month; UTC days, weeks start on Monday). That is the
+newest timestamp in the log, not the file's modified time: resuming a session
+appends its title and mode lines, without a timestamp, to a log nobody wrote in
+for weeks. Each card
 has the title (the name given with `/rename`, else the one Claude Code
 generated), the time, the newest recap Claude Code wrote while you were away
 (cut to two lines; hover it for all of it), the project's last folder (hover it

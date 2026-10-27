@@ -11,14 +11,13 @@ import secrets
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
-from ..catalog import (CONVERSATION_ID, clean_title, conversation_rows, conversation_text, find_conversation, last_recap,
-                       project_path_of, save_title, session_title)
+from ..catalog import (CONVERSATION_ID, active_time, clean_title, conversation_rows, conversation_text, find_conversation,
+                       iso_utc, last_activity, last_recap, project_path_of, save_title, session_title)
 from ..content import bash_commands, conversation_messages, last_response, touched_files
 from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, rename, send,
                     send_problem, sessions_dir)
@@ -316,7 +315,8 @@ class Handler(BaseHTTPRequestHandler):
         project = params.get("project", [None])[0]
         if path == "/api/conversations":
             search = params.get("q", [None])[0]
-            rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache))
+            rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache),
+                                     cached_activity(cache))
             live = live_sessions(sessions_dir(config.projects_dir))
             starred = self.server.favorites.ids()
             favorites = favorite_rows(starred, live, config.projects_dir, cache)
@@ -592,11 +592,10 @@ def favorite_rows(ids, live, projects_dir, cache):
         info = live.get(conversation_id)
         if path is not None:
             try:
-                mtime = path.stat().st_mtime
+                modified = iso_utc(active_time(path, cached_activity(cache)))
             except OSError:
                 continue
-            row = {"id": conversation_id, "title": title_of(path), "project": project_of(path),
-                   "modified": datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            row = {"id": conversation_id, "title": title_of(path), "project": project_of(path), "modified": modified}
         elif info is not None and info["entrypoint"] == "cli" and info["cwd"] and info["started"]:
             row = {"id": conversation_id, "title": "", "project": info["cwd"], "modified": info["started"], "new": True}
         else:
@@ -655,6 +654,10 @@ def recap_of(cache, config, conversation_id):
         return None if path is None else cache.get("recap", path, last_recap)
     except OSError:
         return None
+
+
+def cached_activity(cache):
+    return lambda path: cache.get("activity", path, last_activity)
 
 
 def cached_text(cache):

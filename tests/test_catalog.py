@@ -1,14 +1,16 @@
+import json
 import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from fixtures import AMBIGUOUS, API, BILLING, CONV_A, CONV_B, CONV_EMPTY, build_projects, write_jsonl, user
 
-from ctokens.catalog import (clean_title, conversation_rows, find_conversation, last_recap, list_conversations, save_title,
-                             session_title)
+from ctokens.catalog import (clean_title, conversation_rows, find_conversation, last_activity, last_recap, list_conversations,
+                             save_title, session_title)
 
 
 class ConversationRowsTest(unittest.TestCase):
@@ -43,6 +45,33 @@ class ConversationRowsTest(unittest.TestCase):
                 self.assertEqual(conversation_rows(self.projects)[0]["modified"], "2026-09-21T14:28:20Z")
         finally:
             time.tzset()
+
+    def test_sorted_by_the_last_message_not_by_lines_written_on_resume(self):
+        path = self.projects / API / f"{CONV_A}.jsonl"
+        stat, data = path.stat(), path.read_bytes()
+        try:
+            # What a resumed session appends: no timestamp, but a new mtime well after the last message.
+            with path.open("a") as f:
+                f.write(json.dumps({"type": "ai-title", "aiTitle": "x", "sessionId": CONV_A}) + "\n")
+            os.utime(path, (1795000000, 1795000000))
+            rows = {row["id"]: row for row in conversation_rows(self.projects)}
+            self.assertEqual(rows[CONV_A]["modified"], "2026-09-30T00:00:10Z")
+        finally:
+            path.write_bytes(data)
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    def test_last_activity(self):
+        folder = Path(self.tmp.name) / "activity"
+        folder.mkdir()
+        log = folder / "log.jsonl"
+        lines = [{"type": "user", "timestamp": "2026-10-14T20:07:11.452Z"}, {"type": "x", "timestamp": "nope"},
+                 {"type": "ai-title", "aiTitle": "t"}]
+        log.write_text("\n".join(json.dumps(line) for line in lines) + "\n{torn")
+        self.assertEqual(datetime.fromtimestamp(last_activity(log, block=16), timezone.utc).isoformat(),
+                         "2026-10-14T20:07:11.452000+00:00")
+        log.write_text('{"type": "ai-title"}\n')
+        self.assertIsNone(last_activity(log))
+        self.assertIsNone(last_activity(folder / "missing.jsonl"))
 
     def test_matches_picker_listing(self):
         rows = conversation_rows(self.projects, "BILLING")
