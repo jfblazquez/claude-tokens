@@ -65,6 +65,27 @@ function closePanel(item) {
   if (dock.active && dock.active.onShow) requestAnimationFrame(() => dock.active.onShow());
 }
 
+// What a person closes goes through here: a shell running a command asks first.
+async function requestClose(item) {
+  if (item.confirmClose && !(await item.confirmClose())) return;
+  closePanel(item);
+}
+
+async function closeAll() {
+  for (const item of dock.items.slice()) await requestClose(item);
+}
+
+// A middle click closes, as on browser tabs; held down it would otherwise start autoscroll or paste on Linux.
+function middleCloses(el, item) {
+  el.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+  el.addEventListener("auxclick", (e) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    requestClose(item);
+  });
+  return el;
+}
+
 function setDockMode(mode) {
   dock.mode = mode;
   store(DOCK_MODE_KEY, mode);
@@ -75,11 +96,11 @@ function setDockMode(mode) {
 const KIND_ICONS = { commit: "⎇", file: "▤", shell: "❯", pick: "≡" };
 
 function panelTab(item) {
-  return h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false", title: item.tip || item.title,
-    onclick: () => focusPanel(item), onauxclick: (e) => { if (e.button === 1) closePanel(item); } },
+  return middleCloses(h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false",
+    title: item.tip || item.title, onclick: () => focusPanel(item) },
   h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), h("span", { class: "dock-title" }, item.title),
   h("button", { class: "dock-x", type: "button", title: "Close (middle click on the tab)", "aria-label": `Close ${item.title}`,
-    onclick: (e) => { e.stopPropagation(); closePanel(item); } }, "×"));
+    onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×")), item);
 }
 
 // Tabs that do not fit stay reachable from here, next to the layout and closing them all.
@@ -115,7 +136,7 @@ function openPanelMenu(button) {
     ...dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), " ",
       h("span", { class: "dock-title" }, item.title)], () => focusPanel(item), { on: item === dock.active, tip: item.tip || item.title })),
     ...DOCK_MODES.map(([mode, label]) => entry(label, () => setDockMode(mode), { role: "menuitemradio", on: mode === dock.mode })),
-    entry("Close all panels", () => dock.items.slice().forEach(closePanel)),
+    entry("Close all panels", closeAll),
   ];
   const n = dock.items.length;
   const menu = h("div", { class: "copy-menu dock-menu", role: "menu", "aria-label": "Panels" },
@@ -192,7 +213,7 @@ function drawDock() {
   }, { passive: false });
   const head = h("div", { class: "dock-head" }, tabs, panelMenu(tabs),
     dock.mode === "modal" ? h("button", { class: "dock-x big", type: "button", title: "Close all panels",
-      "aria-label": "Close all panels", onclick: () => { dock.items.slice().forEach(closePanel); } }, "×") : null);
+      "aria-label": "Close all panels", onclick: closeAll }, "×") : null);
   requestAnimationFrame(() => {
     const current = tabs.querySelector('[aria-selected="true"]');
     if (current) tabs.scrollLeft = Math.max(0, Math.min(tabs.scrollLeft, current.offsetLeft - 8),
@@ -226,7 +247,7 @@ function drawDock() {
     dock.el.className = "dock modal";
     const box = h("div", { class: "dock-box", role: "dialog", "aria-modal": "true", "aria-label": active.title },
       head, h("div", { class: "dock-bodies" }, bodies));
-    const backdrop = h("div", { class: "dock-backdrop", onclick: () => dock.items.slice().forEach(closePanel) });
+    const backdrop = h("div", { class: "dock-backdrop", onclick: closeAll });
     dock.el.replaceChildren(backdrop, box);
   }
 }
@@ -241,8 +262,8 @@ function drawFloating() {
       item.rect = { x: Math.max(8, innerWidth - w - 24 - (n % 6) * 28), y: barHeight() + 16 + (n % 6) * 28, w, h: hgt };
     }
     if (item.min) {
-      tray.push(h("button", { class: "tray-item", type: "button", title: item.title, onclick: () => focusPanel(item) },
-        KIND_ICONS[item.kind], " ", h("span", {}, item.title)));
+      tray.push(middleCloses(h("button", { class: "tray-item", type: "button", title: item.title, onclick: () => focusPanel(item) },
+        KIND_ICONS[item.kind], " ", h("span", {}, item.title)), item));
       return;
     }
     item.body.hidden = false;
@@ -250,8 +271,9 @@ function drawFloating() {
       h("span", { class: "dock-title", title: item.tip || item.title }, item.tip || item.title), panelMenu(null),
       h("button", { class: "dock-x", type: "button", title: "Minimize", "aria-label": "Minimize",
         onclick: (e) => { e.stopPropagation(); item.min = true; drawDock(); } }, "–"),
-      h("button", { class: "dock-x", type: "button", title: "Close", "aria-label": `Close ${item.title}`,
-        onclick: (e) => { e.stopPropagation(); closePanel(item); } }, "×"));
+      h("button", { class: "dock-x", type: "button", title: "Close (middle click on the title)", "aria-label": `Close ${item.title}`,
+        onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×"));
+    middleCloses(title, item);
     const win = h("section", { class: `dock-win${item === dock.active ? " active" : ""}`, role: "dialog", "aria-label": item.title,
       css: { left: `${item.rect.x}px`, top: `${item.rect.y}px`, width: `${item.rect.w}px`, height: `${item.rect.h}px`, zIndex: item.z || 30 } },
     title, item.body);
@@ -297,7 +319,7 @@ function escapeClosesPanel(e) {
   if (e.key !== "Escape" || !dock.items.length || pick.el || e.target.closest(".xterm")) return;
   if (dock.mode === "modal" || (dock.el && dock.el.contains(e.target))) {
     const item = dock.mode === "modal" ? dock.active : dock.items.find((i) => i.body.contains(e.target));
-    if (item) closePanel(item);
+    if (item) requestClose(item);
   }
 }
 
@@ -337,20 +359,45 @@ function fileView(conv, item, data) {
   if (coloured(lang) && data.text.length <= HIGHLIGHT_MAX) hljs.highlightElement(code);
   const gutter = h("pre", { class: "fv-gutter", "aria-hidden": "true" }, lines.map((_, i) => `${i + 1}\n`).join(""));
   const mark = h("div", { class: "fv-mark", hidden: true });
-  const scroller = h("div", { class: "fv-scroll", tabindex: "0" }, h("div", { class: "fv-code" }, gutter, h("pre", { class: "fv-text" }, code), mark));
+  const text = h("pre", { class: "fv-text" }, code);
+  const box = h("div", { class: "fv-code" }, gutter, text, mark);
+  const scroller = h("div", { class: "fv-scroll", tabindex: "0" }, box);
+  const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
+  const tell = (message) => {
+    note.textContent = message;
+    clearTimeout(note.timer);
+    note.timer = setTimeout(() => { note.textContent = ""; }, 5000);
+  };
   const goto = h("input", { class: "fv-goto", type: "number", min: 1, max: lines.length, placeholder: "Line", "aria-label": "Go to line",
     onkeydown: (e) => { if (e.key === "Enter") go(Number(goto.value)); } });
   gutter.addEventListener("click", (e) => go(Math.floor((e.offsetY - 8) / LINE_PX) + 1));
+  const show = (line, end) => {
+    mark.hidden = false;
+    mark.style.top = `${8 + (line - 1) * LINE_PX}px`;
+    mark.style.height = `${(end - line + 1) * LINE_PX}px`;
+  };
   const go = (line, end) => {
     if (!line || line < 1) return;
     line = Math.min(line, lines.length || 1);
     end = Math.max(line, Math.min(end || line, lines.length || 1));
-    mark.hidden = false;
-    mark.style.top = `${8 + (line - 1) * LINE_PX}px`;
-    mark.style.height = `${(end - line + 1) * LINE_PX}px`;
+    show(line, end);
     scroller.scrollTop = Math.max(0, 8 + (line - 1) * LINE_PX - scroller.clientHeight / 3);
     goto.value = line;
   };
+  text.addEventListener("dblclick", (e) => {
+    const line = Math.min(lines.length || 1, Math.max(1, Math.floor((e.clientY - box.getBoundingClientRect().top - 8) / LINE_PX) + 1));
+    getSelection().removeAllRanges();
+    const ref = `${data.path}:${line}`;
+    pendingRef = ref;
+    show(line, line);
+    copyWith(() => writeText(ref), note, (ok) => {
+      if (ok != null) tell(ok ? `Copied ${baseName(ref)} · double-click the message box to paste it there` : "Copy failed");
+    });
+  });
+  // After the browser has settled the selection; the mouseup of a double-click belongs to the double-click.
+  box.addEventListener("mouseup", (e) => {
+    if (e.button === 0 && e.detail < 2) setTimeout(() => selectionMenu(e.clientX, e.clientY, code, data, lang, tell), 0);
+  });
   const notes = [data.binary ? "Binary file: not shown." : null,
     data.truncated ? `Only the first ${fmtBytes(data.text.length)} of ${fmtBytes(data.size)} are shown.` : null].filter(Boolean);
   item.body.replaceChildren();
@@ -359,8 +406,67 @@ function fileView(conv, item, data) {
     h("span", { class: "muted" }, `${fmt(lines.length)} lines · ${fmtBytes(data.size)}${lang && lang !== "plaintext" ? ` · ${languageName(lang)}` : ""}`),
     h("span", { class: "spacer" }), goto,
     h("button", { class: "btn", type: "button", title: `Open a shell in ${dirOf(data.path)}`, onclick: () => openShell(conv, dirOf(data.path)) }, "❯ Shell here")),
-  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : scroller]);
+  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : scroller, note]);
   return { go };
+}
+
+// The lines a selection in a file spans, and what can be done with them: copied, with the path and lines as a header,
+// or put into the message to the session.
+function selectionMenu(x, y, code, data, lang, tell) {
+  const selection = getSelection();
+  if (selection.isCollapsed || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0), chosen = selection.toString();
+  if (!code.contains(range.startContainer) || !code.contains(range.endContainer) || !chosen.trim()) return;
+  const before = document.createRange();
+  before.setStart(code, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().split("\n").length, body = chosen.replace(/\n$/, "");
+  const end = start + body.split("\n").length - 1;
+  const ref = `${data.path}:${start}${end > start ? `-${end}` : ""}`;
+  const copy = (value) => copyWith(() => writeText(value), tell, (ok) => { if (ok != null) tell(ok ? "Copied" : "Copy failed"); });
+  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+  const ask = () => {
+    if (!insertIntoComposer(`${ref}\n${fence}${coloured(lang) ? lang : ""}\n${body}\n${fence}`, true)) {
+      tell("No message box: open the Conversation tab of a live session");
+    }
+  };
+  pointMenu(x, y, "Selection", [
+    ["Copy", () => copy(chosen)],
+    [`Copy with ${baseName(ref)}`, () => copy(`${ref}\n${chosen}`)],
+    ["Ask Claude", ask, composerReady() ? "Put it into the message box, where its cursor is, without sending it"
+      : "Needs the Conversation tab of a live session open"],
+  ]);
+}
+
+// A menu at a point of the page, closed like the copy menus: outside, Escape, scrolling.
+function pointMenu(x, y, title, entries) {
+  closeCopyMenu(false);
+  const items = entries.map(([label, act, tip]) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item", title: tip || null,
+    onclick: () => { closeCopyMenu(false); act(); } }, label));
+  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": title }, h("div", { class: "copy-menu-head" }, title), items);
+  document.body.append(menu);
+  menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${y + 12 + menu.offsetHeight > innerHeight ? Math.max(8, y - 12 - menu.offsetHeight) : y + 12}px`;
+  const outside = (e) => { if (!menu.contains(e.target)) closeCopyMenu(false); };
+  const away = () => closeCopyMenu(false);
+  const keys = (e) => {
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "Escape" || e.key === "Tab") {
+      e.stopPropagation();
+      closeCopyMenu(false);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+    }
+  };
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("keydown", keys, true);
+  window.addEventListener("resize", away);
+  copyMenu = { menu, button: { focus() {} }, cleanup: () => {
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", keys, true);
+    window.removeEventListener("resize", away);
+  } };
 }
 
 // ---------- commit viewer ----------
@@ -518,7 +624,8 @@ function openShell(conv, cwd) {
     item.tip = `Shell ${n} in ${cwd}`;
     const screen = h("div", { class: "term" });
     const status = h("span", { class: "muted" }, "Starting…");
-    item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen);
+    const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
+    item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen, note);
     const term = new Terminal({ fontFamily: cssVar("--mono") || "monospace", fontSize: 13, cursorBlink: true, scrollback: 5000,
       theme: terminalTheme(), allowProposedApi: false });
     const sh = { id: null, queue: "", sending: false, cols: 80, rows: 24, ended: false };
@@ -556,9 +663,28 @@ function openShell(conv, cwd) {
       pump();
     });
     term.registerLinkProvider(shellLinks(term, conv, sh));
+    // As in a terminal: a right-click copies the selection and Ctrl+V pastes, instead of sending ^V to the shell.
+    screen.addEventListener("contextmenu", (e) => {
+      if (!term.hasSelection()) return;
+      e.preventDefault();
+      const chosen = term.getSelection();
+      term.clearSelection();
+      copyWith(() => writeText(chosen), note, (ok) => { note.textContent = ok == null ? "" : ok ? "Copied" : "Copy failed"; });
+      term.focus();
+    });
+    term.attachCustomKeyEventHandler((e) => !(e.type === "keydown" && e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
+      && e.key.toLowerCase() === "v"));
     item.onShow = () => {
       fit();
       if (item === dock.active || dock.mode === "float") term.focus();
+    };
+    item.confirmClose = async () => {
+      if (!sh.id || sh.ended) return true;
+      let command = null;
+      try {
+        command = (await postJson(`/api/shells/${sh.id}/state`, {})).shell.command;
+      } catch (_) { /* gone already: nothing to lose */ }
+      return !command || confirm(`${command} is still running in ${item.title}. Close the shell and stop it?`);
     };
     item.onClose = () => {
       if (sh.id && shellStream.shells.delete(sh.id)) streamShells();

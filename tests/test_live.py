@@ -185,6 +185,114 @@ class SendTest(LiveTestCase):
             live.send(self.sessions, CONV_A, "hi")
 
 
+RULE = "─" * 80
+# Screens captured from Claude Code 2.1.311 while it waited on AskUserQuestion and on a permission prompt.
+QUESTION_SCREEN = f"""❯ Ask me two questions
+{RULE}
+←  ☒ Color  ☐ Fruits  ✔ Submit  →
+
+Which fruits do you like?
+
+  1. [✔] Apple
+         Apple
+  2. [ ] Pear
+         Pear
+  3. [ ] Type something
+❯    Submit
+{RULE}
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+"""
+PERMISSION_SCREEN = f"""● Bash(touch hello.txt)
+  1. not an option: the conversation above the dialog
+{RULE}
+ Bash command
+ Create empty hello.txt file
+{"╌" * 80}
+ touch hello.txt
+{"╌" * 80}
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to
+      /home/dev/projects/api-gateway from this project
+   3. No
+
+ Esc to cancel · Tab to amend
+"""
+
+
+class DialogTest(LiveTestCase):
+    def test_question(self):
+        found = live.dialog(QUESTION_SCREEN.splitlines())
+        self.assertEqual(found["text"], "←  ☒ Color  ☐ Fruits  ✔ Submit  →\n\nWhich fruits do you like?")
+        self.assertEqual(found["question"], "Which fruits do you like?")
+        self.assertEqual(found["hint"], "Enter to select · Tab/Arrow keys to navigate · Esc to cancel")
+        self.assertEqual([(o["key"], o["label"], o["detail"], o["current"], o["checked"]) for o in found["options"]],
+                         [("1", "Apple", "Apple", False, True), ("2", "Pear", "Pear", False, False),
+                          ("3", "Type something", "", False, False), (None, "Submit", "", True, None),
+                          ("4", "Chat about this", "", False, None)])
+
+    def test_permission_prompt(self):
+        found = live.dialog(PERMISSION_SCREEN.splitlines())
+        self.assertTrue(found["text"].startswith("Bash command\nCreate empty hello.txt file\n"))
+        self.assertEqual(found["question"], "Do you want to proceed?")
+        self.assertEqual(found["hint"], "Esc to cancel · Tab to amend")
+        self.assertEqual([(o["key"], o["label"], o["detail"], o["current"]) for o in found["options"]],
+                         [("1", "Yes", "", True),
+                          ("2", "Yes, and always allow access to", "/home/dev/projects/api-gateway from this project", False),
+                          ("3", "No", "", False)])
+
+    def test_no_dialog(self):
+        for screen in ("", f"● Done.\n{RULE}\n❯ \n{RULE}\n", "Steps:\n  2. second\n"):
+            with self.subTest(screen=screen):
+                self.assertIsNone(live.dialog(screen.splitlines()))
+
+
+class AnswerTest(SendTest):
+    def show(self, screen):
+        self.run.side_effect = lambda command, **kw: (subprocess.CompletedProcess(command, 0, screen, "")
+                                                      if "capture-pane" in command else tmux_ok(command))
+
+    def keys(self):
+        return [call.args[0][6:] for call in self.run.call_args_list if "send-keys" in call.args[0]]
+
+    def test_presses_keys_and_types_text_into_the_dialog(self):
+        record(self.sessions, 41, CONV_A, status="waiting", waitingFor="input needed")
+        self.show(QUESTION_SCREEN)
+        shown = live.answer(self.sessions, CONV_A, [{"key": "Up"}, {"text": "A parrot"}, {"key": "Enter"}])
+        self.assertEqual(self.keys(), [["Up"], ["-l", "A parrot"], ["Enter"]])
+        self.assertEqual((shown["status"], shown["dialog"]["question"]), ("waiting", "Which fruits do you like?"))
+
+    def test_refusals(self):
+        record(self.sessions, 41, CONV_A, status="waiting", waitingFor="input needed")
+        self.show(QUESTION_SCREEN)
+        for steps in ([], [{"key": "C-c"}], [{"text": "two\nlines"}], [{"text": " "}], [{"key": "1", "text": "x"}],
+                      [{"key": "1"}] * (live.MAX_DIALOG_STEPS + 1), "1"):
+            with self.subTest(steps=steps), self.assertRaisesRegex(live.SendError, "steps"):
+                live.answer(self.sessions, CONV_A, steps)
+        with self.assertRaisesRegex(live.SendError, "not running"):
+            live.answer(self.sessions, CONV_B, [{"key": "1"}])
+        # The question was answered in the terminal meanwhile: the digit would go into the prompt.
+        for status, screen in (("idle", QUESTION_SCREEN), ("waiting", f"{RULE}\n❯ \n{RULE}\n")):
+            with self.subTest(status=status):
+                record(self.sessions, 41, CONV_A, status=status)
+                self.show(screen)
+                with self.assertRaisesRegex(live.SendError, "not waiting"):
+                    live.answer(self.sessions, CONV_A, [{"key": "1"}])
+        self.assertEqual(self.keys(), [])
+
+    def test_public_shows_the_dialog_and_the_status_the_screen_shows(self):
+        record(self.sessions, 41, CONV_A, status="waiting", waitingFor="permission prompt")
+        self.show(PERMISSION_SCREEN)
+        self.assertEqual(live.public(self.info())["dialog"]["question"], "Do you want to proceed?")
+        for status, mark, shown in (("shell", "❯", "idle"), ("idle", "!", "shell"), ("busy", "❯", "busy")):
+            with self.subTest(status=status, mark=mark):
+                record(self.sessions, 41, CONV_A, status=status)
+                self.screen(mark)
+                self.assertEqual((live.public(self.info())["status"], live.public(self.info())["dialog"]), (shown, None))
+
+
 class LiveApiCase(LiveTestCase):
     """A server with a send key over the fixtures, with CONV_A live in a tmux pane."""
     KEY = "s3cret-key"
@@ -231,6 +339,22 @@ class LiveApiTest(LiveApiCase):
         self.assertEqual(rows[CONV_A]["live"]["pid"], 41)
         self.assertNotIn("updated_ms", rows[CONV_A]["live"])
         self.assertNotIn("live", rows[CONV_B])
+
+    def test_live_states_of_every_session(self):
+        for key, state in ((None, "missing"), (self.KEY, "ok")):
+            with self.subTest(key=key):
+                status, _, data = self.get("/api/live", key)
+                self.assertEqual((status, data["key"], list(data["live"]), data["live"][CONV_A]["status"]), (200, state, [CONV_A], "idle"))
+
+    def test_answer(self):
+        with mock.patch("ctokens.web.server.answer", return_value={"pid": 41}) as answer:
+            status, data = self.post(CONV_A, {"steps": [{"key": "1"}]}, action="answer")
+        self.assertEqual((status, data), (200, {"live": {"pid": 41}}))
+        self.assertEqual(answer.call_args.args[1:], (CONV_A, [{"key": "1"}]))
+        status, data = self.post(CONV_A, {"steps": [{"key": "1"}]}, key=None, action="answer")
+        self.assertEqual(status, 403)
+        status, data = self.post(CONV_A, {"steps": [{"key": "1"}]}, action="answer")
+        self.assertEqual((status, data), (409, {"error": "The session is not waiting on a question or a dialog any more."}))
 
     def test_live_view_reports_the_key(self):
         for key, state in ((None, "missing"), ("nope", "wrong"), (self.KEY, "ok")):

@@ -1,6 +1,7 @@
 """Content views of a conversation: messages, last response, Bash commands and touched files."""
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -97,9 +98,16 @@ def touched_files(main):
     return files
 
 
+# None while full_text() builds the transcript again; a context variable, so the requests of other threads still clip.
+CLIP_LIMIT = contextvars.ContextVar("clip_limit", default=CLIP)
+# Where a clipped text sits: a message (an event), a block of it (a tool result), its patch, or a field of a tool call.
+CLIPPED_AT = re.compile(r"(\d+)(?:\.(\d+)(?:\.patch|\.input\.(\d+))?)?")
+
+
 def clipped(value):
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
-    return {"text": text[:CLIP], "size": len(text)}
+    limit = CLIP_LIMIT.get()
+    return {"text": text if limit is None else text[:limit], "size": len(text)}
 
 
 def result_part(block):
@@ -394,6 +402,31 @@ class Transcript:
 def transcript(path, prices):
     """Messages and events (role "event") of one log in order; the events of one API response become one message."""
     return Transcript(path, prices).advance()
+
+
+def full_text(log, prices, at):
+    """The whole of a text the transcript of log clips, by where it sits (CLIPPED_AT); None when there is no such text."""
+    match = CLIPPED_AT.fullmatch(at or "")
+    if not match:
+        return None
+    token = CLIP_LIMIT.set(None)
+    try:
+        messages = transcript(log, prices)
+    finally:
+        CLIP_LIMIT.reset(token)
+    message, block, field = (None if n is None else int(n) for n in match.groups())
+    try:
+        item = messages[message]
+        if block is not None:
+            item = item["blocks"][block]
+            if at.endswith(".patch"):
+                item = item["patch"]
+            elif field is not None:
+                item = item["input"][field]
+    except (IndexError, KeyError, TypeError):
+        return None
+    text = item.get("text") if isinstance(item, dict) else None
+    return text if isinstance(text, str) else None
 
 
 def source_list(main):

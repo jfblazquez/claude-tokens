@@ -263,12 +263,16 @@ tool calls, tool results and subagents are not searched. The first search after
 start-up reads every log; later ones only re-read the logs that changed.
 
 The list shows one card per conversation, 50 per page, most recent first and
-grouped by when they were last modified (today, yesterday, this week, last week,
-earlier this month, then by month; UTC days, weeks start on Monday). Each card
+grouped by the time of their last message (today, yesterday, this week, last week,
+earlier this month, then by month; UTC days, weeks start on Monday). That is the
+newest timestamp in the log, not the file's modified time: resuming a session
+appends its title and mode lines, without a timestamp, to a log nobody wrote in
+for weeks. Each card
 has the title (the name given with `/rename`, else the one Claude Code
 generated), the time, the newest recap Claude Code wrote while you were away
 (cut to two lines; hover it for all of it), the project's last folder (hover it
-for the full path), the size and the subagents. Filter and search cover every
+for the full path; a click shows only that project's conversations), the size
+and the subagents. Filter and search cover every
 conversation, not just the current page. Coming back from a conversation shows
 the list at once, on the same page and scroll position, and reloads it behind.
 
@@ -284,7 +288,9 @@ current tab and the others reload the next time you open them.
 Inside a conversation the top bar holds its tabs and a **← Conversations**
 button, so they stay on screen however far you scroll. The **Conversation** tab
 keeps the message you were reading when you switch to another tab and back. A
-round **↑** button at the bottom right of every page goes back to the top.
+round **↑** button at the bottom right of every page goes back to the top, and
+a **↓** one under it goes to the bottom; each shows while that end is more than a
+screen away.
 
 In the **Conversation** tab a collapsed Bash call shows its description, or the
 first 100 characters of the command when it has none. The **Detail** slider
@@ -308,7 +314,14 @@ browser remembers it for every conversation, and level 2 is the default:
 A refresh (or auto
 refresh) keeps the message you are reading in place; when new messages arrive,
 a **Read new messages** button near the bottom of the screen takes you to the
-first one, and goes away once you scroll to them. Opened tool calls are
+first one, and goes away once you scroll to them. Tool inputs and results and
+the text of events show their first 4,000 characters; **Show all**, under one
+that is longer, loads the rest of that text only. An event whose text is wrapped
+in tags, such as `<system-reminder>…</system-reminder>`, shows without them, the
+tag next to the event's name, and so does injected context. Events up to 1,000
+characters and 15 lines show open; JSON is coloured as such (laid out when it
+came on one line), and every event has a clipboard button that copies its whole
+text, fetched when the page only has its beginning. Opened tool calls are
 syntax-highlighted: Bash commands as shell, Write/Edit text and Read results by
 file extension. Other results are recognised by their own markers (JSON, diffs,
 `#!` scripts, XML), or take the language of the files the command reads
@@ -335,11 +348,14 @@ itself writes to the session, next to the estimate computed here.
 ### Live conversations
 
 A conversation that a Claude Code process is running right now is marked
-**Live** in the list (with **Live only** to show just those; clicking the badge
-opens its Conversation tab) and in its header,
-with the process id and its state: *idle* (waiting for a prompt), *busy*
-(working, the dot pulses), *waiting* (a permission prompt or another dialog) or
-*shell* (shell mode). It comes from the registry Claude Code keeps in
+**Live** with its state in the list (**Live · busy**, **Live · idle**, **Live ·
+shell**, **Live · question**, **Live · permission**; with **Live only** to show
+just those; clicking the badge opens its Conversation tab) and in its header,
+with the process id: *idle* (waiting for a prompt), *busy* (working, the dot
+pulses), *waiting* (a question, a permission prompt or another dialog) or
+*shell* (shell mode). The list asks for the states every 3 seconds, so they
+change on their own; a card waiting on a question or a permission shows it,
+with an **Answer** button that opens the conversation. It comes from the registry Claude Code keeps in
 `~/.claude/sessions/<pid>.json` (next to the projects folder); a record only
 counts while its process is alive and has the same start time, so a crashed
 session or a reused pid is not shown as live.
@@ -374,6 +390,16 @@ Sending needs:
 
 Text already in the session's prompt stays there, and the message is appended
 to it.
+
+While the session waits on a question (AskUserQuestion) or a permission prompt,
+the box shows that dialog instead: its text, its choices as buttons (with the
+highlighted one marked and the boxes of a multiple choice question), a box for
+your own answer when the question offers one, and ↑ ↓ ← → Enter Esc. Claude Code
+logs the question only once it is answered, so it is read from the session's
+screen. Each button presses its key in the terminal (a choice's digit, or the
+arrows and Enter where digits do nothing, such as on **Submit**), only while the
+screen still shows a dialog, so a late click never ends up in the prompt; you
+can also answer in the terminal.
 
 A live session that can never take a message (it runs outside tmux, or is not
 an interactive terminal) is marked **Live · read only**, with the reason on
@@ -481,8 +507,16 @@ view) lists every open panel, closes them all and switches the layout to a botto
 panel, floating windows (dragged by the title, resized from the corner,
 minimized to a tray) or an overlay; the browser remembers the choice and the
 sizes. With the bottom panel, the message box of a live conversation stays above
-it. Middle click closes a tab, and Escape the panel that has the focus, except
-inside a terminal.
+it. Middle click closes a tab (or a floating window by its title), and Escape
+the panel that has the focus, except inside a terminal; a shell running a command
+(not at its prompt) asks before it is closed and the command stopped.
+
+In a file, a double-click on a line copies `path:line`, and a double-click in the
+message box of a live conversation then pastes it where the cursor is, without
+sending it. Selecting text opens a menu: **Copy**, **Copy with path:lines** (that
+header on its own line, then the text) and **Ask Claude**, which puts the header
+and the text, fenced, into the message box where its cursor is. In a shell, as
+in a terminal, a right-click on a selection copies it and Ctrl+V pastes.
 
 All of this needs the send key, since it reads any file you can read and runs
 commands as you. The terminal is [xterm.js](https://xtermjs.org/), bundled like

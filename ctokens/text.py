@@ -242,7 +242,7 @@ def show_page(conversations, start, end):
     rows = []
     for index in range(start, end):
         row = conversations[index]
-        when = datetime.fromtimestamp(row["mtime"]).strftime("%Y-%m-%d %H:%M")
+        when = datetime.fromtimestamp(row["active"]).strftime("%Y-%m-%d %H:%M")
         rows.append([index + 1, when, row["path"].stem, fmt_bytes(row["size_bytes"]),
                      row["subagents"], row["project"], short(row["title"], 50)])
     table(["#", "Date", "GUID", "Size", "Subagents", "Project", "Title"], rows)

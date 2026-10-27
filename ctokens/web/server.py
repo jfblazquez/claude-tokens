@@ -11,17 +11,16 @@ import secrets
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
-from ..catalog import (CONVERSATION_ID, clean_title, conversation_rows, conversation_text, find_conversation, last_recap,
-                       project_path_of, save_title, session_title)
-from ..content import bash_commands, conversation_messages, last_response, touched_files
-from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, rename, send,
-                    send_problem, sessions_dir)
+from ..catalog import (CONVERSATION_ID, active_time, clean_title, conversation_rows, conversation_text, find_conversation,
+                       iso_utc, last_activity, last_recap, project_path_of, save_title, session_title)
+from ..content import bash_commands, conversation_messages, full_text, last_response, touched_files
+from ..live import (SendError, activity, answer, channel, go_live, live_sessions, new_session, public, read_record, rename,
+                    send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
 from ..repo import FileIndex, RepoError, find_commits, find_files, read_file, repo_root, show_commit
 from ..reports import report, scan_totals, totals_report
@@ -48,11 +47,11 @@ COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosnif
 MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
-CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live))?")
-ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session|rename|favorite|resolve|shell)")
+CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live|full))?")
+ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|new-session|rename|favorite|resolve|shell)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
 REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
-SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close)")
+SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close|state)")
 SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SHELL_REAP_EVERY = 30.0
 # The events stream checks the log, the session and its status line this often; a new log line shows within a tick.
@@ -228,6 +227,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(data.get("text"), str):
                     return json_response(400, {"error": "expected {\"text\": \"...\"}"})
                 return json_response(200, {"sent": True, "live": send(sessions, conversation_id, data["text"])})
+            if name == "answer":
+                return json_response(200, {"live": answer(sessions, conversation_id, data.get("steps"))})
             if name == "go-live":
                 return json_response(200, {"started": True, "live": go_live(sessions, conversation_id, cwd)})
             session_id, info = new_session(sessions, cwd)
@@ -242,6 +243,8 @@ class Handler(BaseHTTPRequestHandler):
         if name == "close":
             self.server.shells.close(token)
             return json_response(200, {"closed": True})
+        if name == "state":
+            return json_response(200, {"shell": shell.public()})
         if name == "resize":
             shell.resize(clamp(data.get("cols"), 80), clamp(data.get("rows"), 24))
             return json_response(200, {"shell": shell.public()})
@@ -316,7 +319,8 @@ class Handler(BaseHTTPRequestHandler):
         project = params.get("project", [None])[0]
         if path == "/api/conversations":
             search = params.get("q", [None])[0]
-            rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache))
+            rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache),
+                                     cached_activity(cache))
             live = live_sessions(sessions_dir(config.projects_dir))
             starred = self.server.favorites.ids()
             favorites = favorite_rows(starred, live, config.projects_dir, cache)
@@ -331,6 +335,9 @@ class Handler(BaseHTTPRequestHandler):
                     row["favorite"] = True
             return json_response(200, {"projects_dir": str(config.projects_dir), "key": self.key_state(),
                                        "conversations": rows, "favorites": favorites})
+        if path == "/api/live":
+            live = live_sessions(sessions_dir(config.projects_dir))
+            return json_response(200, {"key": self.key_state(), "live": {i: public(info) for i, info in live.items()}})
         if path == "/api/recaps":
             ids = [i for i in params.get("ids", [""])[0].split(",") if i]
             if len(ids) > MAX_RECAP_IDS:
@@ -349,10 +356,10 @@ class Handler(BaseHTTPRequestHandler):
             if first is not None and not first.isdigit():
                 return json_response(400, {"error": "from must be a message index"})
             return self.conversation(config, cache, *match.groups(), params.get("source", ["main"])[0],
-                                     None if first is None else int(first))
+                                     None if first is None else int(first), params.get("at", [None])[0])
         return NOT_FOUND
 
-    def conversation(self, config, cache, conversation_id, view, source, first=None):
+    def conversation(self, config, cache, conversation_id, view, source, first=None, at=None):
         if view == "live":
             info = live_sessions(sessions_dir(config.projects_dir)).get(conversation_id)
             if info is None and find_conversation(conversation_id, config.projects_dir)[0] is None:
@@ -372,6 +379,10 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, {"bash_commands": bash_commands(path)})
         if view == "files":
             return json_response(200, {"files": touched_files(path)})
+        if view == "full":
+            log = dict(conversation_sources(path)).get(source)
+            text = log and full_text(log, config.prices, at)
+            return json_response(200, {"text": text}) if text is not None else json_response(404, {"error": "text not found"})
         if view == "messages":
             read = self.server.transcripts.get
             start = first
@@ -497,7 +508,7 @@ class Watch:
         self.config, self.sessions, self.id, self.source = config, sessions, conversation_id, source
         self.started = self.beat = time.monotonic()
         self.log = self.stamp = self.info = self.pane = None
-        self.live_key = self.text = self.problem = None
+        self.live_key = self.text = self.problem = self.shown = None
         self.rescan = self.next_activity = self.next_problem = 0.0
         self.first = True
 
@@ -542,18 +553,19 @@ class Watch:
             events.append(("log", {"size": stamp and stamp[0]}))
         info = self.session(now)
         key = info and (info["pid"], info["updated_ms"], info["status"])
-        # Leaving shell mode shows on the screen but not always in the registry, so the problem is checked again.
-        problem = self.problem
+        # Leaving shell mode and moving through a dialog show on the screen but not in the registry, so both are read
+        # again now and then.
+        problem, shown = self.problem, self.shown
         if key != self.live_key or (info and now >= self.next_problem):
-            problem = info and send_problem(info)
+            problem, shown = info and send_problem(info), info and public(info)
             self.next_problem = now + ACTIVITY_EVERY
-        if key != self.live_key or problem != self.problem:
-            self.live_key, self.problem = key, problem
+        if key != self.live_key or problem != self.problem or shown != self.shown:
+            self.live_key, self.problem, self.shown = key, problem, shown
             try:
                 self.pane = channel(info) if info else None
             except SendError:
                 self.pane = None
-            events.append(("live", {"live": info and public(info), "send_problem": problem}))
+            events.append(("live", {"live": shown, "send_problem": problem}))
         text = self.text
         if not (info and info["status"] == "busy" and self.pane):
             text = None
@@ -592,11 +604,10 @@ def favorite_rows(ids, live, projects_dir, cache):
         info = live.get(conversation_id)
         if path is not None:
             try:
-                mtime = path.stat().st_mtime
+                modified = iso_utc(active_time(path, cached_activity(cache)))
             except OSError:
                 continue
-            row = {"id": conversation_id, "title": title_of(path), "project": project_of(path),
-                   "modified": datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            row = {"id": conversation_id, "title": title_of(path), "project": project_of(path), "modified": modified}
         elif info is not None and info["entrypoint"] == "cli" and info["cwd"] and info["started"]:
             row = {"id": conversation_id, "title": "", "project": info["cwd"], "modified": info["started"], "new": True}
         else:
@@ -655,6 +666,10 @@ def recap_of(cache, config, conversation_id):
         return None if path is None else cache.get("recap", path, last_recap)
     except OSError:
         return None
+
+
+def cached_activity(cache):
+    return lambda path: cache.get("activity", path, last_activity)
 
 
 def cached_text(cache):

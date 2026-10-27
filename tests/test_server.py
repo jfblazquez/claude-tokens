@@ -359,6 +359,24 @@ class ApiErrorsTest(ServerTestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
 
 
+class FullTextApiTest(ServerTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        main = cls.projects / API / f"{CONV_A}.jsonl"
+        with main.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "attachment", "attachment": {"type": "skill_listing"},
+                                "rendered": [{"content": "y" * 5000 + "end"}]}) + "\n")
+
+    def test_whole_text_of_a_clipped_event(self):
+        status, data = self.get_json(f"/api/conversations/{CONV_A}/messages")
+        at = len(data["messages"]) - 1
+        self.assertLess(len(data["messages"][at]["text"]), data["messages"][at]["size"])
+        self.assertEqual(self.get_json(f"/api/conversations/{CONV_A}/full?at={at}"), (200, {"text": "y" * 5000 + "end"}))
+        self.assertEqual(self.get_json(f"/api/conversations/{CONV_A}/full?at={at + 1}"), (404, {"error": "text not found"}))
+        self.assertEqual(self.get_json(f"/api/conversations/{CONV_A}/full?at=0&source=nope"), (404, {"error": "text not found"}))
+
+
 class RecapsApiTest(ServerTestCase):
     @classmethod
     def setUpClass(cls):
