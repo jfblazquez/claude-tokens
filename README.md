@@ -475,10 +475,14 @@ ignore); `./x` and `../x` only from the folder. Anything else stays plain text.
   opens at most six connections to a host, shared by all its tabs.
 
 They open in a **side panel**, one tab each, that you can widen by dragging its
-edge. Its menu switches every panel to a bottom panel, floating windows (dragged
-by the title, resized from the corner, minimized to a tray) or an overlay; the
-browser remembers the choice and the sizes. Escape closes the panel that has the
-focus, except inside a terminal.
+edge. Tabs shrink to fit; those that still do not fit scroll with the mouse
+wheel, and the **⌄** menu at the end of the tabs (**+3 ⌄** when three are out of
+view) lists every open panel, closes them all and switches the layout to a bottom
+panel, floating windows (dragged by the title, resized from the corner,
+minimized to a tray) or an overlay; the browser remembers the choice and the
+sizes. With the bottom panel, the message box of a live conversation stays above
+it. Middle click closes a tab, and Escape the panel that has the focus, except
+inside a terminal.
 
 All of this needs the send key, since it reads any file you can read and runs
 commands as you. The terminal is [xterm.js](https://xtermjs.org/), bundled like

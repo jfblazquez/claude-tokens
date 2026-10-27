@@ -23,7 +23,7 @@ function store(key, value) {
   } catch (e) { /* kept for this page only */ }
 }
 
-// item: { key, title, kind, conv, body, z, rect, min, onShow(), onClose() }
+// item: { key, title, tip (the full name, on hover), kind, conv, body, z, rect, min, onShow(), onClose() }
 function storedSize() {
   try {
     const size = JSON.parse(stored(DOCK_SIZE_KEY, "{}"));
@@ -75,17 +75,71 @@ function setDockMode(mode) {
 const KIND_ICONS = { commit: "⎇", file: "▤", shell: "❯", pick: "≡" };
 
 function panelTab(item) {
-  return h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false", title: item.title,
+  return h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false", title: item.tip || item.title,
     onclick: () => focusPanel(item), onauxclick: (e) => { if (e.button === 1) closePanel(item); } },
   h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), h("span", { class: "dock-title" }, item.title),
-  h("button", { class: "dock-x", type: "button", title: "Close", "aria-label": `Close ${item.title}`,
+  h("button", { class: "dock-x", type: "button", title: "Close (middle click on the tab)", "aria-label": `Close ${item.title}`,
     onclick: (e) => { e.stopPropagation(); closePanel(item); } }, "×"));
 }
 
-function modeSwitch() {
-  return h("select", { class: "dock-mode", "aria-label": "Panel layout", title: "Panel layout",
-    onchange: (e) => setDockMode(e.target.value) },
-  DOCK_MODES.map(([value, label]) => h("option", { value, selected: value === dock.mode }, label)));
+// Tabs that do not fit stay reachable from here, next to the layout and closing them all.
+function panelMenu(tabs) {
+  const button = h("button", { class: "dock-menu-btn", type: "button", title: "Open panels and layout", "aria-haspopup": "menu" }, "⌄");
+  button.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (copyMenu && copyMenu.button === button) return closeCopyMenu(true);
+    openPanelMenu(button);
+  });
+  if (tabs) {
+    const count = () => {
+      const box = tabs.getBoundingClientRect();
+      const hidden = [...tabs.children].filter((t) => {
+        const r = t.getBoundingClientRect();
+        return r.right > box.right + 1 || r.left < box.left - 1;
+      }).length;
+      button.textContent = hidden ? `+${hidden} ⌄` : "⌄";
+      button.title = hidden ? `${hidden} more panel${hidden === 1 ? "" : "s"}, the layout and closing them all` : "Open panels and layout";
+    };
+    tabs.addEventListener("scroll", count, { passive: true });
+    new ResizeObserver(count).observe(tabs);
+  }
+  return button;
+}
+
+function openPanelMenu(button) {
+  closeCopyMenu(false);
+  const entry = (label, act, opts = {}) => h("button", { type: "button", role: opts.role || "menuitem", class: `copy-menu-item${opts.on ? " on" : ""}`,
+    "aria-checked": opts.role ? String(!!opts.on) : null, title: opts.tip || null,
+    onclick: () => { closeCopyMenu(false); act(); } }, label);
+  const items = [
+    ...dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), " ",
+      h("span", { class: "dock-title" }, item.title)], () => focusPanel(item), { on: item === dock.active, tip: item.tip || item.title })),
+    ...DOCK_MODES.map(([mode, label]) => entry(label, () => setDockMode(mode), { role: "menuitemradio", on: mode === dock.mode })),
+    entry("Close all panels", () => dock.items.slice().forEach(closePanel)),
+  ];
+  const n = dock.items.length;
+  const menu = h("div", { class: "copy-menu dock-menu", role: "menu", "aria-label": "Panels" },
+    h("div", { class: "copy-menu-head" }, `${n} open panel${n === 1 ? "" : "s"}`), items.slice(0, n),
+    h("div", { class: "copy-menu-head" }, "Layout"), items.slice(n, n + DOCK_MODES.length), h("hr"), items.slice(n + DOCK_MODES.length));
+  document.body.append(menu);
+  const r = button.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${r.bottom + 4 + menu.offsetHeight > innerHeight ? Math.max(8, r.top - 4 - menu.offsetHeight) : r.bottom + 4}px`;
+  const outside = (e) => { if (!menu.contains(e.target) && e.target !== button) closeCopyMenu(false); };
+  const keys = (e) => {
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "Escape" || e.key === "Tab") {
+      e.stopPropagation();
+      closeCopyMenu(e.key === "Escape");
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+    }
+  };
+  document.addEventListener("pointerdown", outside, true);
+  menu.addEventListener("keydown", keys);
+  copyMenu = { menu, button, cleanup: () => document.removeEventListener("pointerdown", outside, true) };
+  (items.find((b) => b.classList.contains("on")) || items[0]).focus();
 }
 
 function dragResize(handle, axis, read, write) {
@@ -111,6 +165,8 @@ function barHeight() {
 }
 
 function drawDock() {
+  // Its button is about to be drawn anew.
+  if (copyMenu && copyMenu.menu.classList.contains("dock-menu")) closeCopyMenu(false);
   if (!dock.el) {
     dock.el = h("div", { id: "dock" });
     document.body.append(dock.el);
@@ -128,9 +184,20 @@ function drawDock() {
   if (dock.mode === "float") return drawFloating();
   const active = dock.active || dock.items[0];
   const tabs = h("div", { class: "dock-tabs", role: "tablist" }, dock.items.map(panelTab));
-  const head = h("div", { class: "dock-head" }, tabs, modeSwitch(),
+  // No scrollbar under the tabs: the wheel scrolls them sideways and the menu lists the ones out of view.
+  tabs.addEventListener("wheel", (e) => {
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    e.preventDefault();
+    tabs.scrollLeft += e.deltaY;
+  }, { passive: false });
+  const head = h("div", { class: "dock-head" }, tabs, panelMenu(tabs),
     dock.mode === "modal" ? h("button", { class: "dock-x big", type: "button", title: "Close all panels",
       "aria-label": "Close all panels", onclick: () => { dock.items.slice().forEach(closePanel); } }, "×") : null);
+  requestAnimationFrame(() => {
+    const current = tabs.querySelector('[aria-selected="true"]');
+    if (current) tabs.scrollLeft = Math.max(0, Math.min(tabs.scrollLeft, current.offsetLeft - 8),
+      current.offsetLeft + current.offsetWidth + 8 - tabs.clientWidth);
+  });
   const bodies = dock.items.map((item) => {
     item.body.hidden = item !== active;
     return item.body;
@@ -180,7 +247,7 @@ function drawFloating() {
     }
     item.body.hidden = false;
     const title = h("div", { class: "win-title" }, h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]),
-      h("span", { class: "dock-title" }, item.title), modeSwitch(),
+      h("span", { class: "dock-title", title: item.tip || item.title }, item.tip || item.title), panelMenu(null),
       h("button", { class: "dock-x", type: "button", title: "Minimize", "aria-label": "Minimize",
         onclick: (e) => { e.stopPropagation(); item.min = true; drawDock(); } }, "–"),
       h("button", { class: "dock-x", type: "button", title: "Close", "aria-label": `Close ${item.title}`,
@@ -254,7 +321,7 @@ const HIGHLIGHT_MAX = 400_000;
 
 function openFile(conv, match, at = {}) {
   const item = openPanel(`file:${match.path}`, `${baseName(match.display)}`, "file", conv, (it) => {
-    it.title = match.display;
+    it.tip = match.display;
     it.body.append(skeleton(8));
     it.ready = api(`${convApi(conv, "/file")}?path=${encodeURIComponent(match.path)}`, { headers: sendHeaders() })
       .then((data) => { it.view = fileView(conv, it, data); }, (err) => panelError(it, err));
@@ -306,7 +373,8 @@ function openCommit(conv, sha, label, cwd) {
     item.body.append(skeleton(10));
     api(`${convApi(conv, "/commit")}?sha=${encodeURIComponent(sha)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}`, { headers: sendHeaders() })
       .then((data) => {
-        item.title = `${data.sha.slice(0, 10)} ${data.message.split("\n")[0]}`;
+        item.title = `${data.sha.slice(0, 7)} ${data.message.split("\n")[0]}`;
+        item.tip = `${data.sha}\n${data.message.split("\n")[0]}`;
         drawDock();
         commitView(conv, item, data);
       }, (err) => panelError(item, err));
@@ -447,6 +515,7 @@ function openShell(conv, cwd) {
   if (problem) return alert(problem);
   const n = ++shellCount;
   openPanel(`shell:${n}`, `Shell ${n} · ${baseName(cwd) || cwd}`, "shell", conv, (item) => {
+    item.tip = `Shell ${n} in ${cwd}`;
     const screen = h("div", { class: "term" });
     const status = h("span", { class: "muted" }, "Starting…");
     item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen);
