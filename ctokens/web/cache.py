@@ -1,9 +1,11 @@
-"""Per-file cache of parse results, valid while a log's mtime and size are unchanged."""
+"""Per-file caches of parse results: whole results valid while a log is unchanged, and growing transcripts."""
 from __future__ import annotations
 
 import os
 import threading
 from pathlib import Path
+
+from ..content import Transcript
 
 
 class StatsCache:
@@ -40,3 +42,21 @@ class StatsCache:
     def paths(self, namespace):
         with self._lock:
             return {path for name, path in self._entries if name == namespace}
+
+
+class TranscriptCache:
+    """One Transcript per log, advanced in place as the log grows; one log is read by one request at a time."""
+
+    def __init__(self):
+        self._entries = {}
+        self._lock = threading.Lock()
+
+    def get(self, path, prices):
+        path = Path(path)
+        with self._lock:
+            entry = self._entries.get(path)
+            if entry is None:
+                entry = self._entries[path] = (threading.Lock(), Transcript(path, prices))
+        lock, transcript = entry
+        with lock:
+            return list(transcript.advance())

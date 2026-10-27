@@ -289,10 +289,10 @@ class ApiError extends Error {
   }
 }
 
-async function api(path) {
+async function api(path, { method = "GET", headers = {}, body: payload } = {}) {
   let response;
   try {
-    response = await fetch(path, { headers: { Accept: "application/json" }, cache: "no-store" });
+    response = await fetch(path, { method, headers: { Accept: "application/json", ...headers }, body: payload, cache: "no-store" });
   } catch (_) {
     throw new ApiError("Could not reach the server. Check that claude_tokens.py --serve is still running, then retry.", 0, null);
   }
@@ -421,6 +421,7 @@ let projectsDir = null;
 function listRows(body) {
   const rows = Array.isArray(body) ? body : (body && body.conversations) || [];
   if (body && typeof body.projects_dir === "string") projectsDir = body.projects_dir;
+  if (body && typeof body.key === "string") keyState = body.key;
   for (const row of [...rows].reverse()) convRows.set(row.id, row);
   return rows;
 }
@@ -433,6 +434,8 @@ const lastFolder = (path) => String(path || "").split(/[\\/]/).filter(Boolean).p
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
 let listFilter = "";
+let listLiveOnly = false;
+const listShown = (rows) => rows.filter((r) => projectMatches(r, listFilter) && (!listLiveOnly || r.live));
 let listSearch = "";
 let listSearchDraft = "";
 let listSearchTimer = null;
@@ -558,15 +561,18 @@ async function loadRecaps(rows) {
 }
 
 function conversationCard(row, now) {
-  return h("a", { class: "conv-card", href: convHref(row.id) },
+  const card = h("a", { class: "conv-card", href: convHref(row.id, row.new ? "messages" : null) },
     h("div", { class: "conv-top" },
-      h("span", { class: "conv-title" }, row.title || h("span", { class: "untitled" }, "Untitled")),
+      h("span", { class: "conv-title" }, liveBadge(row.live, false, row.id), row.title || h("span", { class: "untitled" }, row.new ? "New session" : "Untitled")),
       h("time", { class: "conv-when", datetime: row.modified, title: `${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
-    recapLine(row),
+    row.new ? h("p", { class: "recap" }, "No messages yet") : recapLine(row),
     h("div", { class: "conv-meta" },
       h("span", { class: "project", title: row.project }, icon("folder"), lastFolder(row.project)),
       h("span", {}, fmtBytes(row.size_bytes)),
       row.subagents ? h("span", {}, `${fmt(row.subagents)} ${row.subagents === 1 ? "subagent" : "subagents"}`) : null));
+  // A button cannot sit inside the card's link, so it is laid over the card's corner instead.
+  const actions = row.live ? null : h("div", { class: "conv-actions" }, startError(row.id), startButton(row.id, "go-live"));
+  return h("div", { class: actions ? "conv-item has-actions" : "conv-item" }, card, actions);
 }
 
 // Rows come most recent first; each card group is a date range of the whole list, not only of the page.
@@ -600,7 +606,7 @@ function conversationCards(rows) {
 function listCount(data) {
   if (data && data.search !== listSearch) return [h("span", { class: "spinner small", "aria-hidden": "true" }), "Searching…"];
   if (!data) return "";
-  const shown = data.rows.filter((r) => projectMatches(r, listFilter)).length;
+  const shown = listShown(data.rows).length;
   return data.search ? `${fmt(shown)} conversations containing “${data.search}”` : `${fmt(shown)} of ${fmt(data.rows.length)} conversations`;
 }
 
@@ -608,7 +614,8 @@ VIEWS.list = {
   title: () => "Conversations",
   async load() {
     const search = listSearch;
-    const data = { search, rows: listRows(await api(search ? `/api/conversations?q=${encodeURIComponent(search)}` : "/api/conversations")) };
+    const data = { search, rows: listRows(await api(search ? `/api/conversations?q=${encodeURIComponent(search)}` : "/api/conversations",
+      { headers: sendHeaders() })) };
     if (!search) pruneRecaps(data.rows);
     Object.assign(listState, { data, at: new Date() });
     return data;
@@ -630,32 +637,168 @@ VIEWS.list = {
       },
       onchange: (e) => applyListSearch(e.target.value),
       onsearch: (e) => applyListSearch(e.target.value) });
+    const liveOnly = h("input", { id: "list-live", type: "checkbox", role: "switch", checked: listLiveOnly, autocomplete: "off",
+      onchange: (e) => { listLiveOnly = e.target.checked; listState.page = 0; show({ keepScroll: true }); } });
     return [h("div", { class: "page-head" }, h("h1", {}, "Conversations"),
       h("div", { class: "meta" }, projectsDir ? h("span", {}, "Projects folder ", folderLabel()) : null,
         h("span", {}, "Most recent first · times in UTC"))),
     h("div", { class: "toolbar" }, h("div", { class: "filters" }, h("label", { class: "field" }, "Project", project),
-      h("label", { class: "field" }, "Search", search)), count)];
+      h("label", { class: "field" }, "Search", search),
+      h("label", { class: "switch", title: "Only conversations running in a Claude Code process now" }, liveOnly, " Live only")), count)];
   },
   render({ search, rows }) {
     if (!rows.length && !search) {
       return emptyState("No conversations found", `No conversations were found in ${folderText()}. `
         + "Conversations appear here after you use Claude Code.");
     }
-    const shown = rows.filter((r) => projectMatches(r, listFilter));
+    const shown = listShown(rows);
     if (!shown.length) {
       const why = [listFilter && `a project matching “${listFilter}”`, search && `“${search}” in its title or messages`];
-      return emptyState("No matching conversations", `No conversation has ${why.filter(Boolean).join(" and ")}.`);
+      if (listLiveOnly && !why.some(Boolean)) return emptyState("No live conversations", "No conversation is running in a Claude Code process now.");
+      return emptyState("No matching conversations", `No ${listLiveOnly ? "live " : ""}conversation has ${why.filter(Boolean).join(" and ")}.`);
     }
     return h("div", { class: "section" }, conversationCards(shown));
   },
 };
+
+// ---------- live sessions: conversations running in a Claude Code process ----------
+// The key that lets this browser type into sessions; --serve prints a link that carries it once in ?key=.
+const SEND_KEY = "ctokens.sendKey";
+let sendKey = "";
+
+function takeSendKey() {
+  try {
+    sendKey = localStorage.getItem(SEND_KEY) || "";
+  } catch (e) { /* only a key from this page's link is known then */ }
+  const params = new URLSearchParams(location.search), key = params.get("key");
+  if (key == null) return;
+  sendKey = key;
+  try {
+    localStorage.setItem(SEND_KEY, key);
+  } catch (e) { /* the key then lasts for this page only */ }
+  params.delete("key");
+  const query = params.toString();
+  history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+}
+
+const sendHeaders = () => (sendKey ? { "X-Send-Key": sendKey } : {});
+// id -> { live, key, send_problem } from /live, fresher than the live field of the list rows.
+const liveStatus = new Map();
+
+function liveState(live) {
+  if (live.status === "waiting") return live.waiting_for ? `waiting · ${live.waiting_for}` : "waiting";
+  return live.status || "running";
+}
+
+// With an id the badge opens that conversation's Conversation tab, even from inside a card's link.
+function liveBadge(live, long = false, id = null) {
+  if (!live) return null;
+  const state = liveState(live);
+  const since = live.status_since ? ` since ${utcMinute(live.status_since)} UTC` : "";
+  const readOnly = live.read_only ? " · read only" : "";
+  const open = id ? (e) => { e.preventDefault(); e.stopPropagation(); location.hash = convHref(id, "messages"); } : null;
+  return h("span", { class: `live ${live.status || ""}${live.read_only ? " read-only" : ""}${id ? " link" : ""}`,
+    title: `Running in Claude Code process ${live.pid}${live.name ? ` (${live.name})` : ""} · ${state}${since}`
+      + (live.read_only ? `\nRead only: ${live.read_only_reason}` : "") + (id ? "\nClick to open the conversation" : ""), onclick: open },
+  h("i", { "aria-hidden": "true" }), long ? `Live · ${state}${readOnly}` : `Live${readOnly}`);
+}
+
+// ---------- starting claude in a new tmux window: GO LIVE (resume) and New session ----------
+// The send key state from the server's last answer: "ok", "missing", "wrong" or "disabled".
+let keyState = null;
+// id -> the action the server is starting for it; id -> why the last start failed.
+const starting = new Map();
+const startErrors = new Map();
+const START_POLL_MS = 2000;
+const START_POLLS = 15;
+
+const START_ACTIONS = {
+  "go-live": { label: "GO LIVE", cls: "go-live", title: "Resume this conversation (claude --resume) in a new tmux window" },
+  "new-session": { label: "New session", cls: "", title: "Start a new claude in this conversation's folder, in a new tmux window" },
+};
+
+function startButton(id, action) {
+  const spec = START_ACTIONS[action], busy = starting.get(id) === action;
+  const title = keyState === "ok" ? spec.title : KEY_NOTES[keyState] || KEY_NOTES.missing;
+  return h("button", { class: `btn ${spec.cls}`, type: "button", title, disabled: keyState !== "ok" || starting.has(id),
+    onclick: (e) => { e.preventDefault(); e.stopPropagation(); startSession(id, action); } }, busy ? "Starting…" : spec.label);
+}
+
+const startError = (id) => (startErrors.has(id) ? h("span", { class: "start-error", title: startErrors.get(id) }, startErrors.get(id)) : null);
+
+function redrawStart(id) {
+  const route = app.route;
+  if (!route) return;
+  if (route.view === "list" && app.phase === "ready") show({ keepScroll: true });
+  else if (route.id === id) redrawConvHead(id);
+}
+
+async function startSession(id, action) {
+  starting.set(id, action);
+  startErrors.delete(id);
+  redrawStart(id);
+  let data = null;
+  try {
+    data = await api(`/api/conversations/${encodeURIComponent(id)}/${action}`, { method: "POST",
+      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: "{}" });
+  } catch (err) {
+    startErrors.set(id, `Not started: ${err.message}`);
+  }
+  starting.delete(id);
+  if (data && !data.live) {
+    startErrors.set(id, action === "new-session" ? "Started in a new tmux window; it shows up in the list once Claude Code registers it."
+      : "Started in a new tmux window; waiting for Claude Code to register it.");
+  }
+  const opened = data && (action === "go-live" ? id : data.session_id);
+  if (!opened) {
+    redrawStart(id);
+    return;
+  }
+  // Straight to the Conversation tab, with the box focused as soon as the session can take a message.
+  focusComposerFor = opened;
+  await refreshList();
+  const target = convHref(opened, "messages");
+  if (location.hash !== target) location.hash = target;
+  else fetchLive(opened);
+  if (!data.live) await waitLive(opened);
+}
+
+// Until the resumed session shows up live, then the list or the conversation shows it like any other.
+async function waitLive(id) {
+  for (let i = 0; i < START_POLLS; i++) {
+    await refreshList();
+    if (app.route && app.route.id === id) await fetchLive(id);
+    if (liveOf(id)) break;
+    await new Promise((resolve) => setTimeout(resolve, START_POLL_MS));
+  }
+  if (liveOf(id)) startErrors.delete(id);
+  if (app.route && app.route.view === "list") load({ refresh: true });
+  else redrawStart(id);
+}
+
+const liveOf = (id) => (liveStatus.has(id) ? liveStatus.get(id).live : (convRows.get(id) || {}).live || null);
+
+async function fetchLive(id) {
+  let data;
+  try {
+    data = await api(`/api/conversations/${encodeURIComponent(id)}/live`, { headers: sendHeaders() });
+  } catch (_) {
+    return;
+  }
+  const old = liveStatus.get(id);
+  liveStatus.set(id, data);
+  keyState = data.key;
+  if (old && JSON.stringify(old) === JSON.stringify(data)) return;
+  redrawConvHead(id);
+  drawComposer();
+}
 
 // ---------- conversation header and tabs (R4.5) ----------
 const TABS = [["report", "Usage"], ["messages", "Conversation"], ["response", "Last response"], ["bash", "Bash commands"], ["files", "Files"]];
 
 async function refreshList() {
   try {
-    listRows(await api("/api/conversations"));
+    listRows(await api("/api/conversations", { headers: sendHeaders() }));
   } catch (_) {
     // The header falls back to the id; the view itself reports its own errors.
   }
@@ -673,6 +816,7 @@ function convEntries(id) {
 
 function clearConvCache() {
   Object.assign(convCache, { id: null, entries: new Map() });
+  liveStatus.clear();
   messagesState.anchor = null;
 }
 
@@ -724,7 +868,7 @@ async function loadConversation(route, path, { refresh = false, revalidate = fal
   const entries = convEntries(route.id);
   if (refresh && !revalidate) for (const [key, entry] of entries) if (key !== path) entry.stale = true;
   const [data] = await Promise.all([fetchConv(route.id, path, refresh),
-    (refresh && !revalidate) || !convRows.has(route.id) ? refreshList() : null]);
+    (refresh && !revalidate) || !convRows.has(route.id) ? refreshList() : null, fetchLive(route.id)]);
   prefetchConv(route.id);
   return data;
 }
@@ -750,10 +894,14 @@ function redrawConvHead(id) {
 
 function convHead(route) {
   const row = convRows.get(route.id), counts = convCounts.get(route.id) || {};
-  const title = (row && row.title) || convTasks.get(route.id) || "Untitled conversation";
+  const title = (row && row.title) || convTasks.get(route.id) || (row && row.new ? "New session" : "Untitled conversation");
   const resume = row ? `cd ${shellQuote(row.project)} && claude --resume ${shellQuote(route.id)}` : null;
-  const meta = [h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
-    resume ? copyButton(resume, resume, "Copy resume") : null)];
+  const live = liveOf(route.id);
+  const meta = [live ? h("span", {}, liveBadge(live, true, route.view === "messages" ? null : route.id), ` PID ${live.pid}`) : null,
+    h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
+      resume && !live ? copyButton(resume, resume, "Copy resume") : null),
+    h("span", { class: "conv-actions-head" }, live ? null : startButton(route.id, "go-live"), startButton(route.id, "new-session"),
+      startError(route.id))];
   if (row) {
     meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmtBytes(row.size_bytes)} · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
@@ -1254,22 +1402,32 @@ function messageItem(m, tools, showModel) {
     h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)));
 }
 
-function messageItems(messages, tools) {
+// context carries the day heading and the model last shown, so items appended later continue the list.
+function messageItems(messages, tools, context) {
   const items = [];
-  let day = null, model = null;
   for (const m of messages) {
-    const today = m.when ? m.when.toISOString().slice(0, 10) : "undated";
-    if (today !== day) {
+    const today = dayOf(m);
+    if (today !== context.day) {
       items.push(h("li", { class: "day" }, today === "undated" ? "No timestamp" : `${today} (UTC)`));
-      day = today;
-      model = null;
+      Object.assign(context, { day: today, model: null });
     }
-    const item = messageItem(m, tools, m.role === "assistant" && m.model !== model);
+    const item = messageItem(m, tools, m.role === "assistant" && m.model !== context.model);
     item.dataset.i = m.i;
     items.push(item);
-    if (m.role === "assistant") model = m.model;
+    if (m.role === "assistant") context.model = m.model;
   }
   return items;
+}
+
+const dayOf = (m) => (m.when ? m.when.toISOString().slice(0, 10) : "undated");
+
+function itemContext(messages) {
+  const context = { day: null, model: null };
+  for (const m of messages) {
+    if (dayOf(m) !== context.day) Object.assign(context, { day: dayOf(m), model: null });
+    if (m.role === "assistant") context.model = m.model;
+  }
+  return context;
 }
 
 const ellipsis = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
@@ -1370,6 +1528,232 @@ function messagesPath(route) {
   return withSource("/messages", messagesState.source);
 }
 
+// ---------- composer: typing into the running session, as if in its terminal ----------
+const STICK_MARGIN = 80;
+const composer = { id: null, el: null, text: null, button: null, note: null, sending: false, sent: null, error: null };
+
+const KEY_NOTES = {
+  disabled: "Sending is disabled on this server.",
+  missing: "To send messages from this browser, open once the link with ?key= that claude_tokens.py --serve printed.",
+  wrong: "The saved send key is from an earlier run of the server: open the link with ?key= it printed this time.",
+};
+
+function composerNote(status) {
+  if (status.live.read_only) return [`Read only: ${status.live.read_only_reason}`, "warn"];
+  if (composer.error) return [composer.error, "error"];
+  if (KEY_NOTES[status.key]) return [KEY_NOTES[status.key], "warn"];
+  if (status.send_problem) return [status.send_problem, "warn"];
+  const sent = composer.sent ? `Sent at ${utcTime(composer.sent)} UTC · ` : "";
+  return [`${sent}Typed into the session's terminal · Enter sends, Shift+Enter adds a line`, ""];
+}
+
+function buildComposer(id) {
+  const text = h("textarea", { id: "composer-text", rows: 2, placeholder: "Message to the running session", "aria-label": "Message to the running session",
+    onkeydown: (e) => {
+      if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+      e.preventDefault();
+      sendMessage();
+    },
+    oninput: () => { composer.error = null; drawComposer(); } });
+  const button = h("button", { class: "btn primary", type: "submit" }, "Send");
+  const note = h("div", { class: "composer-note", "aria-live": "polite" });
+  const working = h("div", { class: "composer-activity", hidden: true });
+  const el = h("form", { class: "composer", id: "composer", onsubmit: (e) => { e.preventDefault(); sendMessage(); } },
+    working, h("div", { class: "composer-row" }, text, button), note);
+  Object.assign(composer, { id, el, text, button, note, working, sending: false, sent: null, error: null });
+}
+
+const canSend = (status) => !!(status && status.live && status.key === "ok" && !status.send_problem);
+let focusComposerFor = null;
+
+// Only on the Conversation tab of a live conversation; the same node keeps the draft across refreshes.
+function drawComposer() {
+  const route = app.route, status = route && liveStatus.get(route.id);
+  if (!route || route.view !== "messages" || app.phase !== "ready" || !status || !status.live) {
+    if (composer.el) composer.el.remove();
+    return;
+  }
+  if (composer.id !== route.id) buildComposer(route.id);
+  composer.text.disabled = !!status.live.read_only;
+  composer.text.placeholder = status.live.read_only ? "Read only: this session cannot take messages" : "Message to the running session";
+  composer.button.disabled = !canSend(status) || composer.sending || !composer.text.value.trim();
+  composer.button.textContent = composer.sending ? "Sending…" : "Send";
+  const busy = status.live.status === "busy";
+  composer.working.hidden = !busy;
+  composer.working.replaceChildren(h("span", { class: "spinner small", "aria-hidden": "true" }),
+    busy && stream.id === route.id && stream.activity ? stream.activity : "Working…");
+  const [message, tone] = composerNote(status);
+  composer.note.textContent = message;
+  composer.note.className = `composer-note ${tone}`;
+  if (!composer.el.isConnected) $("main").append(composer.el);
+  if (focusComposerFor === route.id && canSend(status)) {
+    focusComposerFor = null;
+    composer.text.focus();
+  }
+}
+
+async function sendMessage() {
+  const id = composer.id, text = composer.text.value, status = liveStatus.get(id);
+  if (composer.sending || !text.trim() || !canSend(status)) return;
+  Object.assign(composer, { sending: true, error: null });
+  drawComposer();
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(id)}/send`, { method: "POST",
+      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+    if (composer.text.value === text) composer.text.value = "";
+    composer.sent = new Date();
+    liveStatus.set(id, { ...status, live: data.live });
+  } catch (err) {
+    composer.error = `Not sent: ${err.message}`;
+    fetchLive(id);
+  } finally {
+    composer.sending = false;
+    drawComposer();
+  }
+}
+
+const atBottom = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - STICK_MARGIN;
+
+// ---------- real time: the server pushes what changed in the open conversation ----------
+// log: the log grew, so the new messages are fetched and appended; live: the session's state; activity: its status line.
+const stream = { id: null, source: null, es: null, opened: false, activity: null };
+const tail = { busy: false, again: false };
+
+function watchConversation() {
+  const route = app.route;
+  const id = (route && route.id) || null, source = route && route.view === "messages" ? messagesState.source : "main";
+  if (stream.id === id && stream.source === source && (stream.es || !id)) return;
+  if (stream.es) stream.es.close();
+  Object.assign(stream, { id, source, es: null, opened: false, activity: null });
+  if (!id || typeof EventSource === "undefined") return;
+  const es = new EventSource(withSource(`/api/conversations/${encodeURIComponent(id)}/events`, source));
+  stream.es = es;
+  const mine = () => stream.es === es;
+  // A reconnect (server restarted, laptop woke up) may have missed changes, so it catches up once.
+  es.addEventListener("open", () => {
+    if (mine() && stream.opened) logGrew();
+    stream.opened = true;
+  });
+  es.addEventListener("log", () => { if (mine()) logGrew(); });
+  es.addEventListener("live", (e) => { if (mine()) liveChanged(id, JSON.parse(e.data)); });
+  es.addEventListener("activity", (e) => {
+    if (!mine()) return;
+    stream.activity = JSON.parse(e.data).text;
+    drawComposer();
+  });
+}
+
+function liveChanged(id, data) {
+  const old = liveStatus.get(id) || { key: keyState };
+  liveStatus.set(id, { ...old, live: data.live, send_problem: data.send_problem });
+  if (!data.live) stream.activity = null;
+  redrawConvHead(id);
+  drawComposer();
+}
+
+function logGrew() {
+  const route = app.route;
+  if (!route || !route.id) return;
+  // Other tabs reload when opened; the Conversation tab takes only what is new.
+  const current = route.view === "messages" ? messagesPath(route) : null;
+  for (const [path, entry] of convEntries(route.id)) if (path !== current) entry.stale = true;
+  if (current) pullTail();
+}
+
+// One request at a time; changes that arrive meanwhile are fetched right after it.
+async function pullTail() {
+  if (tail.busy) {
+    tail.again = true;
+    return;
+  }
+  tail.busy = true;
+  try {
+    do {
+      tail.again = false;
+      await appendNew();
+    } while (tail.again);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    tail.busy = false;
+  }
+}
+
+// The last response may still grow (each content block is written when it ends), so it is fetched again with what follows.
+function tailStart(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "assistant") return i;
+  return messages.length;
+}
+
+async function appendNew() {
+  const route = app.route, data = app.data;
+  if (!route || route.view !== "messages" || app.phase !== "ready" || !data || !data.messages) return;
+  const from = tailStart(data.messages);
+  const query = `${data.source === "main" ? "" : `source=${encodeURIComponent(data.source)}&`}from=${from}`;
+  const got = await api(`/api/conversations/${encodeURIComponent(route.id)}/messages?${query}`);
+  if (app.route !== route || app.data !== data) return;
+  if (got.total < from) {
+    load({ refresh: true, revalidate: true });
+    return;
+  }
+  patchMessages(route, data, from, got.messages);
+}
+
+// Replaces the messages from index from on, in the data and in the page, without drawing the rest again.
+function patchMessages(route, data, from, fresh) {
+  const before = data.messages.length;
+  data.messages = data.messages.slice(0, from).concat(fresh);
+  const list = document.querySelector(".msgs");
+  if (noteConvData(route.id, "/messages", data)) drawConvNav();
+  if (!list) {
+    renderedBodies.delete(data);
+    show({ keepScroll: true });
+    return;
+  }
+  const stick = atBottom();
+  const messages = prepared(data.messages), tools = toolsOf(messages), shown = shownOf(messages, tools);
+  let node = [...list.children].find((el) => el.dataset.i != null && Number(el.dataset.i) >= from);
+  if (node && node.previousElementSibling && node.previousElementSibling.classList.contains("day")) node = node.previousElementSibling;
+  while (node) {
+    const next = node.nextElementSibling;
+    node.remove();
+    node = next;
+  }
+  list.append(...messageItems(shown.filter((m) => m.i >= from), tools, itemContext(shown.filter((m) => m.i < from))));
+  list.dataset.key = `${data.source}|${messages.length}`;
+  const count = $("messages-count");
+  if (count) count.textContent = countText(messages);
+  if (stick) {
+    messagesState.unread = null;
+    dropNewNotice();
+    scrollToEnd();
+  } else if (messages.length > before && messagesState.unread == null) {
+    messagesState.unread = before;
+    requestAnimationFrame(showNewNotice);
+  }
+}
+
+// Same numbering as the CLI: tool results are not counted, since they render under their call, nor are events.
+function prepared(list) {
+  let n = 0;
+  return (list || []).map((m, i) => ({ ...m, blocks: m.blocks || [], i, n: numbered(m) ? ++n : null, when: parseStamp(m.timestamp) }));
+}
+
+function toolsOf(messages) {
+  const tools = { results: new Map(), calls: toolCalls(messages) };
+  for (const m of messages) for (const b of m.blocks) if (b.type === "tool_result") tools.results.set(b.tool_use_id, b);
+  return tools;
+}
+
+const shownOf = (messages, tools) => messages.filter((m) => !(m.kind === "tool_result" && m.blocks.every((b) => tools.calls.has(b.tool_use_id))));
+
+function countText(messages) {
+  const responses = messages.filter((m) => m.role === "assistant");
+  const cost = responses.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0);
+  return `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
+    + money(cost, responses.some((m) => m.price_estimated));
+}
+
 VIEWS.messages = convView(messagesPath, {
   title: (route) => `Conversation · ${convTitle(route)}`,
   load: (route, opts) => {
@@ -1381,10 +1765,7 @@ VIEWS.messages = convView(messagesPath, {
   enter: () => Object.assign(messagesState, { toBottom: true, restore: true }),
   leave: () => { messagesState.anchor = topMessage(); },
   render(data) {
-    let n = 0;
-    // Same numbering as the CLI: tool results are not counted, since they render under their call, nor are events.
-    const messages = (data.messages || []).map((m, i) => ({ ...m, blocks: m.blocks || [], i,
-      n: numbered(m) ? ++n : null, when: parseStamp(m.timestamp) }));
+    const messages = prepared(data.messages);
     // A refresh draws a new list over the one on screen: remember which message the reader was at, and what is new.
     const key = `${data.source}|${messages.length}`, old = document.querySelector(".msgs");
     const [oldSource, oldCount] = old && messagesState.id === app.route.id ? old.dataset.key.split("|") : [];
@@ -1393,11 +1774,7 @@ VIEWS.messages = convView(messagesPath, {
       messagesState.keep = top && top.el.dataset.i != null ? { i: Number(top.el.dataset.i), offset: top.offset } : null;
       if (messages.length > Number(oldCount) && messagesState.unread == null) messagesState.unread = Number(oldCount);
     }
-    const tools = { results: new Map(), calls: toolCalls(messages) };
-    for (const m of messages) for (const b of m.blocks) if (b.type === "tool_result") tools.results.set(b.tool_use_id, b);
-    const shown = messages.filter((m) => !(m.kind === "tool_result" && m.blocks.every((b) => tools.calls.has(b.tool_use_id))));
-    const responses = messages.filter((m) => m.role === "assistant");
-    const cost = responses.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0);
+    const tools = toolsOf(messages), shown = shownOf(messages, tools);
     const source = h("select", { id: "messages-source", "aria-label": "Source",
       onchange: (e) => { messagesState.source = e.target.value; load({ refresh: false }); } },
     (data.sources || []).map((s) => h("option", { value: s.id, selected: s.id === data.source }, sourceOption(s))));
@@ -1410,21 +1787,26 @@ VIEWS.messages = convView(messagesPath, {
             "aria-valuetext": LEVELS[messagesState.level],
             oninput: (e) => { setLevel(Number(e.target.value)); e.target.setAttribute("aria-valuetext", LEVELS[messagesState.level]); } }),
           h("span", { class: "level-name", id: "level-name" }, LEVELS[messagesState.level]))),
-      h("span", { class: "count" }, `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
-        + money(cost, responses.some((m) => m.price_estimated))));
+      h("span", { class: "count", id: "messages-count" }, countText(messages)));
     const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
     if (!shown.length) return [meta, toolbar, emptyState("No messages", "This log has no user or assistant messages yet.")];
-    return [meta, toolbar, h("ol", { class: `msgs lvl-${messagesState.level}`, "data-key": key }, messageItems(shown, tools))];
+    return [meta, toolbar, h("ol", { class: `msgs lvl-${messagesState.level}`, "data-key": key }, messageItems(shown, tools, itemContext([])))];
   },
   after: () => {
     const { anchor, restore, toBottom, keep, unread } = messagesState;
     Object.assign(messagesState, { anchor: null, restore: false, toBottom: false, keep: null });
+    drawComposer();
     const kept = keep && shownFrom(keep.i);
     if (kept) settleScroll(() => kept.getBoundingClientRect().top + window.scrollY - keep.offset);
     else if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
     else if (toBottom) scrollToEnd();
     if (unread != null) requestAnimationFrame(showNewNotice);
-    return dropNewNotice;
+    // The log may have grown while this tab was hidden or loading.
+    pullTail();
+    return () => {
+      dropNewNotice();
+      if (composer.el) composer.el.remove();
+    };
   },
 });
 
@@ -1771,7 +2153,9 @@ function show({ keepScroll = false } = {}) {
     if (typeof cleanup === "function") app.after.push(cleanup);
   }
   if (keepScroll) window.scrollTo(0, y);
-  const again = focused && focused.tagName === "INPUT" && !$("main").contains(focused) ? $(focused.id) : null;
+  watchConversation();
+  // Inputs are drawn anew and the composer's textarea is put back, so focus is lost either way.
+  const again = focused && /^(INPUT|TEXTAREA)$/.test(focused.tagName) && document.activeElement !== focused ? $(focused.id) : null;
   if (again) {
     again.focus();
     if (typeof focused.selectionStart === "number") again.setSelectionRange(focused.selectionStart, focused.selectionEnd);
@@ -1824,6 +2208,7 @@ function navigate() {
   if (hit.scrollY) window.scrollTo(0, hit.scrollY);
   if (hit.stale) load({ refresh: true, revalidate: true });
   else if (route.id) prefetchConv(route.id);
+  if (route.id && !hit.stale) fetchLive(route.id);
 }
 
 function setAutoRefresh(on) {
@@ -1836,6 +2221,7 @@ function updateToTop() {
 }
 
 function boot() {
+  takeSendKey();
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
   document.body.append(h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
     onclick: () => window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "↑"));
