@@ -271,7 +271,8 @@ for weeks. Each card
 has the title (the name given with `/rename`, else the one Claude Code
 generated), the time, the newest recap Claude Code wrote while you were away
 (cut to two lines; hover it for all of it), the project's last folder (hover it
-for the full path), the size and the subagents. Filter and search cover every
+for the full path; a click shows only that project's conversations), the size
+and the subagents. Filter and search cover every
 conversation, not just the current page. Coming back from a conversation shows
 the list at once, on the same page and scroll position, and reloads it behind.
 

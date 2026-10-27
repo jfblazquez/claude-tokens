@@ -165,6 +165,8 @@ body:has(#composer) .to-top { bottom: 140px; }
 .composer-note { font-size: var(--t-xs); color: var(--muted); overflow-wrap: anywhere; }
 .composer-note.warn { color: var(--warn-fg); }
 .composer-note.error { color: var(--err-fg); }
+.project.link { cursor: pointer; font: inherit; color: inherit; }
+.project.link:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Stats */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--s3); }

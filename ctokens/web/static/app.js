@@ -678,6 +678,19 @@ const folderText = () => projectsDir || "the projects folder";
 
 const lastFolder = (path) => String(path || "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
 
+// Inside a card's link a click filters the list by the project instead of opening the conversation.
+function projectChip(project) {
+  return h("span", { class: "project link", title: `${project}\nClick to show only this project's conversations`,
+    onclick: (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      listFilter = project || "";
+      listState.page = 0;
+      show();
+      window.scrollTo(0, 0);
+    } }, icon("folder"), lastFolder(project));
+}
+
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
 let listFilter = "";
@@ -815,8 +828,7 @@ function conversationCard(row, now) {
         titleText(row.id, row.title, "card", href, h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
       h("time", { class: "conv-when", datetime: row.modified, title: `Last message ${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
     row.new ? h("p", { class: "recap" }, "No messages yet") : recapLine(row),
-    h("div", { class: "conv-meta" },
-      h("span", { class: "project", title: row.project }, icon("folder"), lastFolder(row.project)),
+    h("div", { class: "conv-meta" }, projectChip(row.project),
       h("span", {}, fmtBytes(row.size_bytes)),
       row.subagents ? h("span", {}, `${fmt(row.subagents)} ${row.subagents === 1 ? "subagent" : "subagents"}`) : null));
   // A button cannot sit inside the card's link, so it is laid over the card's corner instead.
@@ -956,7 +968,7 @@ function favoriteItem(row) {
     h("a", { class: "fav-title", href }, titleText(row.id, row.title, "favorite", href,
       h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
     h("span", { class: "fav-state" }, startError(row.id), row.live ? liveBadge(row.live, false, row.id) : startButton(row.id, "go-live")),
-    h("span", { class: "project", title: row.project }, icon("folder"), lastFolder(row.project)));
+    projectChip(row.project));
 }
 
 function favoritesSection() {
