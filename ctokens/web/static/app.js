@@ -1855,6 +1855,46 @@ function messageBlocks(m, tools) {
 
 const lineText = (text) => h("span", { class: "event-text" }, text);
 
+const XML_TAG = /<(\/?)([A-Za-z][\w.:-]*)(?:\s[^<>]*)?>/g;
+
+// A text that is nothing but <tag>…</tag> sections, as [{ tag, text }]; null when anything lies outside them. cut: the
+// text was clipped, so the last section may have lost its closing tag.
+function xmlSections(text, cut = false) {
+  const sections = [];
+  let rest = text.trim();
+  while (rest) {
+    const open = rest.match(/^<([A-Za-z][\w.:-]*)(?:\s[^<>]*)?>/);
+    if (!open) return null;
+    let depth = 0, end = -1, close = 0;
+    for (const m of rest.matchAll(XML_TAG)) {
+      if (m[2] !== open[1]) continue;
+      depth += m[1] ? -1 : 1;
+      if (!depth) {
+        [end, close] = [m.index, m.index + m[0].length];
+        break;
+      }
+    }
+    if (end < 0 && !cut) return null;
+    const inner = rest.slice(open[0].length, end < 0 ? rest.length : end);
+    sections.push({ tag: open[1], text: inner.replace(/^\n/, "").replace(/\n$/, "") });
+    rest = end < 0 ? "" : rest.slice(close).trim();
+  }
+  return sections.length ? sections : null;
+}
+
+const tagChips = (sections) => (sections || []).map((x) => h("span", { class: "chip tag" }, x.tag));
+
+// The tags go next to the block's name, and the text shows without them.
+function eventBlock(m) {
+  const cut = m.size > m.text.length, sections = xmlSections(m.text, cut);
+  const name = h("span", { class: "chip" }, m.kind === "system" ? `system · ${m.name}` : m.name);
+  if (!sections) return lazyDetails("blk", [name], () => clippedPre(m));
+  const missing = m.size - m.text.length;
+  const part = (x, last) => ({ text: x.text, size: x.text.length + (last ? missing : 0) });
+  return lazyDetails("blk", [name, ...tagChips(sections)], () => (sections.length === 1 ? clippedPre(part(sections[0], true))
+    : sections.map((x, i) => labelled(x.tag, part(x, i === sections.length - 1)))));
+}
+
 function eventBody(m) {
   if (m.kind === "refusal") return [h("b", {}, "Refused"), m.category ? h("span", { class: "badge" }, m.category) : null, lineText(m.text)];
   if (m.kind === "compaction") {
@@ -1866,7 +1906,7 @@ function eventBody(m) {
   if (m.kind === "recap") return [h("b", {}, "Recap"), lineText(m.text)];
   if (m.kind === "info") return [h("b", {}, "Info"), lineText(m.text)];
   if (m.kind === "hook") return [h("b", {}, m.name ? `Hook · ${m.name}` : "Hook"), lineText(m.text)];
-  return [lazyDetails("blk", [h("span", { class: "chip" }, m.kind === "system" ? `system · ${m.name}` : m.name)], () => clippedPre(m))];
+  return [eventBlock(m)];
 }
 
 function eventItem(m, time) {
@@ -1912,8 +1952,17 @@ function messageItem(m, tools, showModel) {
     h("div", { class: "msg-head" }, num, time, h("b", {}, KIND_LABELS[m.kind]),
       m.queued ? h("span", { class: "badge warn", title: "Typed while the model was still working" }, "sent mid-turn") : null,
       m.title ? h("span", { class: "event-text" }, m.title) : null),
-    h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)),
+    h("div", { class: "msg-body" }, collapsed ? asideBlocks(m, tools) : messageBlocks(m, tools)),
     messageCopy(m));
+}
+
+// Injected context is mostly one <system-reminder> or <task-notification>: the tag shows on the closed block.
+function asideBlocks(m, tools) {
+  const only = m.blocks.length === 1 && m.blocks[0].type === "text" ? m.blocks[0] : null;
+  const sections = only && xmlSections(only.text);
+  if (!sections) return lazyDetails("blk", "Show", () => messageBlocks(m, tools));
+  return lazyDetails("blk", ["Show", ...tagChips(sections)], () => sections.flatMap((x) => [
+    sections.length > 1 ? h("div", { class: "lbl" }, x.tag) : null, messageBlocks({ ...m, blocks: [{ ...only, text: x.text }] }, tools)]));
 }
 
 // context carries the day heading and the model last shown, so items appended later continue the list.
