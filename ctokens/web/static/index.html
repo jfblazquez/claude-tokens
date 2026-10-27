@@ -7,10 +7,11 @@
 <meta name="style-nonce" content="{{style-nonce}}">
 <title>claude-tokens</title>
 <link rel="icon" href="data:,">
-<link rel="stylesheet" href="/static/vendor/hljs-light.css" media="not all and (prefers-color-scheme: dark)">
-<link rel="stylesheet" href="/static/vendor/hljs-dark.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/static/vendor/hljs-light.css" data-hljs="light" media="not all and (prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/static/vendor/hljs-dark.css" data-hljs="dark" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="/static/vendor/xterm.css">
 <link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
 <script src="/static/vendor/chart.umd.min.js" defer></script>
 <script src="/static/vendor/marked.min.js" defer></script>
 <script src="/static/vendor/purify.min.js" defer></script>
@@ -34,6 +35,7 @@
       <span class="loaded" id="loaded" title="Loaded at" aria-live="polite">--:--:-- UTC</span>
       <button class="btn" id="refresh" type="button">Refresh</button>
       <label class="switch" title="Refresh every 30 seconds"><input type="checkbox" id="auto" role="switch" autocomplete="off"> Auto 30 s</label>
+      <button class="btn icon-btn settings-btn" id="settings" type="button" title="Settings" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false">⚙</button>
     </div>
   </div>
 </header>

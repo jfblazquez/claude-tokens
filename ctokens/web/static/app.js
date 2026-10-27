@@ -3002,6 +3002,73 @@ function setAutoRefresh(on) {
   app.timer = on ? setInterval(() => { if (!app.busy) load({ refresh: true }); }, 30000) : null;
 }
 
+// ---------- settings: themes and the console font, saved in this browser by theme.js ----------
+let settingsBox = null;
+
+function closeSettings(refocus) {
+  if (!settingsBox) return;
+  settingsBox.cleanup();
+  settingsBox.el.remove();
+  settingsBox = null;
+  $("settings").setAttribute("aria-expanded", "false");
+  if (refocus) $("settings").focus();
+}
+
+function segmented(name, label, choices, value) {
+  return h("fieldset", {}, h("legend", {}, label), h("div", { class: "seg" }, choices.map(([v, text]) =>
+    h("label", {}, h("input", { type: "radio", name, value: v, checked: v === value,
+      onchange: () => saveThemeSettings({ [name]: v }) }), text))));
+}
+
+function settingsField(label, attrs, onchange) {
+  const input = h("input", { ...attrs, oninput: (e) => onchange(e.target.value) });
+  return h("label", {}, label, input);
+}
+
+function openSettings() {
+  const s = themeSettings();
+  const sample = h("pre", { class: "term-sample", "aria-hidden": "true" }, "$ git diff -w\n",
+    h("span", { class: "r" }, "-    Windows Console"), "\n", h("span", { class: "g" }, "+    Windows Terminal!"), "\n",
+    h("span", { class: "b" }, "~/project"), " $ ");
+  const paintSample = () => {
+    const t = themeSettings();
+    Object.assign(sample.style, { fontFamily: [t.font, cssVar("--mono")].filter(Boolean).join(", "), fontSize: `${t.size}pt`,
+      lineHeight: String(t.lineHeight) });
+  };
+  const el = h("section", { class: "settings", id: "settings-box", role: "dialog", "aria-label": "Settings" },
+    h("h2", {}, "Settings"),
+    segmented("ui", "Interface", [["system", "System"], ["light", "Light"], ["dark", "Dark"]], s.ui),
+    segmented("console", "Console", [["ui", "As interface"], ["light", "Light"], ["dark", "Dark"]], s.console),
+    h("fieldset", {}, h("legend", {}, "Console font"),
+      h("div", { class: "settings-row" },
+        settingsField("Font", { type: "text", name: "font", value: s.font, spellcheck: "false", autocomplete: "off" },
+          (v) => saveThemeSettings({ font: v })),
+        settingsField("Size (pt)", { type: "number", name: "size", value: s.size, min: 6, max: 40, step: 0.5 },
+          (v) => saveThemeSettings({ size: v })),
+        settingsField("Line height", { type: "number", name: "lineHeight", value: s.lineHeight, min: 1, max: 3, step: 0.05 },
+          (v) => saveThemeSettings({ lineHeight: v }))),
+      sample),
+    h("div", { class: "settings-foot" }, h("span", { class: "muted" }, "Saved in this browser"),
+      h("button", { class: "btn small", type: "button", onclick: () => { saveThemeSettings(null); closeSettings(false); openSettings(); } },
+        "Reset")));
+  document.body.append(el);
+  paintSample();
+  const button = $("settings"), r = button.getBoundingClientRect();
+  el.style.left = `${Math.max(8, Math.min(r.right - el.offsetWidth, innerWidth - el.offsetWidth - 8))}px`;
+  el.style.top = `${r.bottom + 6}px`;
+  const outside = (e) => { if (!el.contains(e.target) && !button.contains(e.target)) closeSettings(false); };
+  const keys = (e) => { if (e.key === "Escape") closeSettings(true); };
+  document.addEventListener("pointerdown", outside, true);
+  el.addEventListener("keydown", keys);
+  window.addEventListener("themechange", paintSample);
+  settingsBox = { el, cleanup: () => {
+    document.removeEventListener("pointerdown", outside, true);
+    window.removeEventListener("themechange", paintSample);
+  } };
+  button.setAttribute("aria-expanded", "true");
+  el.querySelector("input:checked").focus();
+}
+
 // Each shows while its end of the page is more than a screen away.
 function updateToTop() {
   $("to-top").hidden = window.scrollY < window.innerHeight;
@@ -3029,7 +3096,9 @@ function boot() {
   $("refresh").addEventListener("click", () => load({ refresh: true }));
   window.addEventListener("hashchange", navigate);
   document.addEventListener("visibilitychange", streamWhileVisible);
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  $("settings").addEventListener("click", () => (settingsBox ? closeSettings(false) : openSettings()));
+  window.addEventListener("themechange", (e) => {
+    if (!e.detail.ui) return;
     renderedBodies = new WeakMap();
     if (app.route) show({ keepScroll: true });
   });

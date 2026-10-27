@@ -34,7 +34,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 VENDOR_FILES = ("chart.umd.min.js", "marked.min.js", "purify.min.js", "highlight.min.js",
                 "hljs-light.css", "hljs-dark.css", "xterm.min.js", "xterm.css")
 STATIC_FILES = {"/": "index.html", "/static/app.js": "app.js", "/static/analysis.js": "analysis.js", "/static/panels.js": "panels.js",
-                "/static/app.css": "app.css",
+                "/static/theme.js": "theme.js", "/static/app.css": "app.css",
                 **{f"/static/vendor/{name}": f"vendor/{name}" for name in VENDOR_FILES}}
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8"}

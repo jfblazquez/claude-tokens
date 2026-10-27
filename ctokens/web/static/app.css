@@ -1,4 +1,4 @@
-/* Design tokens (design §8.4): light values here, dark values under prefers-color-scheme. */
+/* Design tokens (design §8.4): light values here, dark values under data-theme, which theme.js sets. */
 :root {
   --bg: #f5f6f8; --surface: #ffffff; --surface-2: #eef1f5; --fg: #17202b; --muted: #5a6575; --border: #dce1e8;
   --accent: #2253b8; --accent-fg: #ffffff; --accent-soft: #e6edfb; --grid: #e7eaf0;
@@ -11,15 +11,13 @@
   --t-xs: 12px; --t-sm: 13px; --t-md: 14px; --t-lg: 17px; --t-xl: 22px; --t-num: 26px;
   color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0e1319; --surface: #151c25; --surface-2: #1c2531; --fg: #e3e8ef; --muted: #96a2b2; --border: #283241;
-    --accent: #7ea6ff; --accent-fg: #0e1319; --accent-soft: #1d2b47; --grid: #222c3a;
-    --warn-bg: #362709; --warn-fg: #ffd592; --err-bg: #3a1616; --err-fg: #ffb4b4; --code-bg: #0b1015;
-    --skeleton: #1f2935; --live: #5ccf74; --live-bg: #16301d; --star: #ffc53d;
-    --m0: #ff8a4c; --m1: #5aa9ff; --m2: #5ccf74; --m3: #d68af0; --m4: #f584ad; --m5: #3fc6dc; --m6: #a8d94e; --m7: #a3acb8;
-    color-scheme: dark;
-  }
+:root[data-theme="dark"] {
+  --bg: #0e1319; --surface: #151c25; --surface-2: #1c2531; --fg: #e3e8ef; --muted: #96a2b2; --border: #283241;
+  --accent: #7ea6ff; --accent-fg: #0e1319; --accent-soft: #1d2b47; --grid: #222c3a;
+  --warn-bg: #362709; --warn-fg: #ffd592; --err-bg: #3a1616; --err-fg: #ffb4b4; --code-bg: #0b1015;
+  --skeleton: #1f2935; --live: #5ccf74; --live-bg: #16301d; --star: #ffc53d;
+  --m0: #ff8a4c; --m1: #5aa9ff; --m2: #5ccf74; --m3: #d68af0; --m4: #f584ad; --m5: #3fc6dc; --m6: #a8d94e; --m7: #a3acb8;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -449,12 +447,11 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 }
 
 /* Panels (panels.js): commit diffs, files and shells, in one of four layouts */
-:root { --term-bg: #fbfcfd; --term-fg: #17202b; --add-bg: #e6f6ea; --add-fg: #1a6b2f; --del-bg: #fdeceb; --del-fg: #9b1c1c;
-  --hunk-bg: #eef3fc; --ref: #0b6b80; }
-@media (prefers-color-scheme: dark) {
-  :root { --term-bg: #0b1015; --term-fg: #e3e8ef; --add-bg: #12301c; --add-fg: #7ee49a; --del-bg: #3a1a1a; --del-fg: #ffa8a8;
-    --hunk-bg: #18243a; --ref: #5fd0e4; }
-}
+/* The console has a theme of its own (data-console): One Half Light and One Half Dark, as in Windows Terminal. */
+:root { --add-bg: #e6f6ea; --add-fg: #1a6b2f; --del-bg: #fdeceb; --del-fg: #9b1c1c; --hunk-bg: #eef3fc; --ref: #0b6b80;
+  --term-bg: #fafafa; --term-fg: #383a42; --term-red: #e45649; --term-green: #50a14f; --term-blue: #0184bc; }
+:root[data-theme="dark"] { --add-bg: #12301c; --add-fg: #7ee49a; --del-bg: #3a1a1a; --del-fg: #ffa8a8; --hunk-bg: #18243a; --ref: #5fd0e4; }
+:root[data-console="dark"] { --term-bg: #282c34; --term-fg: #dcdfe4; --term-red: #e06c75; --term-green: #98c379; --term-blue: #61afef; }
 .ref { color: var(--ref); text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; border-radius: 3px; }
 .ref:hover, .ref:focus-visible { text-decoration-style: solid; background: var(--accent-soft); }
 .ref-file.many::after { content: "⋯"; font-size: 0.8em; margin-left: 1px; color: var(--muted); }
@@ -551,10 +548,11 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
 .fv-text code, .fv-text code.hljs, .dl code.hljs { display: inline; background: none; padding: 0; font-size: inherit; overflow: visible; }
 .fv-mark { position: absolute; left: 0; right: 0; background: rgba(255, 196, 0, 0.22); border-left: 3px solid #e0a800; pointer-events: none; }
 
-.term { flex: 1; min-height: 0; padding: 6px 0 0 8px; background: var(--term-bg); }
+.term { flex: 1; min-height: 0; padding: 6px 0 0 8px; background: var(--term-bg); color-scheme: light; }
+:root[data-console="dark"] .term { color-scheme: dark; }
 .term .xterm { height: 100%; }
 .term .xterm-viewport { background: var(--term-bg) !important; }
-.xterm-probe { position: absolute; visibility: hidden; white-space: pre; font-family: var(--mono); font-size: 13px; }
+.xterm-probe { position: absolute; visibility: hidden; white-space: pre; }
 
 .commit-head { padding: var(--s3) var(--s4); border-bottom: 1px solid var(--border); display: grid; gap: var(--s2); }
 .commit-subject { font-size: var(--t-lg); font-weight: 650; }
@@ -594,3 +592,29 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
   body.dock-side main, body.dock-side .appbar-in { margin-right: 0; }
   .dock.side { width: 100vw; }
 }
+
+/* Settings: themes and the console font */
+.settings-btn { font-size: 16px; line-height: 1; padding: 4px 7px; }
+.settings { position: fixed; z-index: 40; display: grid; gap: var(--s3); width: min(340px, calc(100vw - 16px)); padding: var(--s3) var(--s4);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); }
+.settings h2 { font-size: var(--t-md); }
+.settings fieldset { display: grid; gap: var(--s1); margin: 0; padding: 0; border: 0; min-width: 0; }
+.settings legend { padding: 0; margin-bottom: var(--s1); color: var(--muted); font-size: var(--t-xs); font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; }
+.seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg label { flex: 1; position: relative; padding: 5px 8px; text-align: center; font-size: var(--t-sm); cursor: pointer; white-space: nowrap; }
+.seg label + label { border-left: 1px solid var(--border); }
+.seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.seg label:has(input:checked) { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-row { display: grid; grid-template-columns: 1fr auto auto; gap: var(--s2); align-items: end; }
+.settings-row label { display: grid; gap: 2px; font-size: var(--t-xs); color: var(--muted); min-width: 0; }
+.settings-row input { font: inherit; font-size: var(--t-sm); color: var(--fg); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px; min-width: 0; }
+.settings-row input[type="number"] { width: 64px; }
+.term-sample { margin: 0; padding: 6px 10px; border-radius: 6px; background: var(--term-bg); color: var(--term-fg); white-space: pre;
+  overflow: hidden; }
+.term-sample .g { color: var(--term-green); }
+.term-sample .b { color: var(--term-blue); }
+.term-sample .r { color: var(--term-red); }
+.settings-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); font-size: var(--t-xs); }

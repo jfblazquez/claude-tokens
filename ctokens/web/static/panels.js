@@ -604,16 +604,42 @@ function streamShells() {
 function measureCell(term, el) {
   const dims = term._core && term._core._renderService && term._core._renderService.dimensions;
   if (dims && dims.css && dims.css.cell && dims.css.cell.width) return dims.css.cell;
-  const probe = h("span", { class: "xterm-probe" }, "W".repeat(50));
+  const { fontFamily, fontSize, lineHeight } = term.options;
+  const probe = h("span", { class: "xterm-probe", css: { fontFamily, fontSize: `${fontSize}px`, lineHeight: String(lineHeight) } },
+    "W".repeat(50));
   el.append(probe);
   const box = { width: probe.offsetWidth / 50 || 8, height: probe.offsetHeight || 17 };
   probe.remove();
   return box;
 }
 
-function terminalTheme() {
-  return { background: cssVar("--term-bg"), foreground: cssVar("--term-fg"), cursor: cssVar("--accent"),
-    selectionBackground: cssVar("--accent-soft") };
+// One Half Light and One Half Dark, the schemes of Windows Terminal.
+const TERMINAL_THEMES = {
+  light: { background: "#fafafa", foreground: "#383a42", cursor: "#4f525d", cursorAccent: "#fafafa", selectionBackground: "#383a4233",
+    black: "#383a42", red: "#e45649", green: "#50a14f", yellow: "#c18301", blue: "#0184bc", magenta: "#a626a4", cyan: "#0997b3",
+    white: "#fafafa", brightBlack: "#4f525d", brightRed: "#df6c75", brightGreen: "#98c379", brightYellow: "#e4c07a",
+    brightBlue: "#61afef", brightMagenta: "#c577dd", brightCyan: "#56b5c1", brightWhite: "#ffffff" },
+  dark: { background: "#282c34", foreground: "#dcdfe4", cursor: "#ffffff", cursorAccent: "#282c34", selectionBackground: "#ffffff40",
+    black: "#282c34", red: "#e06c75", green: "#98c379", yellow: "#e5c07b", blue: "#61afef", magenta: "#c678dd", cyan: "#56b6c2",
+    white: "#dcdfe4", brightBlack: "#5a6374", brightRed: "#e06c75", brightGreen: "#98c379", brightYellow: "#e5c07b",
+    brightBlue: "#61afef", brightMagenta: "#c678dd", brightCyan: "#56b6c2", brightWhite: "#dcdfe4" },
+};
+
+// The size is in points, as in Windows Terminal; the generic monospace fonts stand in when the chosen one is missing.
+function terminalOptions() {
+  const s = themeSettings();
+  return { theme: TERMINAL_THEMES[resolvedThemes().term], fontFamily: [s.font, cssVar("--mono") || "monospace"].filter(Boolean).join(", "),
+    fontSize: Math.round(s.size * 4 / 3 * 100) / 100, lineHeight: s.lineHeight };
+}
+
+const terminals = new Set();
+
+function restyleTerminals() {
+  const options = terminalOptions();
+  for (const t of terminals) {
+    Object.assign(t.term.options, options);
+    requestAnimationFrame(t.fit);
+  }
 }
 
 function openShell(conv, cwd) {
@@ -626,8 +652,7 @@ function openShell(conv, cwd) {
     const status = h("span", { class: "muted" }, "Starting…");
     const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
     item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen, note);
-    const term = new Terminal({ fontFamily: cssVar("--mono") || "monospace", fontSize: 13, cursorBlink: true, scrollback: 5000,
-      theme: terminalTheme(), allowProposedApi: false });
+    const term = new Terminal({ ...terminalOptions(), cursorBlink: true, scrollback: 5000, allowProposedApi: false });
     const sh = { id: null, queue: "", sending: false, cols: 80, rows: 24, ended: false };
     let opened = false;
     const fit = () => {
@@ -674,6 +699,8 @@ function openShell(conv, cwd) {
     });
     term.attachCustomKeyEventHandler((e) => !(e.type === "keydown" && e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
       && e.key.toLowerCase() === "v"));
+    const styled = { term, fit };
+    terminals.add(styled);
     item.onShow = () => {
       fit();
       if (item === dock.active || dock.mode === "float") term.focus();
@@ -689,6 +716,7 @@ function openShell(conv, cwd) {
     item.onClose = () => {
       if (sh.id && shellStream.shells.delete(sh.id)) streamShells();
       if (sh.id && !sh.ended) postJson(`/api/shells/${sh.id}/close`, {}).catch(() => {});
+      terminals.delete(styled);
       term.dispose();
     };
     new ResizeObserver(() => fit()).observe(screen);
@@ -957,6 +985,7 @@ function startPanels() {
   // A hidden tab gives its connection back; the shells pick up from the byte they had reached.
   document.addEventListener("visibilitychange", streamShells);
   window.addEventListener("resize", () => { if (dock.items.length) drawDock(); });
+  window.addEventListener("themechange", restyleTerminals);
   const main = $("main");
   linker.observer = new MutationObserver((records) => {
     for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1 && !n.classList.contains("ref")) linker.queue.add(n);
