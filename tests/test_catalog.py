@@ -7,7 +7,7 @@ from unittest import mock
 
 from fixtures import AMBIGUOUS, API, BILLING, CONV_A, CONV_B, CONV_EMPTY, build_projects, write_jsonl, user
 
-from ctokens.catalog import conversation_rows, find_conversation, list_conversations
+from ctokens.catalog import conversation_rows, find_conversation, last_recap, list_conversations
 
 
 class ConversationRowsTest(unittest.TestCase):
@@ -79,6 +79,48 @@ class ConversationRowsTest(unittest.TestCase):
                                  text_of=lambda p: read.append(p) or "")
         self.assertEqual(len(rows), 5)
         self.assertEqual(read, [])
+
+
+def recap(content, stamp):
+    return {"type": "system", "subtype": "away_summary", "content": content, "timestamp": stamp, "uuid": stamp}
+
+
+class LastRecapTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, *events):
+        write_jsonl(self.path, events, 1790000000)
+
+    def test_newest_recap_without_the_config_hint(self):
+        self.write(user("Start", "/w", "2026-09-28T10:00:00.000Z", "u1"),
+                   recap("Old state. (disable recaps in /config)", "2026-09-28T10:05:00.000Z"),
+                   recap("We fixed the parser; next, run the tests. (disable recaps in /config)", "2026-09-28T11:00:00.000Z"),
+                   user("More", "/w", "2026-09-28T11:01:00.000Z", "u2"))
+        self.assertEqual(last_recap(self.path), {"text": "We fixed the parser; next, run the tests.",
+                                                 "timestamp": "2026-09-28T11:00:00.000Z"})
+
+    def test_none_without_a_recap(self):
+        self.write(user("Mentions away_summary in a prompt", "/w", "2026-09-28T10:00:00.000Z", "u1"))
+        self.assertIsNone(last_recap(self.path))
+        self.assertIsNone(last_recap(Path(self.tmp.name) / "missing.jsonl"))
+        self.write()
+        self.assertIsNone(last_recap(self.path))
+
+    def test_skips_broken_and_empty_recaps(self):
+        self.write(recap("Kept.", "2026-09-28T10:00:00.000Z"), recap(" (disable recaps in /config)", "2026-09-28T10:01:00.000Z"),
+                   '{"subtype":"away_summary", broken', "[\"away_summary\"]")
+        self.assertEqual(last_recap(self.path)["text"], "Kept.")
+
+    def test_recap_split_across_blocks(self):
+        filler = [user("x" * 300, "/w", "2026-09-28T10:00:00.000Z", f"u{i}") for i in range(20)]
+        self.write(*filler, recap("Far from the end.", "2026-09-28T09:00:00.000Z"), *filler)
+        self.assertEqual(last_recap(self.path), last_recap(self.path, block=7))
+        self.assertEqual(last_recap(self.path, block=7)["text"], "Far from the end.")
 
 
 class FindConversationTest(unittest.TestCase):

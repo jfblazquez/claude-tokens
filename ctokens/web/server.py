@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
-from ..catalog import conversation_rows, conversation_text, find_conversation, project_path_of, session_title
+from ..catalog import (conversation_rows, conversation_text, find_conversation, last_recap, project_path_of,
+                       session_title)
 from ..content import bash_commands, conversation_messages, last_response, touched_files, transcript
 from ..logs import discover, file_stats, parse_log
 from ..reports import report, scan_totals, totals_report
@@ -31,6 +32,7 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 MAX_DISCARDED_BODY = 1 << 20
+MAX_RECAP_IDS = 100
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages))?")
 
 
@@ -116,6 +118,11 @@ class Handler(BaseHTTPRequestHandler):
                                                                           *cached_meta(cache),
                                                                           params.get("q", [None])[0],
                                                                           cached_text(cache))})
+        if path == "/api/recaps":
+            ids = [i for i in params.get("ids", [""])[0].split(",") if i]
+            if len(ids) > MAX_RECAP_IDS:
+                return json_response(400, {"error": f"at most {MAX_RECAP_IDS} ids per request"})
+            return json_response(200, {"recaps": {i: recap_of(cache, config, i) for i in ids}})
         if path == "/api/totals":
             return json_response(200, cached_totals(cache, config, project))
         match = CONVERSATION_ROUTE.fullmatch(path)
@@ -194,6 +201,15 @@ def cached_meta(cache):
     def meta(path):
         return cache.get("meta", path, lambda p: (project_path_of(p), session_title(p)))
     return (lambda path: meta(path)[0]), (lambda path: meta(path)[1])
+
+
+def recap_of(cache, config, conversation_id):
+    """None also for an unknown or ambiguous id: the list shows those without a recap."""
+    path, _ = find_conversation(conversation_id, config.projects_dir)
+    try:
+        return None if path is None else cache.get("recap", path, last_recap)
+    except OSError:
+        return None
 
 
 def cached_text(cache):

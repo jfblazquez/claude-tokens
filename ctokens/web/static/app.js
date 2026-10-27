@@ -78,6 +78,7 @@ const ICON_PATHS = {
     "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"],
   check: ["M20 6 9 17l-5-5"],
   failed: ["M18 6 6 18", "m6 6 12 12"],
+  folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
 };
 
 function icon(name) {
@@ -186,27 +187,12 @@ function renderTable(columns, rows, opts = {}) {
   let dir = remembered ? remembered.dir : opts.dir || -1;
   let page = opts.page || 0;
   const wrap = h("div", { class: "card scroll" });
-  const pager = opts.pageSize ? h("nav", { class: "pager", "aria-label": "Pages" }) : null;
+  const pager = opts.pageSize ? pagerNav() : null;
   const cls = (...names) => names.filter(Boolean).join(" ") || null;
   const setPage = (n) => {
     page = n;
     if (opts.onPage) opts.onPage(page);
   };
-
-  function drawPager(total) {
-    const pages = Math.max(1, Math.ceil(total / opts.pageSize));
-    const first = page * opts.pageSize;
-    const go = (n) => () => {
-      setPage(n);
-      draw();
-      window.scrollTo(0, 0);
-    };
-    const button = (label, n, title) => h("button", { class: "btn", type: "button", title, disabled: n === page || n < 0 || n >= pages, onclick: go(n) }, label);
-    pager.hidden = pages < 2;
-    pager.replaceChildren(button("«", 0, "First page"), button("‹ Previous", page - 1, "Previous page"),
-      h("span", { class: "count" }, `${fmt(first + 1)}–${fmt(Math.min(first + opts.pageSize, total))} of ${fmt(total)} · page ${fmt(page + 1)} of ${fmt(pages)}`),
-      button("Next ›", page + 1, "Next page"), button("»", pages - 1, "Last page"));
-  }
 
   function draw() {
     const col = columns.find((c) => c.key === sortKey);
@@ -250,11 +236,25 @@ function renderTable(columns, rows, opts = {}) {
       ? h("tfoot", {}, h("tr", { class: "total" }, opts.footer.map((cell, i) => h("td", { class: cls(columns[i] && columns[i].num && "num") }, cell))))
       : null;
     wrap.replaceChildren(h("table", {}, h("thead", {}, head), h("tbody", {}, body), foot));
-    if (pager) drawPager(data.length);
+    if (pager) drawPager(pager, page, opts.pageSize, data.length, (n) => { setPage(n); draw(); });
   }
 
   draw();
   return pager ? h("div", { class: "paged" }, wrap, pager) : wrap;
+}
+
+const pagerNav = () => h("nav", { class: "pager", "aria-label": "Pages" });
+
+// go(n) redraws page n; the page is then shown from the top.
+function drawPager(pager, page, pageSize, total, go) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const first = page * pageSize;
+  const button = (label, n, title) => h("button", { class: "btn", type: "button", title, disabled: n === page || n < 0 || n >= pages,
+    onclick: () => { go(n); window.scrollTo(0, 0); } }, label);
+  pager.hidden = pages < 2;
+  pager.replaceChildren(button("«", 0, "First page"), button("‹ Previous", page - 1, "Previous page"),
+    h("span", { class: "count" }, `${fmt(first + 1)}–${fmt(Math.min(first + pageSize, total))} of ${fmt(total)} · page ${fmt(page + 1)} of ${fmt(pages)}`),
+    button("Next ›", page + 1, "Next page"), button("»", pages - 1, "Last page"));
 }
 
 // ---------- states (R11.5) ----------
@@ -428,9 +428,7 @@ function listRows(body) {
 const folderLabel = () => (projectsDir ? copyable(h("b", { class: "mono" }, projectsDir), projectsDir) : "the projects folder");
 const folderText = () => projectsDir || "the projects folder";
 
-const pathTail = (path) => String(path || "").split(/[\\/]/).filter(Boolean).slice(-2).join("/");
-// The last two levels of a path, so a deep project folder does not widen the list.
-const shortPath = (path) => (String(path || "").split(/[\\/]/).filter(Boolean).length > 2 ? `…/${pathTail(path)}` : String(path || ""));
+const lastFolder = (path) => String(path || "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
 
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
@@ -471,6 +469,134 @@ function dateGroup(iso, now) {
   return `${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
+// Today's and yesterday's conversations show the time only: their group already says the day.
+function cardTime(iso, now) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toISOString().slice(11, 16);
+  return ["Today", "Yesterday"].includes(dateGroup(iso, now)) ? time : `${MONTHS[d.getUTCMonth()].slice(0, 3)} ${d.getUTCDate()}, ${time}`;
+}
+
+// ---------- recaps: the newest one of each conversation, loaded behind the list ----------
+const RECAP_KEY = "ctokens.recaps";
+const RECAP_BATCH = 20;
+// id -> { modified, recap }: a stored recap holds while its conversation's modified time is unchanged.
+const recapStore = readRecaps();
+const recapFailed = new Set();
+let recapRun = 0;
+
+function readRecaps() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RECAP_KEY) || "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveRecaps() {
+  try {
+    localStorage.setItem(RECAP_KEY, JSON.stringify(recapStore));
+  } catch (e) {
+    // Private mode or a full quota: the recaps are fetched again next time.
+  }
+}
+
+function pruneRecaps(rows) {
+  const ids = new Set(rows.map((r) => r.id));
+  for (const id of Object.keys(recapStore)) if (!ids.has(id)) delete recapStore[id];
+  saveRecaps();
+}
+
+const storedRecap = (id, modified) => (recapStore[id] && recapStore[id].modified === modified ? recapStore[id] : null);
+
+// `code` spans as code; an unpaired backtick stays as text.
+function recapText(text) {
+  const parts = text.split("`");
+  return parts.map((part, i) => (i % 2 === 0 ? part : i < parts.length - 1 ? h("code", {}, part) : `\`${part}`));
+}
+
+function fillRecap(el) {
+  const { id, modified } = el.dataset;
+  const entry = storedRecap(id, modified);
+  const pending = !entry && !recapFailed.has(id);
+  const text = entry && entry.recap ? entry.recap.text : "";
+  el.hidden = !pending && !text;
+  el.classList.toggle("loading", pending);
+  el.setAttribute("aria-busy", String(pending));
+  el.title = text;
+  el.replaceChildren(...(pending ? [h("i", { class: "recap-skel", "aria-hidden": "true" })] : recapText(text)));
+}
+
+function recapLine(row) {
+  const el = h("p", { class: "recap", "data-id": row.id, "data-modified": row.modified });
+  fillRecap(el);
+  return el;
+}
+
+// In the order given; a newer call takes over, while the answers already asked for are still kept.
+async function loadRecaps(rows) {
+  const run = ++recapRun;
+  recapFailed.clear();
+  const pending = [...new Map(rows.filter((r) => !storedRecap(r.id, r.modified)).map((r) => [r.id, r])).values()];
+  for (let i = 0; i < pending.length && run === recapRun; i += RECAP_BATCH) {
+    const batch = pending.slice(i, i + RECAP_BATCH);
+    let body = null;
+    try {
+      body = await api(`/api/recaps?ids=${batch.map((r) => r.id).join(",")}`);
+    } catch (e) {
+      // Shown without a recap until the list is drawn again.
+      if (run === recapRun) for (const r of pending.slice(i)) recapFailed.add(r.id);
+    }
+    if (body) {
+      for (const r of batch) recapStore[r.id] = { modified: r.modified, recap: (body.recaps || {})[r.id] || null };
+      saveRecaps();
+    }
+    for (const el of document.querySelectorAll(".recap[data-id]")) fillRecap(el);
+    if (!body) return;
+  }
+}
+
+function conversationCard(row, now) {
+  return h("a", { class: "conv-card", href: convHref(row.id) },
+    h("div", { class: "conv-top" },
+      h("span", { class: "conv-title" }, row.title || h("span", { class: "untitled" }, "Untitled")),
+      h("time", { class: "conv-when", datetime: row.modified, title: `${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
+    recapLine(row),
+    h("div", { class: "conv-meta" },
+      h("span", { class: "project", title: row.project }, icon("folder"), lastFolder(row.project)),
+      h("span", {}, fmtBytes(row.size_bytes)),
+      row.subagents ? h("span", {}, `${fmt(row.subagents)} ${row.subagents === 1 ? "subagent" : "subagents"}`) : null));
+}
+
+// Rows come most recent first; each card group is a date range of the whole list, not only of the page.
+function conversationCards(rows) {
+  const now = Date.now();
+  const groupOf = (r) => dateGroup(r.modified, now);
+  const sizes = countBy(rows, groupOf);
+  const list = h("div", { class: "conv-list" });
+  const pager = pagerNav();
+  const draw = () => {
+    const pages = Math.max(1, Math.ceil(rows.length / LIST_PAGE_SIZE));
+    listState.page = Math.min(listState.page, pages - 1);
+    const shown = rows.slice(listState.page * LIST_PAGE_SIZE, (listState.page + 1) * LIST_PAGE_SIZE);
+    const items = [];
+    let current = null;
+    for (const r of shown) {
+      if (groupOf(r) !== current) {
+        current = groupOf(r);
+        items.push(h("h2", { class: "conv-group" }, current, h("span", { class: "n" }, fmt(sizes.get(current)))));
+      }
+      items.push(conversationCard(r, now));
+    }
+    list.replaceChildren(...items);
+    drawPager(pager, listState.page, LIST_PAGE_SIZE, rows.length, (n) => { listState.page = n; draw(); });
+    loadRecaps([...shown, ...rows]);  // this page first
+  };
+  draw();
+  return h("div", { class: "paged" }, list, pager);
+}
+
 function listCount(data) {
   if (data && data.search !== listSearch) return [h("span", { class: "spinner small", "aria-hidden": "true" }), "Searching…"];
   if (!data) return "";
@@ -483,6 +609,7 @@ VIEWS.list = {
   async load() {
     const search = listSearch;
     const data = { search, rows: listRows(await api(search ? `/api/conversations?q=${encodeURIComponent(search)}` : "/api/conversations")) };
+    if (!search) pruneRecaps(data.rows);
     Object.assign(listState, { data, at: new Date() });
     return data;
   },
@@ -519,19 +646,7 @@ VIEWS.list = {
       const why = [listFilter && `a project matching “${listFilter}”`, search && `“${search}” in its title or messages`];
       return emptyState("No matching conversations", `No conversation has ${why.filter(Boolean).join(" and ")}.`);
     }
-    const now = Date.now();
-    return h("div", { class: "section" }, renderTable([
-      { key: "modified", label: "Modified (UTC)", render: (r) => h("span", { class: "mono" }, utcMinute(r.modified)) },
-      { key: "title", label: "Title", cls: "wrap",
-        render: (r) => h("a", { href: convHref(r.id) }, r.title ? r.title : h("span", { class: "muted" }, "Untitled")) },
-      { key: "project", label: "Project", cls: "path", sortValue: (r) => pathTail(r.project),
-        render: (r) => h("span", { class: "mono", title: r.project }, breakable(shortPath(r.project))) },
-      { key: "size_bytes", label: "Size", num: true, render: (r) => fmtBytes(r.size_bytes) },
-      { key: "subagents", label: "Subagents", num: true, render: (r) => fmt(r.subagents) },
-      { key: "id", label: "Conversation id", render: (r) => h("span", { class: "mono muted" }, r.id) },
-    ], shown, { id: "list", sortKey: "modified", dir: -1, onRow: (r) => { location.hash = convHref(r.id); },
-      group: { key: "modified", label: (r) => dateGroup(r.modified, now) },
-      pageSize: LIST_PAGE_SIZE, page: listState.page, onPage: (page) => { listState.page = page; } }));
+    return h("div", { class: "section" }, conversationCards(shown));
   },
 };
 
