@@ -95,6 +95,7 @@ details.footnote > div { margin-top: var(--s1); overflow-wrap: anywhere; }
 .to-top { position: fixed; right: var(--s4); bottom: var(--s4); z-index: 6; width: 40px; height: 40px; padding: 0; border-radius: 50%;
   font-size: var(--t-lg); box-shadow: 0 2px 8px rgb(0 0 0 / 0.18); }
 .to-top[hidden] { display: none; }
+#to-bottom:not([hidden]) + #to-top { transform: translateY(-48px); }
 .new-messages { position: fixed; left: 50%; bottom: var(--s6); z-index: 6; transform: translateX(-50%);
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.2); }
 body:has(#composer) .new-messages { bottom: 140px; }

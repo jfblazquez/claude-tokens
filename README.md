@@ -288,7 +288,9 @@ current tab and the others reload the next time you open them.
 Inside a conversation the top bar holds its tabs and a **← Conversations**
 button, so they stay on screen however far you scroll. The **Conversation** tab
 keeps the message you were reading when you switch to another tab and back. A
-round **↑** button at the bottom right of every page goes back to the top.
+round **↑** button at the bottom right of every page goes back to the top, and
+a **↓** one under it goes to the bottom; each shows while that end is more than a
+screen away.
 
 In the **Conversation** tab a collapsed Bash call shows its description, or the
 first 100 characters of the command when it has none. The **Detail** slider

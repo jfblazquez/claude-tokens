@@ -2968,17 +2968,27 @@ function setAutoRefresh(on) {
   app.timer = on ? setInterval(() => { if (!app.busy) load({ refresh: true }); }, 30000) : null;
 }
 
+// Each shows while its end of the page is more than a screen away.
 function updateToTop() {
   $("to-top").hidden = window.scrollY < window.innerHeight;
+  $("to-bottom").hidden = document.documentElement.scrollHeight - window.scrollY - window.innerHeight < window.innerHeight;
 }
 
 function boot() {
   takeSendKey();
   startPanels();
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
-  document.body.append(h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
-    onclick: () => window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "↑"));
+  const scroll = (top) => window.scrollTo({ top, behavior: reduceMotion.matches ? "auto" : "smooth" });
+  // In this order, so the up arrow can stand above the down one while both show.
+  document.body.append(
+    h("button", { class: "btn to-top", id: "to-bottom", type: "button", title: "Go to bottom", "aria-label": "Go to bottom", hidden: true,
+      onclick: () => scroll(document.documentElement.scrollHeight) }, "↓"),
+    h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
+      onclick: () => scroll(0) }, "↑"));
   window.addEventListener("scroll", updateToTop, { passive: true });
+  window.addEventListener("resize", updateToTop);
+  // New messages make the page longer without any scrolling.
+  new ResizeObserver(updateToTop).observe($("main"));
   const auto = $("auto");
   auto.checked = false;
   auto.addEventListener("change", () => setAutoRefresh(auto.checked));
