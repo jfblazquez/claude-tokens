@@ -10,7 +10,8 @@ from fixtures import (API, BILLING, CONV_A, CONV_B, LAST_RESPONSE, SUB_EXPLORE, 
                       text, tool, usage, write_jsonl)
 
 from ctokens.cli import show_bash_commands
-from ctokens.content import CLIP, bash_commands, conversation_messages, last_response, touched_files, transcript
+from ctokens.content import (CLIP, bash_commands, conversation_messages, full_text, last_response, touched_files,
+                              transcript)
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
 from ctokens.pricing import estimated_cost, load_prices, rate_of, usage_key
 from ctokens.reports import report, scan_totals, totals_report
@@ -411,6 +412,25 @@ class MessagesTest(ContentTest):
         self.assertEqual((result["tool_use_id"], result["is_error"], result["size"]), ("t1", True, CLIP + 18))
         self.assertEqual(len(result["text"]), CLIP)
         self.assertIsNone(messages[5]["estimated_cost_usd"])
+
+    def test_full_text_of_what_the_transcript_clips(self):
+        use, big = usage(1, 1), "x" * CLIP + "tail"
+        path = self.conversation("full", [
+            {"type": "attachment", "attachment": {"type": "skill_listing"}, "rendered": [{"content": big + "-event"}]},
+            assistant("m1", "claude-opus-5-5", None, "e1", [tool("t1", "Write", file_path="/a.py", content=big + "-input")], use),
+            {**tool_result("t1", big + "-result"), "toolUseResult": {"structuredPatch": [
+                {"oldStart": 1, "oldLines": 0, "newStart": 1, "newLines": 1, "lines": ["+" + big + "-patch"]}]}},
+        ], {})
+        messages = transcript(path, self.prices)
+        self.assertEqual(len(messages[0]["text"]), CLIP)
+        for at, end in (("0", "-event"), ("1.0.input.1", "-input"), ("2.0", "-result"), ("2.0.patch", "-patch")):
+            with self.subTest(at=at):
+                self.assertTrue(full_text(path, self.prices, at).endswith(big + end))
+        for at in ("9", "1.5", "1.0.input.7", "0.0", "", "1.0.input", "-1", None):
+            with self.subTest(at=at):
+                self.assertIsNone(full_text(path, self.prices, at))
+        # Other transcripts still clip.
+        self.assertEqual(len(transcript(path, self.prices)[0]["text"]), CLIP)
 
     def test_tool_summary_falls_back_to_the_first_text(self):
         use = usage(1, 1)

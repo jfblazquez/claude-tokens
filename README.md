@@ -312,7 +312,9 @@ browser remembers it for every conversation, and level 2 is the default:
 A refresh (or auto
 refresh) keeps the message you are reading in place; when new messages arrive,
 a **Read new messages** button near the bottom of the screen takes you to the
-first one, and goes away once you scroll to them. An event whose text is wrapped
+first one, and goes away once you scroll to them. Tool inputs and results and
+the text of events show their first 4,000 characters; **Show all**, under one
+that is longer, loads the rest of that text only. An event whose text is wrapped
 in tags, such as `<system-reminder>…</system-reminder>`, shows without them, the
 tag next to the event's name, and so does injected context. Opened tool calls are
 syntax-highlighted: Bash commands as shell, Write/Edit text and Read results by

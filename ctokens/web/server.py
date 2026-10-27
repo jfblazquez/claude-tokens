@@ -18,7 +18,7 @@ from urllib.parse import parse_qs
 
 from ..catalog import (CONVERSATION_ID, active_time, clean_title, conversation_rows, conversation_text, find_conversation,
                        iso_utc, last_activity, last_recap, project_path_of, save_title, session_title)
-from ..content import bash_commands, conversation_messages, last_response, touched_files
+from ..content import bash_commands, conversation_messages, full_text, last_response, touched_files
 from ..live import (SendError, activity, answer, channel, go_live, live_sessions, new_session, public, read_record, rename,
                     send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
@@ -47,7 +47,7 @@ COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosnif
 MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
-CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live))?")
+CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live|full))?")
 ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|new-session|rename|favorite|resolve|shell)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
 REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
@@ -356,10 +356,10 @@ class Handler(BaseHTTPRequestHandler):
             if first is not None and not first.isdigit():
                 return json_response(400, {"error": "from must be a message index"})
             return self.conversation(config, cache, *match.groups(), params.get("source", ["main"])[0],
-                                     None if first is None else int(first))
+                                     None if first is None else int(first), params.get("at", [None])[0])
         return NOT_FOUND
 
-    def conversation(self, config, cache, conversation_id, view, source, first=None):
+    def conversation(self, config, cache, conversation_id, view, source, first=None, at=None):
         if view == "live":
             info = live_sessions(sessions_dir(config.projects_dir)).get(conversation_id)
             if info is None and find_conversation(conversation_id, config.projects_dir)[0] is None:
@@ -379,6 +379,10 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, {"bash_commands": bash_commands(path)})
         if view == "files":
             return json_response(200, {"files": touched_files(path)})
+        if view == "full":
+            log = dict(conversation_sources(path)).get(source)
+            text = log and full_text(log, config.prices, at)
+            return json_response(200, {"text": text}) if text is not None else json_response(404, {"error": "text not found"})
         if view == "messages":
             read = self.server.transcripts.get
             start = first

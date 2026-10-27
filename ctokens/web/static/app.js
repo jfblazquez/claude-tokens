@@ -1786,8 +1786,35 @@ const resultImages = (result) => (result && result.images && result.images.lengt
 // A result that is nothing but its images: the "[image]" placeholders say nothing the thumbnails do not.
 const onlyImages = (result) => !!(result.images && /^(\s*\[image\])+\s*$/.test(result.text));
 
-const clippedPre = (item, lang = null) => [codePre(item.text, lang), item.size > item.text.length
-  ? h("div", { class: "footnote" }, `Showing the first ${fmt(item.text.length)} of ${fmt(item.size)} characters`) : null];
+// Past this a whole text shows without highlighting, which would hold the page for seconds.
+const FULL_HIGHLIGHT_MAX = 400_000;
+
+// A clipped text says so, and Show all fetches the rest only when asked; unwrap(text) takes the part shown from it.
+function clippedPre(item, lang = null) {
+  const pre = codePre(item.text, lang);
+  if (!(item.size > item.text.length)) return [pre];
+  const note = h("div", { class: "footnote" }, `Showing the first ${fmt(item.text.length)} of ${fmt(item.size)} characters`);
+  const route = app.route;
+  if (item.at == null || !route || !route.id) return [pre, note];
+  const url = `/api/conversations/${encodeURIComponent(route.id)}/full?at=${item.at}&source=${encodeURIComponent(messagesState.source)}`;
+  const button = h("button", { class: "btn small", type: "button", title: `Load the other ${fmt(item.size - item.text.length)} characters`,
+    onclick: async () => {
+      button.disabled = true;
+      button.textContent = "Loading…";
+      try {
+        const text = (await api(url)).text;
+        const shown = item.unwrap ? item.unwrap(text) : text;
+        pre.replaceWith(codePre(shown, shown.length <= FULL_HIGHLIGHT_MAX ? lang : null));
+        note.remove();
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = "Show all";
+        button.title = `Not loaded: ${err.message}`;
+      }
+    } }, "Show all");
+  note.append(" · ", button);
+  return [pre, note];
+}
 
 const labelled = (label, item, lang = null) => h("div", {},
   h("div", { class: "lbl" }, coloured(lang) ? `${label} · ${languageName(lang)}` : label), clippedPre(item, lang));
@@ -1890,7 +1917,9 @@ function eventBlock(m) {
   const name = h("span", { class: "chip" }, m.kind === "system" ? `system · ${m.name}` : m.name);
   if (!sections) return lazyDetails("blk", [name], () => clippedPre(m));
   const missing = m.size - m.text.length;
-  const part = (x, last) => ({ text: x.text, size: x.text.length + (last ? missing : 0) });
+  // Only the last section can be the clipped one; its whole text is the event's, from which that section is taken.
+  const part = (x, last) => ({ text: x.text, size: x.text.length + (last ? missing : 0), at: last ? m.at : null,
+    unwrap: (text) => { const all = xmlSections(text); return all ? all[all.length - 1].text : text; } });
   return lazyDetails("blk", [name, ...tagChips(sections)], () => (sections.length === 1 ? clippedPre(part(sections[0], true))
     : sections.map((x, i) => labelled(x.tag, part(x, i === sections.length - 1)))));
 }
@@ -2442,7 +2471,24 @@ function patchMessages(route, data, from, fresh) {
 // Same numbering as the CLI: tool results are not counted, since they render under their call, nor are events.
 function prepared(list) {
   let n = 0;
-  return (list || []).map((m, i) => ({ ...m, blocks: m.blocks || [], i, n: numbered(m) ? ++n : null, when: parseStamp(m.timestamp) }));
+  return (list || []).map((m, i) => markClipped({ ...m, blocks: m.blocks || [], i, n: numbered(m) ? ++n : null, when: parseStamp(m.timestamp) }));
+}
+
+// Where each clipped text sits in the transcript, as the server's full view takes it, so Show all can ask for the rest.
+// On copies: the messages as the server sent them are compared with its next answer.
+function markClipped(m) {
+  const cut = (x) => !!x && x.size > (x.text || "").length;
+  if (m.role === "event" && cut(m)) m.at = `${m.i}`;
+  m.blocks = m.blocks.map((b, j) => {
+    if (b.type === "tool_result" && (cut(b) || cut(b.patch))) {
+      return { ...b, at: cut(b) ? `${m.i}.${j}` : null, patch: cut(b.patch) ? { ...b.patch, at: `${m.i}.${j}.patch` } : b.patch };
+    }
+    if (b.type === "tool_use" && (b.input || []).some(cut)) {
+      return { ...b, input: b.input.map((f, k) => (cut(f) ? { ...f, at: `${m.i}.${j}.input.${k}` } : f)) };
+    }
+    return b;
+  });
+  return m;
 }
 
 function toolsOf(messages) {
