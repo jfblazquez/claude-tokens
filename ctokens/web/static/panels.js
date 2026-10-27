@@ -337,20 +337,45 @@ function fileView(conv, item, data) {
   if (coloured(lang) && data.text.length <= HIGHLIGHT_MAX) hljs.highlightElement(code);
   const gutter = h("pre", { class: "fv-gutter", "aria-hidden": "true" }, lines.map((_, i) => `${i + 1}\n`).join(""));
   const mark = h("div", { class: "fv-mark", hidden: true });
-  const scroller = h("div", { class: "fv-scroll", tabindex: "0" }, h("div", { class: "fv-code" }, gutter, h("pre", { class: "fv-text" }, code), mark));
+  const text = h("pre", { class: "fv-text" }, code);
+  const box = h("div", { class: "fv-code" }, gutter, text, mark);
+  const scroller = h("div", { class: "fv-scroll", tabindex: "0" }, box);
+  const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
+  const tell = (message) => {
+    note.textContent = message;
+    clearTimeout(note.timer);
+    note.timer = setTimeout(() => { note.textContent = ""; }, 5000);
+  };
   const goto = h("input", { class: "fv-goto", type: "number", min: 1, max: lines.length, placeholder: "Line", "aria-label": "Go to line",
     onkeydown: (e) => { if (e.key === "Enter") go(Number(goto.value)); } });
   gutter.addEventListener("click", (e) => go(Math.floor((e.offsetY - 8) / LINE_PX) + 1));
+  const show = (line, end) => {
+    mark.hidden = false;
+    mark.style.top = `${8 + (line - 1) * LINE_PX}px`;
+    mark.style.height = `${(end - line + 1) * LINE_PX}px`;
+  };
   const go = (line, end) => {
     if (!line || line < 1) return;
     line = Math.min(line, lines.length || 1);
     end = Math.max(line, Math.min(end || line, lines.length || 1));
-    mark.hidden = false;
-    mark.style.top = `${8 + (line - 1) * LINE_PX}px`;
-    mark.style.height = `${(end - line + 1) * LINE_PX}px`;
+    show(line, end);
     scroller.scrollTop = Math.max(0, 8 + (line - 1) * LINE_PX - scroller.clientHeight / 3);
     goto.value = line;
   };
+  text.addEventListener("dblclick", (e) => {
+    const line = Math.min(lines.length || 1, Math.max(1, Math.floor((e.clientY - box.getBoundingClientRect().top - 8) / LINE_PX) + 1));
+    getSelection().removeAllRanges();
+    const ref = `${data.path}:${line}`;
+    pendingRef = ref;
+    show(line, line);
+    copyWith(() => writeText(ref), note, (ok) => {
+      if (ok != null) tell(ok ? `Copied ${baseName(ref)} · double-click the message box to paste it there` : "Copy failed");
+    });
+  });
+  // After the browser has settled the selection; the mouseup of a double-click belongs to the double-click.
+  box.addEventListener("mouseup", (e) => {
+    if (e.button === 0 && e.detail < 2) setTimeout(() => selectionMenu(e.clientX, e.clientY, code, data, lang, tell), 0);
+  });
   const notes = [data.binary ? "Binary file: not shown." : null,
     data.truncated ? `Only the first ${fmtBytes(data.text.length)} of ${fmtBytes(data.size)} are shown.` : null].filter(Boolean);
   item.body.replaceChildren();
@@ -359,8 +384,67 @@ function fileView(conv, item, data) {
     h("span", { class: "muted" }, `${fmt(lines.length)} lines · ${fmtBytes(data.size)}${lang && lang !== "plaintext" ? ` · ${languageName(lang)}` : ""}`),
     h("span", { class: "spacer" }), goto,
     h("button", { class: "btn", type: "button", title: `Open a shell in ${dirOf(data.path)}`, onclick: () => openShell(conv, dirOf(data.path)) }, "❯ Shell here")),
-  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : scroller]);
+  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : scroller, note]);
   return { go };
+}
+
+// The lines a selection in a file spans, and what can be done with them: copied, with the path and lines as a header,
+// or put into the message to the session.
+function selectionMenu(x, y, code, data, lang, tell) {
+  const selection = getSelection();
+  if (selection.isCollapsed || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0), chosen = selection.toString();
+  if (!code.contains(range.startContainer) || !code.contains(range.endContainer) || !chosen.trim()) return;
+  const before = document.createRange();
+  before.setStart(code, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().split("\n").length, body = chosen.replace(/\n$/, "");
+  const end = start + body.split("\n").length - 1;
+  const ref = `${data.path}:${start}${end > start ? `-${end}` : ""}`;
+  const copy = (value) => copyWith(() => writeText(value), tell, (ok) => { if (ok != null) tell(ok ? "Copied" : "Copy failed"); });
+  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+  const ask = () => {
+    if (!insertIntoComposer(`${ref}\n${fence}${coloured(lang) ? lang : ""}\n${body}\n${fence}`, true)) {
+      tell("No message box: open the Conversation tab of a live session");
+    }
+  };
+  pointMenu(x, y, "Selection", [
+    ["Copy", () => copy(chosen)],
+    [`Copy with ${baseName(ref)}`, () => copy(`${ref}\n${chosen}`)],
+    ["Ask Claude", ask, composerReady() ? "Put it into the message box, where its cursor is, without sending it"
+      : "Needs the Conversation tab of a live session open"],
+  ]);
+}
+
+// A menu at a point of the page, closed like the copy menus: outside, Escape, scrolling.
+function pointMenu(x, y, title, entries) {
+  closeCopyMenu(false);
+  const items = entries.map(([label, act, tip]) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item", title: tip || null,
+    onclick: () => { closeCopyMenu(false); act(); } }, label));
+  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": title }, h("div", { class: "copy-menu-head" }, title), items);
+  document.body.append(menu);
+  menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${y + 12 + menu.offsetHeight > innerHeight ? Math.max(8, y - 12 - menu.offsetHeight) : y + 12}px`;
+  const outside = (e) => { if (!menu.contains(e.target)) closeCopyMenu(false); };
+  const away = () => closeCopyMenu(false);
+  const keys = (e) => {
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "Escape" || e.key === "Tab") {
+      e.stopPropagation();
+      closeCopyMenu(false);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+    }
+  };
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("keydown", keys, true);
+  window.addEventListener("resize", away);
+  copyMenu = { menu, button: { focus() {} }, cleanup: () => {
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", keys, true);
+    window.removeEventListener("resize", away);
+  } };
 }
 
 // ---------- commit viewer ----------

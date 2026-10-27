@@ -2063,8 +2063,36 @@ function composerNote(status) {
   return [`${sent}Typed into the session's terminal · Enter sends, Shift+Enter adds a line`, ""];
 }
 
+// The path:line a double-click on a file's line copied, pasted where the cursor is by a double-click in the message box.
+let pendingRef = null;
+
+const composerReady = () => !!(composer.el && composer.el.isConnected && composer.text && !composer.text.disabled
+  && !composer.text.closest("[hidden]"));
+
+// Into the message box where its cursor is, without sending it; a block goes on lines of its own. False with no box.
+function insertIntoComposer(text, block = false) {
+  if (!composerReady()) return false;
+  const box = composer.text, start = box.selectionStart, end = box.selectionEnd;
+  const before = box.value.slice(0, start), after = box.value.slice(end);
+  const lead = !before ? "" : block ? (before.endsWith("\n") ? "" : "\n") : /\s$/.test(before) ? "" : " ";
+  const tail = block && after && !after.startsWith("\n") ? "\n" : "";
+  box.setRangeText(`${lead}${text}${tail}`, start, end, "end");
+  box.focus();
+  composer.error = null;
+  drawComposer();
+  return true;
+}
+
 function buildComposer(id) {
   const text = h("textarea", { id: "composer-text", rows: 2, placeholder: "Message to the running session", "aria-label": "Message to the running session",
+    // The first click put the cursor; the second one pastes there instead of selecting a word.
+    onmousedown: (e) => {
+      if (e.detail !== 2 || !pendingRef) return;
+      e.preventDefault();
+      const ref = pendingRef;
+      pendingRef = null;
+      insertIntoComposer(ref);
+    },
     onkeydown: (e) => {
       if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
       e.preventDefault();

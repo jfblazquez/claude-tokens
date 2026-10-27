@@ -507,7 +507,7 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
 .dock-x:hover { background: var(--border); color: var(--fg); }
 .dock-x.big { font-size: 22px; }
 .dock-bodies { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.panel-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
 .panel-body[hidden] { display: none; }
 .panel-body.shell, .panel-body.file { overflow: hidden; }
 .panel-body > .card { margin: var(--s3); }
@@ -531,6 +531,11 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
   border-bottom: 1px solid var(--border); font-size: var(--t-sm); }
 .panel-bar .path { font-weight: 600; word-break: break-all; }
 .panel-bar .spacer { flex: 1; }
+/* Over the panel's corner, so a notice does not move the lines under the pointer. */
+.fv-note { position: absolute; right: var(--s3); bottom: var(--s3); z-index: 3; max-width: calc(100% - 2 * var(--s3)); padding: 4px 10px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+  font-size: var(--t-xs); pointer-events: none; }
+.fv-note:empty { display: none; }
 .panel-body .notice { margin: var(--s2) var(--s3); padding: var(--s2) var(--s3); border-radius: 6px; background: var(--warn-bg);
   color: var(--warn-fg); font-size: var(--t-sm); }
 .btn.small { padding: 2px 8px; font-size: var(--t-xs); }
