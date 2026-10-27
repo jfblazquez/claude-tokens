@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from .logs import (conversation_sources, lines, parse_timestamp, response_identity, short, subagent_task, task_from_log,
                    tool_uses)
@@ -312,38 +315,85 @@ def response_entry(event, message, timestamp, prices):
             "thinking_ms": count(event, "thinkingDurationMs"), "blocks": []}
 
 
-def transcript(path, prices):
-    """Messages and events (role "event") of one log in order; the events of one API response become one message."""
-    messages, responses = [], {}
-    for event in lines(path):
+class Transcript:
+    """transcript() of a log that keeps growing: each advance() only reads the lines appended since the last one."""
+
+    def __init__(self, path, prices):
+        self.path, self.prices = Path(path), prices
+        self.reset(None)
+
+    def reset(self, identity):
+        self.identity, self.offset, self.line = identity, 0, 0
+        self.messages, self.responses = [], {}
+
+    def advance(self):
+        stat = os.stat(self.path)
+        identity = (stat.st_dev, stat.st_ino)
+        if identity != self.identity or stat.st_size < self.offset:
+            self.reset(identity)
+        with self.path.open("rb") as f:
+            f.seek(self.offset)
+            data = f.read()
+        *complete, tail = data.split(b"\n")
+        for raw in complete:
+            self.read_line(raw)
+        self.offset += sum(len(raw) + 1 for raw in complete)
+        # The last piece has no newline yet: it is taken only once it is whole JSON, else read again next time.
+        if tail.strip() and self.parse(tail, warn=False) is not None:
+            self.read_line(tail)
+            self.offset += len(tail)
+        return self.messages
+
+    def parse(self, raw, warn=True):
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            if warn:
+                print(f"warning: {self.path}:{self.line}: {getattr(error, 'msg', error)}", file=sys.stderr)
+            return None
+
+    def read_line(self, raw):
+        self.line += 1
+        if not raw.strip():
+            return
+        event = self.parse(raw)
+        if isinstance(event, dict):
+            self.add(event)
+
+    def add(self, event):
         kind, message = event.get("type"), event.get("message")
         timestamp = event.get("timestamp") if parse_timestamp(event.get("timestamp")) else None
         if kind in ("attachment", "system"):
             entry = attachment_entry(event, timestamp) if kind == "attachment" else system_entry(event, timestamp)
             if entry and (entry["role"] == "event" or entry["blocks"]):
-                messages.append(entry)
-            continue
+                self.messages.append(entry)
+            return
         if kind not in ("user", "assistant") or not isinstance(message, dict):
-            continue
+            return
         blocks = message_blocks(message.get("content"))
         if kind == "user":
             add_result_details(blocks, event)
             if blocks:
-                messages.append({"role": "user", "kind": user_kind(event, blocks), "timestamp": timestamp, "blocks": blocks})
-            continue
+                self.messages.append({"role": "user", "kind": user_kind(event, blocks), "timestamp": timestamp,
+                                      "blocks": blocks})
+            return
         identity = response_identity(event, message)
-        entry = responses.get(identity)
+        entry = self.responses.get(identity)
         if entry is None:
-            entry = responses[identity] = response_entry(event, message, timestamp, prices)
-            messages.append(entry)
+            entry = self.responses[identity] = response_entry(event, message, timestamp, self.prices)
+            self.messages.append(entry)
         else:
             # Usage is taken from the last event of a response, as parse_log does.
-            latest = response_entry(event, message, timestamp, prices)
+            latest = response_entry(event, message, timestamp, self.prices)
             entry.update({key: latest[key] for key in ("usage", "estimated_cost_usd", "price_estimated", "stop_reason")})
             if latest["thinking_ms"] is not None:
                 entry["thinking_ms"] = (entry["thinking_ms"] or 0) + latest["thinking_ms"]
         entry["blocks"] += [block for block in blocks if block not in entry["blocks"]]
-    return messages
+
+
+def transcript(path, prices):
+    """Messages and events (role "event") of one log in order; the events of one API response become one message."""
+    return Transcript(path, prices).advance()
 
 
 def source_list(main):

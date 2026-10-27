@@ -331,6 +331,61 @@ When the log has one, the report also shows **Claude Code's estimate**: the
 running total cost (plus lines added and removed, and API time) that Claude Code
 itself writes to the session, next to the estimate computed here.
 
+### Live conversations
+
+A conversation that a Claude Code process is running right now is marked
+**Live** in the list (with **Live only** to show just those; clicking the badge
+opens its Conversation tab) and in its header,
+with the process id and its state: *idle* (waiting for a prompt), *busy*
+(working, the dot pulses), *waiting* (a permission prompt or another dialog) or
+*shell* (shell mode). It comes from the registry Claude Code keeps in
+`~/.claude/sessions/<pid>.json` (next to the projects folder); a record only
+counts while its process is alive and has the same start time, so a crashed
+session or a reused pid is not shown as live.
+
+The **Conversation** tab of a live conversation has a box at the bottom to send
+it a message: it is typed into the session's tmux pane and followed by Enter,
+exactly as if you wrote it in that terminal (line breaks go in as a paste, so
+they stay in one prompt). While the session is busy the message is queued for
+its next turn, as when you type during a turn.
+
+An open conversation follows the log as it is written, with or without **Auto**:
+the server watches the log and the session four times a second and pushes what
+changed (server-sent events), and the page fetches only the new messages and
+appends them, keeping you at the end if you were there. Claude Code writes each
+content block (thinking, text, a tool call, its result) when it ends, so that is
+the pace of the conversation; while the session works, the box also shows the
+status line of its terminal, such as `Forming… (2m 10s · ↓ 11.0k tokens)`. The
+other tabs reload when you open them.
+
+Sending needs:
+
+- the session to run in **tmux** in an interactive terminal (`claude`, not
+  `claude -p` or the SDK), with that pane in the foreground;
+- the session to be *idle* or *busy*: a permission prompt or another dialog
+  would take the text, and the Enter after it, as its answer, so the box stays
+  disabled until you deal with it in the terminal;
+- the **send key**. `--serve` prints a link with `?key=...`; open it once and
+  the browser remembers the key. A new run of the server makes a new key.
+
+Text already in the session's prompt stays there, and the message is appended
+to it.
+
+A live session that can never take a message (it runs outside tmux, or is not
+an interactive terminal) is marked **Live · read only**, with the reason on
+hover, and its box is disabled.
+
+**GO LIVE**, on every conversation that is not live (in the list and in its
+header), opens a new tmux window in the background and types
+`cd <project> && claude --resume <id>` into its shell, so your shell's
+functions and aliases for `claude` apply. **New session**, in the header of
+any conversation, does the same with a plain `claude` in that conversation's
+folder and opens the new session. Claude Code writes a conversation's log only
+with its first message, so a live interactive session without a log yet is
+listed as **New session** (not while searching) and opens on its Conversation
+tab, ready for a first message. Both buttons need the send key; when no tmux
+server is running, a new tmux session is created for the window.
+
 Double-click a conversation id, project path, projects folder, file path, tool
 name or a code block in the last response to copy it to the clipboard. Bash
 commands and the last response have a clipboard button, and the conversation
@@ -348,9 +403,13 @@ The screenshots show invented demo data, not real conversations.
 | **Files** | |
 | ![Files read, written and edited, with the sources that touched them](docs/images/files.png) | |
 
-It only listens on `127.0.0.1` and has no authentication. It rejects requests
-whose `Host` is not `localhost` or `127.0.0.1`, and anything but `GET`/`HEAD`.
-It never writes to the projects folder.
+It only listens on `127.0.0.1` and has no authentication for reading. It rejects
+requests whose `Host` is not `localhost` or `127.0.0.1`, and anything but
+`GET`/`HEAD`, except the `POST`s that send a message or start claude. Those
+also need the send key in an `X-Send-Key` header, since any user of the machine
+can reach `127.0.0.1` and a message runs whatever the session is allowed to run,
+and an `Origin`, when sent, that matches the `Host`. It never writes to the projects
+folder.
 `--serve` accepts `--port`, `--projects-dir`, `--pricing`,
 `--cold-summary-output` and `--context-window`; the project filter is chosen in
 the UI. A port that is already in use is an error.
@@ -383,6 +442,21 @@ the recaps, which only the UI uses:
 | `GET /api/conversations/<id>/messages?source=` | `<id> --messages --source <source> --json` |
 | `GET /api/totals?project=` | `--totals --json` |
 | `GET /api/recaps?ids=<id>,<id>` | the newest recap of each id (up to 100), as `{"recaps": {"<id>": {"text", "timestamp"} or null}}` |
+
+The list rows of live conversations also carry a `live` object (pid, status,
+`waiting_for`, `status_since`, `started`, name, entrypoint, version, cwd,
+`read_only` and `read_only_reason`); live sessions without a log yet are extra
+rows with `"new": true`, and the list says whether the request's send key is
+valid (`key`). These routes have no CLI counterpart:
+
+| Route | Returns |
+|---|---|
+| `GET /api/conversations/<id>/messages?source=&from=N` | the messages from index `N` on, with `from` and `total` and without `sources`; only the lines added to the log since the last request are read |
+| `GET /api/conversations/<id>/events?source=` | server-sent events while the conversation is open: `log` (the log grew), `live` (`{"live", "send_problem"}` when the session changes) and `activity` (`{"text"}`, the terminal's status line while it works) |
+| `GET /api/conversations/<id>/live` | `{"live": {...} or null, "key": "ok"\|"missing"\|"wrong"\|"disabled", "send_problem": why it cannot take a message now, or null}` |
+| `POST /api/conversations/<id>/send` | body `{"text": "..."}` with `X-Send-Key`; `{"sent": true, "live": {...}}`, or 409 with the reason |
+| `POST /api/conversations/<id>/go-live` | body `{}` with `X-Send-Key`; `{"started": true, "live": {...} or null}` (null when it has not registered within 30 s), or 409 |
+| `POST /api/conversations/<id>/new-session` | body `{}` with `X-Send-Key`; `{"started": true, "session_id": ..., "live": {...}}`, both null when not registered within 30 s |
 
 ## Development
 

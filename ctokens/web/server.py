@@ -2,20 +2,26 @@
 from __future__ import annotations
 
 import copy
+import hmac
 import json
+import os
 import re
+import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
-from ..catalog import (conversation_rows, conversation_text, find_conversation, last_recap, project_path_of,
-                       session_title)
-from ..content import bash_commands, conversation_messages, last_response, touched_files, transcript
-from ..logs import discover, file_stats, parse_log
+from ..catalog import (CONVERSATION_ID, conversation_rows, conversation_text, find_conversation, last_recap,
+                       project_path_of, session_title)
+from ..content import bash_commands, conversation_messages, last_response, touched_files
+from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, send,
+                    send_problem, sessions_dir)
+from ..logs import conversation_sources, discover, file_stats, parse_log
 from ..reports import report, scan_totals, totals_report
-from .cache import StatsCache
+from .cache import StatsCache, TranscriptCache
 
 HOST = "127.0.0.1"
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -33,7 +39,18 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
 COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
-CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages))?")
+MAX_SEND_BODY = 1 << 20
+CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live))?")
+ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session)")
+EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
+# The events stream checks the log, the session and its status line this often; a new log line shows within a tick.
+EVENT_TICK = 0.25
+EVENT_RESCAN = 2.0
+ACTIVITY_EVERY = 1.0
+HEARTBEAT = 15.0
+# EventSource reconnects by itself, so a stream ends now and then instead of holding a thread forever.
+STREAM_LIFETIME = 30 * 60
+SEND_KEY_HEADER = "X-Send-Key"
 
 
 class Config(NamedTuple):
@@ -41,6 +58,8 @@ class Config(NamedTuple):
     prices: dict
     cold_summary_output: int = 2000
     context_window: Optional[int] = None
+    # Typing into a session runs whatever it is allowed to run, and any local user can reach 127.0.0.1.
+    send_key: Optional[str] = None
 
 
 class Response(NamedTuple):
@@ -55,6 +74,7 @@ def json_response(status, data, headers=()):
 
 
 NOT_FOUND = json_response(404, {"error": "not found"})
+KEY_ERRORS = {"disabled": "sending is disabled", "missing": "send key missing", "wrong": "wrong send key"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -62,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def __getattr__(self, name):
-        # BaseHTTPRequestHandler answers 501 when do_<METHOD> is missing; every method but GET/HEAD gets 405.
+        # BaseHTTPRequestHandler answers 501 when do_<METHOD> is missing; every other method gets 405.
         if name.startswith("do_"):
             return self.method_not_allowed
         raise AttributeError(name)
@@ -71,6 +91,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.host_allowed():
             return
         path, _, query = self.path.partition("?")
+        events = EVENTS_ROUTE.fullmatch(path)
+        if events:
+            return self.events(events.group(1), parse_qs(query).get("source", ["main"])[0])
         try:
             response = self.route(path, query)
         except Exception:
@@ -80,10 +103,25 @@ class Handler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def do_POST(self):
+        path = self.path.partition("?")[0]
+        match = ACTION_ROUTE.fullmatch(path)
+        if not match:
+            return self.method_not_allowed()
+        if not self.host_allowed():
+            return self.discard_body()
+        try:
+            response = self.action(*match.groups())
+        except Exception:
+            traceback.print_exc()
+            response = json_response(500, {"error": "internal error"})
+        self.respond(response)
+
     def method_not_allowed(self):
         self.discard_body()
+        allow = "POST" if ACTION_ROUTE.fullmatch(self.path.partition("?")[0]) else "GET, HEAD"
         if self.host_allowed():
-            self.respond(json_response(405, {"error": "method not allowed"}, (("Allow", "GET, HEAD"),)))
+            self.respond(json_response(405, {"error": "method not allowed"}, (("Allow", allow),)))
 
     def host_allowed(self):
         hosts = self.headers.get_all("Host") or []
@@ -96,6 +134,56 @@ class Handler(BaseHTTPRequestHandler):
             return True
         self.respond(json_response(403, {"error": "host not allowed"}))
         return False
+
+    def key_state(self):
+        key, given = self.server.config.send_key, self.headers.get(SEND_KEY_HEADER)
+        if not key:
+            return "disabled"
+        if not given:
+            return "missing"
+        return "ok" if hmac.compare_digest(given.encode("utf-8"), key.encode("utf-8")) else "wrong"
+
+    def action(self, conversation_id, name):
+        """POST actions start or drive claude processes, so on top of the Host check they need the key."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 < length <= MAX_SEND_BODY:
+            self.close_connection = True
+            return json_response(413 if length > MAX_SEND_BODY else 400, {"error": "bad request body"})
+        body = self.rfile.read(length)
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.lower() != f"http://{self.headers.get('Host', '').lower()}":
+            return json_response(403, {"error": "origin not allowed"})
+        state = self.key_state()
+        if state != "ok":
+            return json_response(403, {"error": KEY_ERRORS[state], "key": state})
+        if self.headers.get_content_type() != "application/json":
+            return json_response(415, {"error": "expected application/json"})
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return json_response(400, {"error": "expected a JSON object"})
+        config = self.server.config
+        sessions = sessions_dir(config.projects_dir)
+        path, live = locate(config, conversation_id)
+        if path is None and live is None:
+            return json_response(404, {"error": "conversation not found"})
+        try:
+            if name == "send":
+                if not isinstance(data.get("text"), str):
+                    return json_response(400, {"error": "expected {\"text\": \"...\"}"})
+                return json_response(200, {"sent": True, "live": send(sessions, conversation_id, data["text"])})
+            cwd = project_path_of(path) if path is not None else live["cwd"]
+            if name == "go-live":
+                return json_response(200, {"started": True, "live": go_live(sessions, conversation_id, cwd)})
+            session_id, info = new_session(sessions, cwd)
+            return json_response(200, {"started": True, "session_id": session_id, "live": info})
+        except SendError as error:
+            return json_response(409, {"error": str(error)})
 
     def discard_body(self):
         # Closing a socket with unread request data can reset the connection before the client reads the answer.
@@ -113,11 +201,17 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(query)
         project = params.get("project", [None])[0]
         if path == "/api/conversations":
-            return json_response(200, {"projects_dir": str(config.projects_dir),
-                                       "conversations": conversation_rows(config.projects_dir, project,
-                                                                          *cached_meta(cache),
-                                                                          params.get("q", [None])[0],
-                                                                          cached_text(cache))})
+            search = params.get("q", [None])[0]
+            rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache))
+            live = live_sessions(sessions_dir(config.projects_dir))
+            for row in rows:
+                if row["id"] in live:
+                    row["live"] = public(live.pop(row["id"]))
+            if not search:
+                rows = sorted(rows + new_session_rows(live, project, config.projects_dir), key=lambda r: r["modified"],
+                              reverse=True)
+            return json_response(200, {"projects_dir": str(config.projects_dir), "key": self.key_state(),
+                                       "conversations": rows})
         if path == "/api/recaps":
             ids = [i for i in params.get("ids", [""])[0].split(",") if i]
             if len(ids) > MAX_RECAP_IDS:
@@ -125,17 +219,30 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, {"recaps": {i: recap_of(cache, config, i) for i in ids}})
         if path == "/api/totals":
             return json_response(200, cached_totals(cache, config, project))
+        if ACTION_ROUTE.fullmatch(path):
+            return json_response(405, {"error": "method not allowed"}, (("Allow", "POST"),))
         match = CONVERSATION_ROUTE.fullmatch(path)
         if match:
-            return self.conversation(config, cache, *match.groups(), params.get("source", ["main"])[0])
+            first = params.get("from", [None])[0]
+            if first is not None and not first.isdigit():
+                return json_response(400, {"error": "from must be a message index"})
+            return self.conversation(config, cache, *match.groups(), params.get("source", ["main"])[0],
+                                     None if first is None else int(first))
         return NOT_FOUND
 
-    @staticmethod
-    def conversation(config, cache, conversation_id, view, source):
+    def conversation(self, config, cache, conversation_id, view, source, first=None):
+        if view == "live":
+            info = live_sessions(sessions_dir(config.projects_dir)).get(conversation_id)
+            if info is None and find_conversation(conversation_id, config.projects_dir)[0] is None:
+                return json_response(404, {"error": "conversation not found"})
+            return json_response(200, {"live": info and public(info), "key": self.key_state(),
+                                       "send_problem": send_problem(info) if info else None})
         path, matches = find_conversation(conversation_id, config.projects_dir)
         if path is None:
             if len(matches) > 1:
                 return json_response(409, {"error": "ambiguous id", "projects": [project_path_of(m) for m in matches]})
+            if locate(config, conversation_id)[1] is not None:
+                return new_session_view(view, source)
             return json_response(404, {"error": "conversation not found"})
         if view == "last-response":
             return json_response(200, {"last_response": last_response(path)})
@@ -144,10 +251,45 @@ class Handler(BaseHTTPRequestHandler):
         if view == "files":
             return json_response(200, {"files": touched_files(path)})
         if view == "messages":
-            data = conversation_messages(path, source, config.prices, cached_transcript(cache))
-            return json_response(200, data) if data else json_response(404, {"error": "source not found"})
+            read = self.server.transcripts.get
+            start = first
+            if start is None:
+                data = conversation_messages(path, source, config.prices, read)
+                return json_response(200, data) if data else json_response(404, {"error": "source not found"})
+            log = dict(conversation_sources(path)).get(source)
+            if log is None:
+                return json_response(404, {"error": "source not found"})
+            # Only what is new: the client keeps the rest; sources are left out, they take long with many subagents.
+            messages = read(log, config.prices)
+            return json_response(200, {"source": source, "from": start, "total": len(messages), "messages": messages[start:]})
         return json_response(200, report(discover(path, cached_parse(cache)), config.prices,
                                          config.cold_summary_output, config.context_window))
+
+    def events(self, conversation_id, source):
+        """Server-sent events while the page shows a conversation: log (it grew), live (session state), activity."""
+        config = self.server.config
+        sessions = sessions_dir(config.projects_dir)
+        path, live = locate(config, conversation_id)
+        if path is None and live is None:
+            return self.respond(json_response(404, {"error": "conversation not found"}))
+        self.send_response(200)
+        for name, value in (("Content-Type", "text/event-stream; charset=utf-8"), *COMMON_HEADERS.items()):
+            self.send_header(name, value)
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        self.close_connection = True
+        watch = Watch(config, sessions, conversation_id, source)
+        watch.check(time.monotonic())
+        try:
+            while not self.server.stopping.wait(EVENT_TICK) and watch.age() < STREAM_LIFETIME:
+                for event, data in watch.check(time.monotonic()):
+                    self.wfile.write(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8"))
+                if watch.heartbeat_due():
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except OSError:
+            pass
 
     def static(self, name):
         try:
@@ -173,6 +315,109 @@ class Handler(BaseHTTPRequestHandler):
         self.respond(json_response(code, {"error": message or self.responses.get(code, ("error",))[0].lower()}))
 
 
+class Watch:
+    """What an events stream watches: the source's log, the session's registry record and its status line."""
+
+    def __init__(self, config, sessions, conversation_id, source):
+        self.config, self.sessions, self.id, self.source = config, sessions, conversation_id, source
+        self.started = self.beat = time.monotonic()
+        self.log = self.stamp = self.info = self.pane = None
+        self.live_key = self.text = None
+        self.rescan = self.next_activity = 0.0
+        self.first = True
+
+    def age(self):
+        return time.monotonic() - self.started
+
+    def heartbeat_due(self):
+        if time.monotonic() - self.beat < HEARTBEAT:
+            return False
+        self.beat = time.monotonic()
+        return True
+
+    def log_path(self):
+        if self.log is None:
+            path, _ = find_conversation(self.id, self.config.projects_dir)
+            if path is not None:
+                self.log = dict(conversation_sources(path)).get(self.source)
+        return self.log
+
+    def session(self, now):
+        # The record of a known pid is one small file; finding a session that was not live means reading them all.
+        if self.info is not None:
+            found = read_record(self.sessions / f"{self.info['pid']}.json")
+            self.info = found[1] if found and found[0] == self.id else None
+        if self.info is None and now >= self.rescan:
+            self.info = live_sessions(self.sessions).get(self.id)
+            self.rescan = now + EVENT_RESCAN
+        return self.info
+
+    def check(self, now):
+        """The events since the last check; the first check only records where things stand."""
+        events, first = [], self.first
+        self.first = False
+        log = self.log_path()
+        try:
+            stat = os.stat(log) if log else None
+            stamp = (stat.st_size, stat.st_mtime_ns) if stat else None
+        except OSError:
+            stamp = None
+        if stamp != self.stamp:
+            self.stamp = stamp
+            events.append(("log", {"size": stamp and stamp[0]}))
+        info = self.session(now)
+        key = info and (info["pid"], info["updated_ms"], info["status"])
+        if key != self.live_key:
+            self.live_key = key
+            try:
+                self.pane = channel(info) if info else None
+            except SendError:
+                self.pane = None
+            events.append(("live", {"live": info and public(info), "send_problem": info and send_problem(info)}))
+        text = self.text
+        if not (info and info["status"] == "busy" and self.pane):
+            text = None
+        elif now >= self.next_activity:
+            text = activity(*self.pane)
+            self.next_activity = now + ACTIVITY_EVERY
+        if text != self.text:
+            self.text = text
+            events.append(("activity", {"text": text}))
+        return [] if first else events
+
+
+def locate(config, conversation_id):
+    """(log path or None, live info or None); a live interactive session has no log until its first message."""
+    path, _ = find_conversation(conversation_id, config.projects_dir)
+    info = live_sessions(sessions_dir(config.projects_dir)).get(conversation_id)
+    return path, info if info and info["entrypoint"] == "cli" and info["cwd"] else None
+
+
+def new_session_rows(live, project, projects_dir):
+    """List rows for interactive sessions still without a log, so a session started from the UI shows up at once."""
+    return [{"id": session_id, "modified": info["started"], "size_bytes": 0, "subagents": 0, "project": info["cwd"],
+             "title": "", "new": True, "live": public(info)}
+            for session_id, info in live.items()
+            if info["entrypoint"] == "cli" and info["cwd"] and info["started"] and CONVERSATION_ID.fullmatch(session_id)
+            and (not project or project.lower() in info["cwd"].lower())
+            and not any(projects_dir.glob(f"*/{session_id}.jsonl"))]
+
+
+def new_session_view(view, source):
+    if view == "messages":
+        if source != "main":
+            return json_response(404, {"error": "source not found"})
+        return json_response(200, {"source": "main", "sources": [{"id": "main", "task": ""}], "messages": [],
+                                   "from": 0, "total": 0})
+    if view == "last-response":
+        return json_response(200, {"last_response": ""})
+    if view == "bash":
+        return json_response(200, {"bash_commands": []})
+    if view == "files":
+        return json_response(200, {"files": {}})
+    return json_response(404, {"error": "This session has no messages yet."})
+
+
 def cached_totals(cache, config, project):
     seen = set()
 
@@ -191,10 +436,6 @@ def cached_parse(cache):
         # report() adds costs to these dicts; kind, id and task come from the caller (task may live in .meta.json).
         return {**copy.deepcopy(value), "kind": kind, "id": identifier, "task": task}
     return parse
-
-
-def cached_transcript(cache):
-    return lambda path, prices: cache.get("transcript", path, lambda p: transcript(p, prices))
 
 
 def cached_meta(cache):
@@ -225,4 +466,10 @@ class Server(ThreadingHTTPServer):
         self.config = config
         self.static_dir = Path(static_dir)
         self.cache = StatsCache()
+        self.transcripts = TranscriptCache()
+        self.stopping = threading.Event()
         super().__init__((HOST, port), Handler)
+
+    def server_close(self):
+        self.stopping.set()
+        super().server_close()
