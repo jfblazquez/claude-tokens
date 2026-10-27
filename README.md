@@ -365,7 +365,10 @@ Sending needs:
   `claude -p` or the SDK), with that pane in the foreground;
 - the session to be *idle* or *busy*: a permission prompt or another dialog
   would take the text, and the Enter after it, as its answer, so the box stays
-  disabled until you deal with it in the terminal;
+  disabled until you deal with it in the terminal. Shell mode is read from the
+  terminal itself (its prompt starts with `!` instead of `❯`), since Claude Code
+  does not always update its registry when shell mode ends, and text typed in
+  shell mode would run as a command;
 - the **send key**. `--serve` prints a link with `?key=...`; open it once and
   the browser remembers the key. A new run of the server makes a new key.
 
@@ -462,7 +465,10 @@ ignore); `./x` and `../x` only from the folder. Anything else stays plain text.
 - **❯ Shell**, in the conversation header, opens an interactive shell (your
   `$SHELL`) in the conversation's folder, and **❯ Shell here** in a file opens
   one in the file's folder. It is a real terminal: `less`, `vim`, `top`, Ctrl+C
-  and job control work, and it follows the panel's size. Closing its tab hangs
+  and job control work, and it follows the panel's size. What it prints links
+  as the conversation does: a URL opens in a new tab, and a commit or a file
+  (`grep -n` output too) opens its panel, looked up from the folder the shell is
+  in at that moment, so they still work after a `cd` into another repository. Closing its tab hangs
   it up; a shell nobody shows for two minutes (the page was closed) is ended, and
   at most 8 run at once. All the shells of a page share one connection, and a
   hidden tab closes its streams and catches up when shown again, since a browser
@@ -558,8 +564,8 @@ counterpart:
 | `POST /api/conversations/<id>/new-session` | body `{}` with `X-Send-Key`; `{"started": true, "session_id": ..., "live": {...}}`, both null when not registered within 30 s |
 | `POST /api/conversations/<id>/rename` | body `{"title": "..."}` (one line, up to 200 characters) with `X-Send-Key`; `{"title": the name the conversation now has}`, or 409 with the reason; a live session answers once its log has the new name (up to 5 s) |
 | `POST /api/conversations/<id>/favorite` | body `{"favorite": true\|false}`, no key needed; `{"favorite": ...}` |
-| `POST /api/conversations/<id>/resolve` | body `{"commits": [...], "files": [...]}` (up to 500 each) with `X-Send-Key`; `{"cwd", "root", "commits": {"<hash>": {sha, subject, author, date}}, "files": {"<name>": [{path, display}]}}` with only those found |
-| `GET /api/conversations/<id>/commit?sha=` | with `X-Send-Key`: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
+| `POST /api/conversations/<id>/resolve` | body `{"commits": [...], "files": [...], "shell"?: "<shell id>"}` (up to 500 each) with `X-Send-Key`; `{"cwd", "root", "commits": {"<hash>": {sha, subject, author, date}}, "files": {"<name>": [{path, display}]}}` with only those found, looked up from the shell's current folder when `shell` is given |
+| `GET /api/conversations/<id>/commit?sha=&cwd=` | with `X-Send-Key`, from the repository of `cwd` (an absolute folder) when given, else the conversation's: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
 | `GET /api/conversations/<id>/file?path=` | with `X-Send-Key`: `{path, display, root, size, binary, truncated, text}`, the first 2 MB; `path` absolute or from the folder |
 | `POST /api/conversations/<id>/shell` | body `{"cols", "rows", "cwd"?}` with `X-Send-Key`; `{"shell": {"id", "cwd", "pid", ...}}`, or 409 |
 | `GET /api/shells/stream?from=<shell id>:<offset>,...` | server-sent events with the output of up to 8 shells on one connection: `data` (`{"id", "at", "data": base64}`, `at` the byte offset reached), `exit` (`{"id", "code"}`, null when the shell is gone) and `end` once none is left; each event's `id` lists the offsets, so a reconnect resumes; the last 1 MB of each shell is kept |

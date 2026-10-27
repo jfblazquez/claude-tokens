@@ -304,6 +304,40 @@ class RepoApiTest(unittest.TestCase):
         for token in tokens:
             self.request("POST", f"/api/shells/{token}/close", {})
 
+    def test_resolve_from_where_a_shell_is_now(self):
+        status, data = self.request("POST", f"/api/conversations/{CONV}/shell", {"cwd": self.tmp.name})
+        token = data["shell"]["id"]
+        ask = {"commits": [self.second[:7]], "files": ["src/server.py"], "shell": token}
+        before = self.request("POST", f"/api/conversations/{CONV}/resolve", ask)[1]
+        self.assertEqual((before["cwd"], before["commits"], before["files"]), (os.path.realpath(self.tmp.name), {}, {}))
+        self.request("POST", f"/api/shells/{token}/input", {"data": f"cd {self.repo}\n"})
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            after = self.request("POST", f"/api/conversations/{CONV}/resolve", ask)[1]
+            if after["commits"]:
+                break
+            time.sleep(0.1)
+        self.assertEqual(after["cwd"], str(self.repo))
+        self.assertEqual(after["commits"][self.second[:7]]["sha"], self.second)
+        self.assertEqual([m["display"] for m in after["files"]["src/server.py"]], ["src/server.py"])
+        self.request("POST", f"/api/shells/{token}/close", {})
+        self.assertEqual(self.request("POST", f"/api/conversations/{CONV}/resolve", ask)[0], 404)
+
+    def test_commit_from_another_folder(self):
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "main")
+        (other / "lib.c").write_text("int main(void) { return 0; }\n")
+        git(other, "add", ".")
+        git(other, "commit", "-q", "-m", "Another repository")
+        first = git(other, "rev-parse", "HEAD")
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/commit?sha={first}")[0], 404)
+        status, data = self.request("GET", f"/api/conversations/{CONV}/commit?sha={first}&cwd={other}")
+        self.assertEqual((status, data["sha"]), (200, first))
+        for bad in ("relative", str(other / "nope")):
+            with self.subTest(cwd=bad):
+                self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/commit?sha={first}&cwd={bad}")[0], 400)
+
     def test_stream_needs_shells(self):
         for start in ("", "bad/token:0", ",".join(f"t{n}:0" for n in range(9))):
             with self.subTest(start=start):

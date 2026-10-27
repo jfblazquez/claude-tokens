@@ -206,6 +206,12 @@ class Handler(BaseHTTPRequestHandler):
             commits, files = data.get("commits", []), data.get("files", [])
             if not isinstance(commits, list) or not isinstance(files, list):
                 return json_response(400, {"error": "expected {\"commits\": [...], \"files\": [...]}"})
+            # Names a shell prints are relative to where that shell is now, which may be another repository.
+            if data.get("shell") is not None:
+                shell = self.server.shells.get(data["shell"]) if isinstance(data["shell"], str) else None
+                if shell is None:
+                    return json_response(404, {"error": "shell not found"})
+                cwd = shell.current_cwd()
             root = repo_root(cwd)
             return json_response(200, {"cwd": cwd, "root": root and str(root), "commits": find_commits(cwd, commits),
                                        "files": find_files(cwd, files, self.server.file_index)})
@@ -256,6 +262,12 @@ class Handler(BaseHTTPRequestHandler):
         if path is None and live is None:
             return json_response(404, {"error": "conversation not found"})
         cwd = project_path_of(path) if path is not None else live["cwd"]
+        # A commit a shell printed belongs to the repository the shell was in, which resolve reported as its cwd.
+        folder = params.get("cwd", [None])[0]
+        if folder is not None:
+            if not os.path.isabs(folder) or not os.path.isdir(folder):
+                return json_response(400, {"error": "cwd must be an absolute folder"})
+            cwd = folder
         try:
             if view == "commit":
                 return json_response(200, show_commit(cwd, params.get("sha", [""])[0]))
@@ -485,8 +497,8 @@ class Watch:
         self.config, self.sessions, self.id, self.source = config, sessions, conversation_id, source
         self.started = self.beat = time.monotonic()
         self.log = self.stamp = self.info = self.pane = None
-        self.live_key = self.text = None
-        self.rescan = self.next_activity = 0.0
+        self.live_key = self.text = self.problem = None
+        self.rescan = self.next_activity = self.next_problem = 0.0
         self.first = True
 
     def age(self):
@@ -530,13 +542,18 @@ class Watch:
             events.append(("log", {"size": stamp and stamp[0]}))
         info = self.session(now)
         key = info and (info["pid"], info["updated_ms"], info["status"])
-        if key != self.live_key:
-            self.live_key = key
+        # Leaving shell mode shows on the screen but not always in the registry, so the problem is checked again.
+        problem = self.problem
+        if key != self.live_key or (info and now >= self.next_problem):
+            problem = info and send_problem(info)
+            self.next_problem = now + ACTIVITY_EVERY
+        if key != self.live_key or problem != self.problem:
+            self.live_key, self.problem = key, problem
             try:
                 self.pane = channel(info) if info else None
             except SendError:
                 self.pane = None
-            events.append(("live", {"live": info and public(info), "send_problem": info and send_problem(info)}))
+            events.append(("live", {"live": info and public(info), "send_problem": problem}))
         text = self.text
         if not (info and info["status"] == "busy" and self.pane):
             text = None

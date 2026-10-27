@@ -102,6 +102,21 @@ class Shell:
             start = max(offset, self.base)
             return self.end, bytes(self.buffer[start - self.base:]), self.exited
 
+    def current_cwd(self):
+        """The folder of the program in the foreground (the shell itself at its prompt), so names resolve after a cd."""
+        for pid in (self.foreground(), self.proc.pid):
+            try:
+                return os.readlink(f"/proc/{pid}/cwd")
+            except (OSError, TypeError):
+                continue
+        return self.cwd
+
+    def foreground(self):
+        try:
+            return os.tcgetpgrp(self.fd)
+        except OSError:
+            return None
+
     def write(self, data):
         if self.exited:
             raise ShellError("The shell has ended.")

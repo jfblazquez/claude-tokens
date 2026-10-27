@@ -300,10 +300,11 @@ function fileView(conv, item, data) {
 const DIFF_OPEN_LINES = 4000;
 const DIFF_HIGHLIGHT_LINES = 1500;
 
-function openCommit(conv, sha, label) {
+// cwd: the repository's folder when it is not the conversation's, as for a commit a shell printed after a cd.
+function openCommit(conv, sha, label, cwd) {
   openPanel(`commit:${sha}`, `${(label || sha).slice(0, 10)}`, "commit", conv, (item) => {
     item.body.append(skeleton(10));
-    api(`${convApi(conv, "/commit")}?sha=${encodeURIComponent(sha)}`, { headers: sendHeaders() })
+    api(`${convApi(conv, "/commit")}?sha=${encodeURIComponent(sha)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}`, { headers: sendHeaders() })
       .then((data) => {
         item.title = `${data.sha.slice(0, 10)} ${data.message.split("\n")[0]}`;
         drawDock();
@@ -372,7 +373,8 @@ function commitView(conv, item, data) {
     return box;
   });
   if (total <= DIFF_OPEN_LINES) for (const box of fileBoxes.values()) box.open = true;
-  const parents = data.parents.map((p) => h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": p, title: `Parent ${p}` }, p.slice(0, 10)));
+  const parents = data.parents.map((p) => h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": p, "data-cwd": data.root,
+    title: `Parent ${p}` }, p.slice(0, 10)));
   item.body.replaceChildren(h("div", { class: "commit-head" },
     h("div", { class: "commit-subject" }, subject),
     body ? h("pre", { class: "commit-body" }, body) : null,
@@ -480,8 +482,11 @@ function openShell(conv, cwd) {
     };
     term.onData((data) => {
       sh.queue += data;
+      // After a command the shell may be somewhere else, so the names it prints are looked up again.
+      if (sh.id && data.includes("\r")) refCache.delete(`shell:${sh.id}`);
       pump();
     });
+    term.registerLinkProvider(shellLinks(term, conv, sh));
     item.onShow = () => {
       fit();
       if (item === dock.active || dock.mode === "float") term.focus();
@@ -514,6 +519,62 @@ function openShell(conv, cwd) {
   });
 }
 
+// ---------- links in a terminal ----------
+const URL_RE = /\bhttps?:\/\/[^\s"'<>`]+/g;
+
+// The text of a buffer line with, for each character, the 1-based column it starts at: wide characters take two.
+function bufferLineText(line) {
+  let text = "";
+  const cols = [];
+  for (let x = 0; x < line.length; x++) {
+    const cell = line.getCell(x);
+    if (!cell || cell.getWidth() === 0) continue;
+    const chars = cell.getChars() || " ";
+    for (let i = 0; i < chars.length; i++) cols.push(x + 1);
+    text += chars;
+  }
+  return { text, cols };
+}
+
+// URLs open in a new tab; commits and files open their panel, as on the conversation, from where the shell is now.
+function shellLinks(term, conv, sh) {
+  return {
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y - 1);
+      if (!line || !sh.id) return callback(undefined);
+      const { text, cols } = bufferLineText(line);
+      const urls = [...text.matchAll(URL_RE)].map((m) => {
+        const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
+        return { kind: "url", start: m.index, end: m.index + url.length, token: url };
+      });
+      const found = candidates(text).filter((c) => !urls.some((u) => c.start < u.end && u.start < c.end));
+      if (!urls.length && !found.length) return callback(undefined);
+      const range = (c) => ({ start: { x: cols[c.start], y }, end: { x: cols[c.end - 1], y } });
+      const links = urls.map((u) => ({ range: range(u), text: u.token,
+        activate: () => window.open(u.token, "_blank", "noopener,noreferrer") }));
+      const key = `shell:${sh.id}`;
+      resolveRefs(conv, found.filter((c) => c.kind === "commit").map((c) => c.token),
+        found.filter((c) => c.kind === "file").map((c) => c.token), sh.id)
+        .catch(() => null)
+        .then(() => {
+          const refs = refsOf(key);
+          for (const c of found) {
+            const info = c.kind === "commit" ? refs.commits.get(c.token) : refs.files.get(c.token);
+            if (!info || (Array.isArray(info) && !info.length)) continue;
+            const at = { line: c.line, end: c.end2 };
+            links.push({ range: range(c), text: text.slice(c.start, c.end), activate: (e) => {
+              if (c.kind === "commit") return openCommit(conv, info.sha, null, info.cwd);
+              if (info.length === 1) return openFile(conv, info[0], at);
+              choose(conv, info, at, { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY - 8, bottom: e.clientY + 8 }),
+                focus: () => term.focus() });
+            } });
+          }
+          callback(links.length ? links : undefined);
+        });
+    },
+  };
+}
+
 function shellButton(conv, cwd) {
   return h("button", { class: "btn", type: "button", title: `Open an interactive shell in ${cwd}`,
     onclick: () => openShell(conv, cwd) }, "❯ Shell");
@@ -529,6 +590,7 @@ function closePick() {
   pick.cleanup();
 }
 
+// anchor: the element (or { getBoundingClientRect, focus }) the list opens under and gives the focus back to.
 function choose(conv, matches, at, anchor) {
   closePick();
   const open = (i) => {
@@ -618,16 +680,17 @@ function textNodes(root) {
   return nodes;
 }
 
-async function resolveRefs(conv, commits, files) {
-  const refs = refsOf(conv);
+// shell: resolve against where that shell is now instead of the conversation's folder; its names are cached apart.
+async function resolveRefs(conv, commits, files, shell = null) {
+  const refs = refsOf(shell ? `shell:${shell}` : conv);
   commits = [...new Set(commits)].filter((c) => !refs.commits.has(c));
   files = [...new Set(files)].filter((f) => !refs.files.has(f));
   for (let i = 0; i < Math.max(commits.length, files.length); i += RESOLVE_BATCH) {
     const c = commits.slice(i, i + RESOLVE_BATCH), f = files.slice(i, i + RESOLVE_BATCH);
     for (const x of c) refs.commits.set(x, null);
     for (const x of f) refs.files.set(x, null);
-    const data = await postJson(convApi(conv, "/resolve"), { commits: c, files: f });
-    for (const [k, v] of Object.entries(data.commits)) refs.commits.set(k, v);
+    const data = await postJson(convApi(conv, "/resolve"), { commits: c, files: f, ...(shell ? { shell } : {}) });
+    for (const [k, v] of Object.entries(data.commits)) refs.commits.set(k, { ...v, cwd: data.cwd });
     for (const [k, v] of Object.entries(data.files)) refs.files.set(k, v);
   }
 }
@@ -636,7 +699,7 @@ function refSpan(c, text, refs) {
   if (c.kind === "commit") {
     const info = refs.commits.get(c.token);
     if (!info) return null;
-    return h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": info.sha,
+    return h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": info.sha, "data-cwd": info.cwd,
       title: [info.sha.slice(0, 12), info.subject, info.author && `${info.author}, ${info.date}`].filter(Boolean).join(" · ") }, text);
   }
   const matches = refs.files.get(c.token);
@@ -722,7 +785,7 @@ function followRef(e) {
   const conv = item ? item.conv : app.route && app.route.id;
   if (!conv) return;
   e.preventDefault();
-  if (ref.dataset.sha) return openCommit(conv, ref.dataset.sha);
+  if (ref.dataset.sha) return openCommit(conv, ref.dataset.sha, null, ref.dataset.cwd);
   const matches = refsOf(conv).files.get(ref.dataset.file) || [];
   const at = { line: ref.dataset.line ? Number(ref.dataset.line) : null, end: ref.dataset.end ? Number(ref.dataset.end) : null };
   if (matches.length === 1) openFile(conv, matches[0], at);
