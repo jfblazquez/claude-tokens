@@ -92,16 +92,51 @@ function icon(name) {
   return svg;
 }
 
-// show(true | false) right after the copy, show(null) once the feedback expires.
-function copyText(text, el, show) {
+// write() copies and may return a promise; show(true | false) right after the copy, show(null) once the feedback expires.
+function copyWith(write, el, show) {
   const done = (ok) => {
     show(ok);
     clearTimeout(el.copyTimer);
     el.copyTimer = setTimeout(() => show(null), COPY_FEEDBACK_MS);
   };
-  const write = navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject(new Error("no clipboard"));
-  write.then(() => done(true), () => done(false));
+  let pending;
+  try {
+    pending = Promise.resolve(write());
+  } catch (err) {
+    pending = Promise.reject(err);
+  }
+  pending.then(() => done(true), () => done(false));
 }
+
+// The copy event takes HTML as it is, while the async API sanitises it inside the page, where the CSP refuses every style
+// attribute; it also works over plain HTTP. The async API is left for browsers that do not fire the event.
+function copyEvent(data) {
+  let done = false;
+  const listener = (e) => {
+    for (const [type, value] of Object.entries(data)) e.clipboardData.setData(type, value);
+    e.preventDefault();
+    done = true;
+  };
+  document.addEventListener("copy", listener, true);
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.removeEventListener("copy", listener, true);
+  }
+  return done;
+}
+
+function writeData(data) {
+  if (copyEvent(data)) return null;
+  const types = Object.keys(data);
+  if (types.length === 1) return navigator.clipboard.writeText(data["text/plain"]);
+  return navigator.clipboard.write([new ClipboardItem(Object.fromEntries(types.map((t) => [t, new Blob([data[t]], { type: t })])))]);
+}
+
+const writeText = (text) => writeData({ "text/plain": text });
+// Pasted into an editor it is the plain text; into a document, a chat or a spreadsheet, the HTML.
+const writeRich = (plain, html) => writeData({ "text/plain": plain, "text/html": html });
+const copyText = (text, el, show) => copyWith(() => writeText(text), el, show);
 
 // Copies the original value, not the rendered text, which may be truncated or carry <wbr> breaks.
 function copyable(el, value) {
@@ -117,16 +152,223 @@ function copyable(el, value) {
   return el;
 }
 
-// Without a label the button shows only the clipboard icon, so the title doubles as its accessible name.
-function copyButton(text, title, label = null) {
+const asWrite = (content) => (typeof content === "function" ? content : () => writeText(content));
+
+// content: the text to copy, or a write() function for anything else; formats: [label, content] pairs offered on
+// right-click. Without a label the button shows only the clipboard icon, so the title doubles as its accessible name.
+function copyButton(content, title, label = null, formats = null) {
   const idle = () => label || icon("clipboard");
   const button = h("button", { class: label ? "btn copy-btn" : "btn copy-btn icon-btn", type: "button", title,
     "aria-label": label ? null : title }, idle());
-  button.addEventListener("click", () => copyText(text, button, (ok) => {
+  const copy = (c) => copyWith(asWrite(c), button, (ok) => {
     if (ok == null) button.replaceChildren(idle());
     else button.replaceChildren(label ? (ok ? "Copied" : "Copy failed") : icon(ok ? "check" : "failed"));
-  }));
+  });
+  button.addEventListener("click", () => copy(content));
+  if (formats) {
+    button.setAttribute("aria-haspopup", "menu");
+    button.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      openCopyMenu(button, formats, copy);
+    });
+  }
   return button;
+}
+
+// A click copies the first format.
+const copyMenuButton = (title, formats) => copyButton(formats[0][1], `${title} · right-click for other formats`, null, formats);
+
+let copyMenu = null;
+
+function closeCopyMenu(refocus) {
+  if (!copyMenu) return;
+  const { menu, button, cleanup } = copyMenu;
+  copyMenu = null;
+  menu.remove();
+  cleanup();
+  if (refocus) button.focus();
+}
+
+function openCopyMenu(button, formats, copy) {
+  closeCopyMenu(false);
+  const items = formats.map(([label, content], i) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item",
+    onclick: () => { closeCopyMenu(true); copy(content); } }, label, i ? null : h("span", { class: "muted" }, "click")));
+  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": "Copy as" }, h("div", { class: "copy-menu-head" }, "Copy as"), items);
+  document.body.append(menu);
+  const r = button.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${r.bottom + 4 + menu.offsetHeight > innerHeight ? Math.max(8, r.top - 4 - menu.offsetHeight) : r.bottom + 4}px`;
+  const outside = (e) => { if (!menu.contains(e.target)) closeCopyMenu(false); };
+  const away = () => closeCopyMenu(false);
+  const keys = (e) => {
+    const i = items.indexOf(document.activeElement);
+    if (e.key === "Escape" || e.key === "Tab") closeCopyMenu(e.key === "Escape");
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+    }
+  };
+  document.addEventListener("pointerdown", outside, true);
+  menu.addEventListener("keydown", keys);
+  for (const type of ["scroll", "resize", "hashchange"]) window.addEventListener(type, away, true);
+  copyMenu = { menu, button, cleanup: () => {
+    document.removeEventListener("pointerdown", outside, true);
+    for (const type of ["scroll", "resize", "hashchange"]) window.removeEventListener(type, away, true);
+  } };
+  items[0].focus();
+}
+
+// ---------- copy formats ----------
+// Pasted HTML keeps only inline styles, and editors such as Word, Outlook or Teams show it on a light page, so the
+// light theme's colours are written out rather than read from the page, which may be dark.
+const EXPORT_MONO = "Consolas, 'Cascadia Mono', Menlo, 'Liberation Mono', monospace";
+const EXPORT_ROOT = "font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif; font-size: 14px; line-height: 1.5; "
+  + "color: #17202b";
+const EXPORT_STYLES = {
+  pre: `margin: 8px 0; padding: 8px 12px; background: #fafafa; border: 1px solid #dce1e8; border-radius: 6px; font-family: ${EXPORT_MONO}; `
+    + "font-size: 13px; line-height: 1.45; color: #383a42; white-space: pre-wrap",
+  code: `font-family: ${EXPORT_MONO}; font-size: 0.92em; background: #f2f4f8; padding: 1px 4px; border-radius: 4px`,
+  table: "border-collapse: collapse; margin: 8px 0",
+  th: "border: 1px solid #dce1e8; padding: 4px 10px; background: #eef1f5; font-weight: 600; text-align: left",
+  td: "border: 1px solid #dce1e8; padding: 4px 10px",
+  blockquote: "margin: 8px 0; padding-left: 12px; border-left: 3px solid #dce1e8; color: #5a6575",
+  a: "color: #2253b8",
+  hr: "border: 0; border-top: 1px solid #dce1e8",
+};
+// atom-one-light, as in vendor/hljs-light.css; title.class_ comes before title so the more specific colour wins.
+const EXPORT_HLJS = [
+  [["comment", "quote"], "color: #a0a1a7; font-style: italic"],
+  [["doctag", "formula", "keyword"], "color: #a626a4"],
+  [["deletion", "name", "section", "selector-tag", "subst"], "color: #e45649"],
+  [["literal"], "color: #0184bb"],
+  [["addition", "attribute", "regexp", "string"], "color: #50a14f"],
+  [["attr", "number", "selector-attr", "selector-class", "selector-pseudo", "template-variable", "type", "variable"], "color: #986801"],
+  [["built_in", "class_"], "color: #c18401"],
+  [["bullet", "link", "meta", "selector-id", "symbol", "title"], "color: #4078f2"],
+  [["emphasis"], "font-style: italic"],
+  [["strong"], "font-weight: 700"],
+];
+const EXPORT_ATTRS = new Set(["href", "align", "colspan", "rowspan", "start"]);
+const VOID_TAGS = new Set(["br", "hr", "img", "wbr"]);
+
+const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function hljsStyle(el) {
+  const names = [...el.classList].map((c) => c.replace(/^hljs-/, ""));
+  const hit = EXPORT_HLJS.find(([classes]) => classes.some((c) => names.includes(c)));
+  return hit ? hit[1] : null;
+}
+
+// Written as a string, not as style attributes on live nodes, which the page's CSP would refuse.
+function exportNode(node) {
+  if (node.nodeType === Node.TEXT_NODE) return escapeHtml(node.data);
+  if (node.nodeType !== Node.ELEMENT_NODE || node.tagName === "BUTTON") return "";
+  const tag = node.tagName.toLowerCase();
+  const inPre = tag === "code" && node.parentElement && node.parentElement.tagName === "PRE";
+  const style = tag === "span" ? hljsStyle(node) : inPre ? null : EXPORT_STYLES[tag];
+  const attrs = [...node.attributes].filter((a) => EXPORT_ATTRS.has(a.name)).map((a) => ` ${a.name}="${escapeHtml(a.value)}"`).join("")
+    + (style ? ` style="${style}"` : "");
+  if (VOID_TAGS.has(tag)) return `<${tag}${attrs}>`;
+  return `<${tag}${attrs}>${[...node.childNodes].map(exportNode).join("")}</${tag}>`;
+}
+
+const exportHtml = (node) => `<div style="${EXPORT_ROOT}">${exportNode(node)}</div>`;
+const exportChildren = (box) => `<div style="${EXPORT_ROOT}">${[...box.childNodes].map(exportNode).join("")}</div>`;
+
+const BLOCK_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BLOCKQUOTE", "UL", "OL", "TABLE", "HR", "DIV"]);
+
+// Rendered text without the Markdown marks; lists keep a bullet or number and tables become tab-separated rows.
+function plainBlocks(el) {
+  const blocks = [];
+  let inline = "";
+  const flush = () => {
+    if (inline.trim()) blocks.push(inline.trim());
+    inline = "";
+  };
+  for (const node of el.childNodes) {
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "BR") inline += "\n";
+    else if (node.nodeType !== Node.ELEMENT_NODE || !BLOCK_TAGS.has(node.tagName)) inline += node.textContent;
+    else {
+      flush();
+      const tag = node.tagName;
+      if (tag === "PRE") blocks.push(node.textContent.replace(/\n$/, ""));
+      else if (tag === "TABLE") blocks.push(tableText(node));
+      else if (tag === "HR") blocks.push("———");
+      else if (tag === "UL" || tag === "OL") {
+        const start = Number(node.getAttribute("start")) || 1;
+        blocks.push([...node.children].map((li, i) => {
+          const mark = tag === "OL" ? `${start + i}. ` : "• ";
+          return mark + plainBlocks(li).join("\n").replace(/\n/g, `\n${" ".repeat(mark.length)}`);
+        }).join("\n"));
+      } else if (tag === "BLOCKQUOTE") blocks.push(plainBlocks(node).join("\n\n").replace(/^/gm, "    "));
+      else blocks.push(...plainBlocks(node));
+    }
+  }
+  flush();
+  return blocks;
+}
+
+const plainText = (box) => plainBlocks(box).join("\n\n");
+
+// With format, what a click copies, carries HTML for documents and chats and the Markdown for plain-text editors.
+function markdownFormats(markdown) {
+  const box = () => markdownBox(markdown, "md");
+  return [
+    ["With format", () => writeRich(markdown, exportChildren(box()))],
+    ["Plain text", () => writeText(plainText(box()))],
+    ["Markdown", markdown],
+    ["HTML source", () => writeText(exportChildren(box()))],
+  ];
+}
+
+function promptFormats(text) {
+  const html = `<div style="${EXPORT_ROOT}; white-space: pre-wrap">${escapeHtml(text)}</div>`;
+  return [["With format", () => writeRich(text, html)], ["Plain text", text]];
+}
+
+function codeFormats(pre) {
+  const code = pre.textContent.replace(/\n$/, "");
+  const lang = ([...(pre.querySelector("code") || pre).classList].find((c) => c.startsWith("language-")) || "").slice(9);
+  const fence = "`".repeat(Math.max(3, ...(code.match(/`+/g) || []).map((run) => run.length + 1)));
+  return [
+    ["With format", () => writeRich(code, exportHtml(pre))],
+    ["Plain text", code],
+    ["Markdown", `${fence}${lang === "plaintext" ? "" : lang}\n${code}\n${fence}`],
+  ];
+}
+
+const csvCell = (s) => (/[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+const tableRows = (table) => [...table.rows].map((r) => [...r.cells].map((c) => c.textContent.trim()));
+const tableText = (table) => tableRows(table).map((r) => r.map((c) => c.replace(/[\t\n]/g, " ")).join("\t")).join("\n");
+
+// source: the table's Markdown, or null when it is not known.
+function tableFormats(table, source) {
+  const rows = tableRows(table);
+  const markdown = source || rows.map((r) => `| ${r.map((c) => c.replace(/\|/g, "\\|")).join(" | ")} |`)
+    .flatMap((line, i) => (i === 1 ? [`|${" --- |".repeat(rows[0].length)}`, line] : [line])).join("\n");
+  return [
+    ["With format", () => writeRich(markdown, exportHtml(table))],
+    ["Markdown", markdown],
+    ["CSV", rows.map((r) => r.map(csvCell).join(",")).join("\r\n")],
+    ["Tab-separated (spreadsheet)", tableText(table)],
+  ];
+}
+
+const IMAGE_EXTENSIONS = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+
+function imageFormats(b, img) {
+  const dataUrl = `data:${b.media_type};base64,${b.data}`;
+  const download = () => {
+    h("a", { href: dataUrl, download: `image.${IMAGE_EXTENSIONS[b.media_type]}` }).click();
+  };
+  // Browsers only take PNG images on the clipboard; the promise keeps Safari's user gesture while the PNG is made.
+  return [
+    ["Image (PNG)", () => navigator.clipboard.write([new ClipboardItem({ "image/png": pngOf(b, img) })])],
+    ["Data URL", dataUrl],
+    ["Markdown", `![image](${dataUrl})`],
+    ["Base64", b.data],
+    [`Download .${IMAGE_EXTENSIONS[b.media_type]}`, download],
+  ];
 }
 
 const shellQuote = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
@@ -1071,13 +1313,16 @@ const SANITIZE = {
   FORBID_ATTR: ["style"],
 };
 
-function renderMarkdown(markdown, cls = "card md") {
+// tableSources gets the Markdown of each table, in the order of the page.
+function markdownBox(markdown, cls, tableSources = []) {
   const box = h("article", { class: cls });
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
     box.append(h("pre", {}, markdown));
     return box;
   }
-  box.innerHTML = DOMPurify.sanitize(marked.parse(markdown), SANITIZE);
+  const tokens = marked.lexer(markdown);
+  marked.walkTokens(tokens, (t) => { if (t.type === "table") tableSources.push(t.raw.trim()); });
+  box.innerHTML = DOMPurify.sanitize(marked.parser(tokens), SANITIZE);
   for (const a of box.querySelectorAll("a[href]")) {
     if (/^(https?:|mailto:)/i.test(a.getAttribute("href"))) {
       a.setAttribute("target", "_blank");
@@ -1094,8 +1339,25 @@ function renderMarkdown(markdown, cls = "card md") {
       hljs.highlightElement(code);
     }
   }
-  for (const pre of box.querySelectorAll("pre")) copyable(pre, pre.textContent.replace(/\n$/, ""));
   return box;
+}
+
+function renderMarkdown(markdown, cls = "card md") {
+  const tableSources = [];
+  const box = markdownBox(markdown, cls, tableSources);
+  for (const pre of box.querySelectorAll("pre")) copyCorner(pre, "Copy the code", codeFormats(pre));
+  const tables = box.querySelectorAll("table");
+  // A <table> written as HTML in the Markdown has no table token, so the sources only line up when the counts match.
+  const sources = tables.length === tableSources.length ? tableSources : null;
+  tables.forEach((table, i) => copyCorner(table, "Copy the table", tableFormats(table, sources && sources[i])));
+  return box;
+}
+
+// The button sits over the top right corner and shows on hover, so the block keeps its whole width.
+function copyCorner(el, title, formats) {
+  const wrap = h("div", { class: "copy-wrap" });
+  el.replaceWith(wrap);
+  wrap.append(el, copyMenuButton(title, formats));
 }
 
 VIEWS.response = convView("/last-response", {
@@ -1106,7 +1368,7 @@ VIEWS.response = convView("/last-response", {
         + "Responses from subagents are not shown here.");
     }
     const box = renderMarkdown(data.last_response);
-    box.prepend(copyButton(data.last_response, "Copy the response as Markdown"));
+    box.prepend(copyMenuButton("Copy the response", markdownFormats(data.last_response)));
     return [h("div", { class: "meta" }, "Last assistant text response of the main conversation · rendered Markdown"), box];
   },
 });
@@ -1271,7 +1533,16 @@ function imageBlock(b) {
   if (!b.data || !IMAGE_TYPES.has(b.media_type)) return h("span", { class: "chip" }, `${caption} · not in the log`);
   const img = h("img", { src: `data:${b.media_type};base64,${b.data}`, alt: "Image from the conversation", loading: "lazy",
     title: "Click to toggle full size", onclick: () => img.classList.toggle("full") });
-  return h("figure", { class: "img-block" }, img, h("figcaption", {}, caption));
+  return h("figure", { class: "img-block" }, img, h("figcaption", {}, caption, copyMenuButton("Copy the image", imageFormats(b, img))));
+}
+
+function pngOf(b, img) {
+  if (b.media_type === "image/png") return Promise.resolve(new Blob([Uint8Array.from(atob(b.data), (c) => c.charCodeAt(0))], { type: "image/png" }));
+  return img.decode().then(() => new Promise((resolve, reject) => {
+    const canvas = h("canvas", { width: img.naturalWidth, height: img.naturalHeight });
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("no PNG"))), "image/png");
+  }));
 }
 
 // Outside the collapsed tool block, so they show without opening it.
@@ -1375,6 +1646,13 @@ function responseExtras(m) {
   return parts.length ? h("span", { class: "v3 extras" }, parts.join(" · ")) : null;
 }
 
+// Only the text the message says: tool calls, results and thinking are left out.
+function messageCopy(m) {
+  const text = m.blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n\n");
+  if (!text) return null;
+  return copyMenuButton("Copy the message", m.role === "assistant" ? markdownFormats(text) : promptFormats(text));
+}
+
 // showModel: the model name is written only when it differs from the previous response; the swatch is always there.
 function messageItem(m, tools, showModel) {
   const time = m.when ? h("time", { datetime: m.when.toISOString(), title: `${m.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(m.when))
@@ -1390,7 +1668,7 @@ function messageItem(m, tools, showModel) {
         cacheMiss(m.usage) ? h("span", { class: "badge warn", title: "Nothing was read from cache: the whole context was written again" },
           "cache miss") : null,
         responseExtras(m), usageStats(m)),
-      h("div", { class: "msg-body" }, messageBlocks(m, tools)));
+      h("div", { class: "msg-body" }, messageBlocks(m, tools)), messageCopy(m));
     item.style.borderLeftColor = colorOf(m.model);
     return item;
   }
@@ -1399,7 +1677,8 @@ function messageItem(m, tools, showModel) {
     h("div", { class: "msg-head" }, num, time, h("b", {}, KIND_LABELS[m.kind]),
       m.queued ? h("span", { class: "badge warn", title: "Typed while the model was still working" }, "sent mid-turn") : null,
       m.title ? h("span", { class: "event-text" }, m.title) : null),
-    h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)));
+    h("div", { class: "msg-body" }, collapsed ? lazyDetails("blk", "Show", () => messageBlocks(m, tools)) : messageBlocks(m, tools)),
+    messageCopy(m));
 }
 
 // context carries the day heading and the model last shown, so items appended later continue the list.
@@ -1755,7 +2034,7 @@ function countText(messages) {
 }
 
 VIEWS.messages = convView(messagesPath, {
-  title: (route) => `Conversation · ${convTitle(route)}`,
+  title: convTitle,
   load: (route, opts) => {
     // A fresh open starts at the latest message; a refresh keeps the reader where they are.
     if (!opts.refresh) Object.assign(messagesState, { toBottom: true, restore: false });
