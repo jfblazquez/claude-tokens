@@ -65,6 +65,27 @@ function closePanel(item) {
   if (dock.active && dock.active.onShow) requestAnimationFrame(() => dock.active.onShow());
 }
 
+// What a person closes goes through here: a shell running a command asks first.
+async function requestClose(item) {
+  if (item.confirmClose && !(await item.confirmClose())) return;
+  closePanel(item);
+}
+
+async function closeAll() {
+  for (const item of dock.items.slice()) await requestClose(item);
+}
+
+// A middle click closes, as on browser tabs; held down it would otherwise start autoscroll or paste on Linux.
+function middleCloses(el, item) {
+  el.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+  el.addEventListener("auxclick", (e) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    requestClose(item);
+  });
+  return el;
+}
+
 function setDockMode(mode) {
   dock.mode = mode;
   store(DOCK_MODE_KEY, mode);
@@ -75,11 +96,11 @@ function setDockMode(mode) {
 const KIND_ICONS = { commit: "⎇", file: "▤", shell: "❯", pick: "≡" };
 
 function panelTab(item) {
-  return h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false", title: item.tip || item.title,
-    onclick: () => focusPanel(item), onauxclick: (e) => { if (e.button === 1) closePanel(item); } },
+  return middleCloses(h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false",
+    title: item.tip || item.title, onclick: () => focusPanel(item) },
   h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), h("span", { class: "dock-title" }, item.title),
   h("button", { class: "dock-x", type: "button", title: "Close (middle click on the tab)", "aria-label": `Close ${item.title}`,
-    onclick: (e) => { e.stopPropagation(); closePanel(item); } }, "×"));
+    onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×")), item);
 }
 
 // Tabs that do not fit stay reachable from here, next to the layout and closing them all.
@@ -115,7 +136,7 @@ function openPanelMenu(button) {
     ...dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), " ",
       h("span", { class: "dock-title" }, item.title)], () => focusPanel(item), { on: item === dock.active, tip: item.tip || item.title })),
     ...DOCK_MODES.map(([mode, label]) => entry(label, () => setDockMode(mode), { role: "menuitemradio", on: mode === dock.mode })),
-    entry("Close all panels", () => dock.items.slice().forEach(closePanel)),
+    entry("Close all panels", closeAll),
   ];
   const n = dock.items.length;
   const menu = h("div", { class: "copy-menu dock-menu", role: "menu", "aria-label": "Panels" },
@@ -192,7 +213,7 @@ function drawDock() {
   }, { passive: false });
   const head = h("div", { class: "dock-head" }, tabs, panelMenu(tabs),
     dock.mode === "modal" ? h("button", { class: "dock-x big", type: "button", title: "Close all panels",
-      "aria-label": "Close all panels", onclick: () => { dock.items.slice().forEach(closePanel); } }, "×") : null);
+      "aria-label": "Close all panels", onclick: closeAll }, "×") : null);
   requestAnimationFrame(() => {
     const current = tabs.querySelector('[aria-selected="true"]');
     if (current) tabs.scrollLeft = Math.max(0, Math.min(tabs.scrollLeft, current.offsetLeft - 8),
@@ -226,7 +247,7 @@ function drawDock() {
     dock.el.className = "dock modal";
     const box = h("div", { class: "dock-box", role: "dialog", "aria-modal": "true", "aria-label": active.title },
       head, h("div", { class: "dock-bodies" }, bodies));
-    const backdrop = h("div", { class: "dock-backdrop", onclick: () => dock.items.slice().forEach(closePanel) });
+    const backdrop = h("div", { class: "dock-backdrop", onclick: closeAll });
     dock.el.replaceChildren(backdrop, box);
   }
 }
@@ -241,8 +262,8 @@ function drawFloating() {
       item.rect = { x: Math.max(8, innerWidth - w - 24 - (n % 6) * 28), y: barHeight() + 16 + (n % 6) * 28, w, h: hgt };
     }
     if (item.min) {
-      tray.push(h("button", { class: "tray-item", type: "button", title: item.title, onclick: () => focusPanel(item) },
-        KIND_ICONS[item.kind], " ", h("span", {}, item.title)));
+      tray.push(middleCloses(h("button", { class: "tray-item", type: "button", title: item.title, onclick: () => focusPanel(item) },
+        KIND_ICONS[item.kind], " ", h("span", {}, item.title)), item));
       return;
     }
     item.body.hidden = false;
@@ -250,8 +271,9 @@ function drawFloating() {
       h("span", { class: "dock-title", title: item.tip || item.title }, item.tip || item.title), panelMenu(null),
       h("button", { class: "dock-x", type: "button", title: "Minimize", "aria-label": "Minimize",
         onclick: (e) => { e.stopPropagation(); item.min = true; drawDock(); } }, "–"),
-      h("button", { class: "dock-x", type: "button", title: "Close", "aria-label": `Close ${item.title}`,
-        onclick: (e) => { e.stopPropagation(); closePanel(item); } }, "×"));
+      h("button", { class: "dock-x", type: "button", title: "Close (middle click on the title)", "aria-label": `Close ${item.title}`,
+        onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×"));
+    middleCloses(title, item);
     const win = h("section", { class: `dock-win${item === dock.active ? " active" : ""}`, role: "dialog", "aria-label": item.title,
       css: { left: `${item.rect.x}px`, top: `${item.rect.y}px`, width: `${item.rect.w}px`, height: `${item.rect.h}px`, zIndex: item.z || 30 } },
     title, item.body);
@@ -297,7 +319,7 @@ function escapeClosesPanel(e) {
   if (e.key !== "Escape" || !dock.items.length || pick.el || e.target.closest(".xterm")) return;
   if (dock.mode === "modal" || (dock.el && dock.el.contains(e.target))) {
     const item = dock.mode === "modal" ? dock.active : dock.items.find((i) => i.body.contains(e.target));
-    if (item) closePanel(item);
+    if (item) requestClose(item);
   }
 }
 
@@ -602,7 +624,8 @@ function openShell(conv, cwd) {
     item.tip = `Shell ${n} in ${cwd}`;
     const screen = h("div", { class: "term" });
     const status = h("span", { class: "muted" }, "Starting…");
-    item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen);
+    const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
+    item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen, note);
     const term = new Terminal({ fontFamily: cssVar("--mono") || "monospace", fontSize: 13, cursorBlink: true, scrollback: 5000,
       theme: terminalTheme(), allowProposedApi: false });
     const sh = { id: null, queue: "", sending: false, cols: 80, rows: 24, ended: false };
@@ -640,9 +663,28 @@ function openShell(conv, cwd) {
       pump();
     });
     term.registerLinkProvider(shellLinks(term, conv, sh));
+    // As in a terminal: a right-click copies the selection and Ctrl+V pastes, instead of sending ^V to the shell.
+    screen.addEventListener("contextmenu", (e) => {
+      if (!term.hasSelection()) return;
+      e.preventDefault();
+      const chosen = term.getSelection();
+      term.clearSelection();
+      copyWith(() => writeText(chosen), note, (ok) => { note.textContent = ok == null ? "" : ok ? "Copied" : "Copy failed"; });
+      term.focus();
+    });
+    term.attachCustomKeyEventHandler((e) => !(e.type === "keydown" && e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
+      && e.key.toLowerCase() === "v"));
     item.onShow = () => {
       fit();
       if (item === dock.active || dock.mode === "float") term.focus();
+    };
+    item.confirmClose = async () => {
+      if (!sh.id || sh.ended) return true;
+      let command = null;
+      try {
+        command = (await postJson(`/api/shells/${sh.id}/state`, {})).shell.command;
+      } catch (_) { /* gone already: nothing to lose */ }
+      return !command || confirm(`${command} is still running in ${item.title}. Close the shell and stop it?`);
     };
     item.onClose = () => {
       if (sh.id && shellStream.shells.delete(sh.id)) streamShells();

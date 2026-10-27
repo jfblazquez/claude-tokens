@@ -498,14 +498,16 @@ view) lists every open panel, closes them all and switches the layout to a botto
 panel, floating windows (dragged by the title, resized from the corner,
 minimized to a tray) or an overlay; the browser remembers the choice and the
 sizes. With the bottom panel, the message box of a live conversation stays above
-it. Middle click closes a tab, and Escape the panel that has the focus, except
-inside a terminal.
+it. Middle click closes a tab (or a floating window by its title), and Escape
+the panel that has the focus, except inside a terminal; a shell running a command
+(not at its prompt) asks before it is closed and the command stopped.
 
 In a file, a double-click on a line copies `path:line`, and a double-click in the
 message box of a live conversation then pastes it where the cursor is, without
 sending it. Selecting text opens a menu: **Copy**, **Copy with path:lines** (that
 header on its own line, then the text) and **Ask Claude**, which puts the header
-and the text, fenced, into the message box where its cursor is.
+and the text, fenced, into the message box where its cursor is. In a shell, as
+in a terminal, a right-click on a selection copies it and Ctrl+V pastes.
 
 All of this needs the send key, since it reads any file you can read and runs
 commands as you. The terminal is [xterm.js](https://xtermjs.org/), bundled like

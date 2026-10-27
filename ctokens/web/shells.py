@@ -117,6 +117,16 @@ class Shell:
         except OSError:
             return None
 
+    def command(self):
+        """The program running in the foreground instead of the shell's prompt, or None at the prompt."""
+        group = None if self.exited else self.foreground()
+        if group is None or group == self.proc.pid:
+            return None
+        try:
+            return Path(f"/proc/{group}/comm").read_text().strip() or str(group)
+        except OSError:
+            return str(group)
+
     def write(self, data):
         if self.exited:
             raise ShellError("The shell has ended.")
@@ -164,7 +174,7 @@ class Shell:
 
     def public(self):
         return {"id": self.token, "conversation_id": self.conversation_id, "cwd": self.cwd, "pid": self.proc.pid,
-                "started": self.started, "exited": self.exited, "code": self.code}
+                "started": self.started, "exited": self.exited, "code": self.code, "command": self.command()}
 
 
 class Shells:

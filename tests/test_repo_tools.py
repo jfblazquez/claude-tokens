@@ -169,6 +169,15 @@ class ShellsTest(unittest.TestCase):
         self.assertTrue(shell.exited)
         self.assertEqual(shell.code, 3)
 
+    def test_command_in_the_foreground(self):
+        shell = self.shells.open(CONV, self.tmp.name)
+        self.assertIsNone(shell.command())
+        shell.write(b"sleep 30\n")
+        deadline = time.monotonic() + 5
+        while shell.command() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(shell.public()["command"], "sleep")
+
     def test_close_hangs_up(self):
         shell = self.shells.open(CONV, self.tmp.name)
         self.assertTrue(self.shells.close(shell.token))
@@ -272,6 +281,8 @@ class RepoApiTest(unittest.TestCase):
         token = data["shell"]["id"]
         self.assertEqual(data["shell"]["cwd"], str(self.repo))
         self.assertEqual(self.request("POST", f"/api/shells/{token}/resize", {"cols": 91, "rows": 21})[0], 200)
+        status, data = self.request("POST", f"/api/shells/{token}/state", {})
+        self.assertEqual((status, data["shell"]["id"], data["shell"]["command"]), (200, token, None))
         self.assertEqual(self.request("POST", f"/api/shells/{token}/input", {"data": "stty size; exit 0\n"})[0], 200)
         events = self.stream(f"{token}:0")
         self.assertIn(b"21 91", output(events, token))

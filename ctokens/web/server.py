@@ -51,7 +51,7 @@ CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|b
 ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|new-session|rename|favorite|resolve|shell)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
 REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
-SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close)")
+SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close|state)")
 SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SHELL_REAP_EVERY = 30.0
 # The events stream checks the log, the session and its status line this often; a new log line shows within a tick.
@@ -243,6 +243,8 @@ class Handler(BaseHTTPRequestHandler):
         if name == "close":
             self.server.shells.close(token)
             return json_response(200, {"closed": True})
+        if name == "state":
+            return json_response(200, {"shell": shell.public()})
         if name == "resize":
             shell.resize(clamp(data.get("cols"), 80), clamp(data.get("rows"), 24))
             return json_response(200, {"shell": shell.public()})
