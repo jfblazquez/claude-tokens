@@ -24,6 +24,9 @@ START_TIMEOUT = 30
 START_POLL = 0.5
 # The spinner glyph cycles; the verb ends in an ellipsis and the elapsed time and tokens follow in parentheses.
 SPINNER = re.compile(r"^[·✢✳✶✻✽*]\s+(\S[^…]*….*?)\s*$")
+# The prompt box sits between two rules; its first character is ❯ (or >) for a message and ! in shell mode.
+RULE = re.compile(r"^\s*[─━]{8}")
+PROMPT_MARKS = {"❯": "prompt", ">": "prompt", "!": "shell"}
 
 
 class SendError(Exception):
@@ -152,10 +155,32 @@ def channel(info):
     return socket, pane
 
 
+def prompt_mode(socket, pane):
+    """'prompt' or 'shell' from the prompt box on the session's screen; None when no box is found."""
+    try:
+        lines = tmux(socket, "capture-pane", "-p", "-t", pane).splitlines()
+    except SendError:
+        return None
+    rules = [i for i, line in enumerate(lines) if RULE.match(line)]
+    for top, bottom in zip(rules[-2::-1], rules[:0:-1]):
+        inside = [line.strip() for line in lines[top + 1:bottom] if line.strip()]
+        if inside:
+            return PROMPT_MARKS.get(inside[0][0])
+    return None
+
+
 def target(info):
     """(tmux socket, pane) showing this session's prompt, or SendError saying why text cannot go there now."""
     socket, pane = channel(info)
     status = info.get("status")
+    # Claude Code does not always write the registry when shell mode ends, and typing into shell mode runs a command,
+    # so the screen has the last word on shell mode either way.
+    if status in SENDABLE or status == "shell":
+        mode = prompt_mode(socket, pane)
+        if mode == "shell":
+            raise SendError("The session is in shell mode; deal with it in its terminal first.")
+        if mode == "prompt":
+            status = status if status in SENDABLE else "idle"
     if status not in SENDABLE:
         state = f"waiting ({info['waiting_for']})" if info.get("waiting_for") else STATES.get(status, status)
         raise SendError(f"The session is {state}; deal with it in its terminal first.")

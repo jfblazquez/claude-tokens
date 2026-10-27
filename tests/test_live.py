@@ -103,10 +103,11 @@ class SendTest(LiveTestCase):
     def test_pastes_then_presses_enter(self):
         sent = live.send(self.sessions, CONV_A, "first line\nsecond line")
         self.assertEqual(sent["pid"], 41)
-        commands = [call.args[0] for call in self.run.call_args_list]
+        commands = [call.args[0] for call in self.run.call_args_list if "capture-pane" not in call.args[0]]
         self.assertEqual(commands[0], ["tmux", "-S", SOCKET, "display-message", "-p", "-t", PANE, "#{pane_tty}"])
         self.assertEqual(commands[1][:4], ["tmux", "-S", SOCKET, "load-buffer"])
-        self.assertEqual(self.run.call_args_list[1].kwargs["input"], "first line\nsecond line")
+        self.assertEqual([c for c in self.run.call_args_list if "load-buffer" in c.args[0]][0].kwargs["input"],
+                         "first line\nsecond line")
         buffer = commands[1][5]
         self.assertEqual(commands[2], ["tmux", "-S", SOCKET, "paste-buffer", "-p", "-d", "-b", buffer, "-t", PANE])
         self.assertEqual(commands[3], ["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "Enter"])
@@ -122,6 +123,25 @@ class SendTest(LiveTestCase):
                 with self.assertRaises(live.SendError):
                     live.send(self.sessions, CONV_A, "hi")
         self.assertFalse([call for call in self.run.call_args_list if "paste-buffer" in call.args[0]])
+
+    def screen(self, mark):
+        rule = "─" * 40
+        text = f"● Done.\n{rule}\n{mark} \n{rule}\n  ⏵⏵ auto mode on\n❯ ◯ general-purpose\n"
+        self.run.side_effect = lambda command, **kw: (subprocess.CompletedProcess(command, 0, text, "")
+                                                      if "capture-pane" in command else tmux_ok(command))
+
+    def test_the_screen_has_the_last_word_on_shell_mode(self):
+        # Claude Code may leave "shell" in the registry after shell mode ends, and may not have written it yet.
+        for status, mark, problem in (("shell", "❯", None), ("shell", "!", "in shell mode"), ("idle", "!", "in shell mode"),
+                                      ("busy", "!", "in shell mode"), ("idle", "❯", None), ("shell", "?", "in shell mode")):
+            with self.subTest(status=status, mark=mark):
+                record(self.sessions, 41, CONV_A, status=status)
+                self.screen(mark)
+                found = live.send_problem(self.info())
+                if problem is None:
+                    self.assertIsNone(found)
+                else:
+                    self.assertIn(problem, found)
 
     def test_read_only_only_for_sessions_without_a_terminal_to_type_in(self):
         record(self.sessions, 41, CONV_A, status="waiting", waitingFor="permission prompt")

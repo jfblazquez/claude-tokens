@@ -1299,7 +1299,7 @@ function convHead(route) {
     h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
       resume && !live ? copyButton(resume, resume, "Copy resume") : null),
     h("span", { class: "conv-actions-head" }, live ? null : startButton(route.id, "go-live"), startButton(route.id, "new-session"),
-      startError(route.id))];
+      row || live ? shellButton(route.id, row ? row.project : live.cwd) : null, startError(route.id))];
   if (row) {
     meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmtBytes(row.size_bytes)} · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
@@ -2061,7 +2061,7 @@ function watchConversation() {
   if (stream.id === id && stream.source === source && (stream.es || !id)) return;
   if (stream.es) stream.es.close();
   Object.assign(stream, { id, source, es: null, opened: false, activity: null });
-  if (!id || typeof EventSource === "undefined") return;
+  if (!id || typeof EventSource === "undefined" || document.hidden) return;
   const es = new EventSource(withSource(`/api/conversations/${encodeURIComponent(id)}/events`, source));
   stream.es = es;
   const mine = () => stream.es === es;
@@ -2077,6 +2077,21 @@ function watchConversation() {
     stream.activity = JSON.parse(e.data).text;
     drawComposer();
   });
+}
+
+// A browser opens at most six connections to a host, shared by all its tabs, and each stream holds one; a hidden tab
+// gives its stream back and catches up when shown again.
+function streamWhileVisible() {
+  if (document.hidden) {
+    if (stream.es) stream.es.close();
+    stream.es = null;
+    return;
+  }
+  watchConversation();
+  if (stream.id) {
+    logGrew();
+    fetchLive(stream.id);
+  }
 }
 
 function liveChanged(id, data) {
@@ -2660,6 +2675,7 @@ function updateToTop() {
 
 function boot() {
   takeSendKey();
+  startPanels();
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
   document.body.append(h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
     onclick: () => window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "↑"));
@@ -2669,6 +2685,7 @@ function boot() {
   auto.addEventListener("change", () => setAutoRefresh(auto.checked));
   $("refresh").addEventListener("click", () => load({ refresh: true }));
   window.addEventListener("hashchange", navigate);
+  document.addEventListener("visibilitychange", streamWhileVisible);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     renderedBodies = new WeakMap();
     if (app.route) show({ keepScroll: true });

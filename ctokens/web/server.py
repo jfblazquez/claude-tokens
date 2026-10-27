@@ -1,11 +1,13 @@
 """HTTP server: security gate, routes and JSON responses."""
 from __future__ import annotations
 
+import base64
 import copy
 import hmac
 import json
 import os
 import re
+import secrets
 import threading
 import time
 import traceback
@@ -21,30 +23,38 @@ from ..content import bash_commands, conversation_messages, last_response, touch
 from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, rename, send,
                     send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
+from ..repo import FileIndex, RepoError, find_commits, find_files, read_file, repo_root, show_commit
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache, TranscriptCache
 from .favorites import Favorites, favorites_path
+from .shells import MAX_SHELLS, ShellError, Shells, clamp
 
 HOST = "127.0.0.1"
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 VENDOR_FILES = ("chart.umd.min.js", "marked.min.js", "purify.min.js", "highlight.min.js",
-                "hljs-light.css", "hljs-dark.css")
-STATIC_FILES = {"/": "index.html", "/static/app.js": "app.js", "/static/analysis.js": "analysis.js",
+                "hljs-light.css", "hljs-dark.css", "xterm.min.js", "xterm.css")
+STATIC_FILES = {"/": "index.html", "/static/app.js": "app.js", "/static/analysis.js": "analysis.js", "/static/panels.js": "panels.js",
                 "/static/app.css": "app.css",
                 **{f"/static/vendor/{name}": f"vendor/{name}" for name in VENDOR_FILES}}
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8"}
 JSON_TYPE = "application/json; charset=utf-8"
-CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+# xterm.js draws the terminal with <style> elements; the page gives them a nonce new on every load.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'nonce-{nonce}'; img-src 'self' data:; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+NONCE_MARK = b"{{style-nonce}}"
 COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live))?")
-ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session|rename|favorite)")
+ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session|rename|favorite|resolve|shell)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
+REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
+SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close)")
+SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+SHELL_REAP_EVERY = 30.0
 # The events stream checks the log, the session and its status line this often; a new log line shows within a tick.
 EVENT_TICK = 0.25
 EVENT_RESCAN = 2.0
@@ -100,6 +110,8 @@ class Handler(BaseHTTPRequestHandler):
         events = EVENTS_ROUTE.fullmatch(path)
         if events:
             return self.events(events.group(1), parse_qs(query).get("source", ["main"])[0])
+        if path == "/api/shells/stream":
+            return self.shell_stream(parse_qs(query).get("from", [""])[0])
         try:
             response = self.route(path, query)
         except Exception:
@@ -111,13 +123,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.partition("?")[0]
-        match = ACTION_ROUTE.fullmatch(path)
+        match = ACTION_ROUTE.fullmatch(path) or SHELL_ACTION_ROUTE.fullmatch(path)
         if not match:
             return self.method_not_allowed()
         if not self.host_allowed():
             return self.discard_body()
         try:
-            response = self.action(*match.groups())
+            response = self.action(match)
         except Exception:
             traceback.print_exc()
             response = json_response(500, {"error": "internal error"})
@@ -125,7 +137,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def method_not_allowed(self):
         self.discard_body()
-        allow = "POST" if ACTION_ROUTE.fullmatch(self.path.partition("?")[0]) else "GET, HEAD"
+        path = self.path.partition("?")[0]
+        allow = "POST" if ACTION_ROUTE.fullmatch(path) or SHELL_ACTION_ROUTE.fullmatch(path) else "GET, HEAD"
         if self.host_allowed():
             self.respond(json_response(405, {"error": "method not allowed"}, (("Allow", allow),)))
 
@@ -149,9 +162,10 @@ class Handler(BaseHTTPRequestHandler):
             return "missing"
         return "ok" if hmac.compare_digest(given.encode("utf-8"), key.encode("utf-8")) else "wrong"
 
-    def action(self, conversation_id, name):
-        """POST actions start, drive or rename claude sessions, so on top of the Host check they need the key; starring
-        a conversation touches only this tool's own file."""
+    def action(self, match):
+        """POST actions start, drive or rename claude sessions, run shells or read files, so on top of the Host check
+        they need the key; starring a conversation touches only this tool's own file."""
+        name = match.group(2)
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -174,6 +188,9 @@ class Handler(BaseHTTPRequestHandler):
             data = None
         if not isinstance(data, dict):
             return json_response(400, {"error": "expected a JSON object"})
+        if match.re is SHELL_ACTION_ROUTE:
+            return self.shell_action(match.group(1), name, data)
+        conversation_id = match.group(1)
         config = self.server.config
         sessions = sessions_dir(config.projects_dir)
         path, live = locate(config, conversation_id)
@@ -184,20 +201,79 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(400, {"error": "expected {\"favorite\": true|false}"})
             self.server.favorites.set(conversation_id, data["favorite"])
             return json_response(200, {"favorite": data["favorite"]})
+        cwd = project_path_of(path) if path is not None else live["cwd"]
+        if name == "resolve":
+            commits, files = data.get("commits", []), data.get("files", [])
+            if not isinstance(commits, list) or not isinstance(files, list):
+                return json_response(400, {"error": "expected {\"commits\": [...], \"files\": [...]}"})
+            # Names a shell prints are relative to where that shell is now, which may be another repository.
+            if data.get("shell") is not None:
+                shell = self.server.shells.get(data["shell"]) if isinstance(data["shell"], str) else None
+                if shell is None:
+                    return json_response(404, {"error": "shell not found"})
+                cwd = shell.current_cwd()
+            root = repo_root(cwd)
+            return json_response(200, {"cwd": cwd, "root": root and str(root), "commits": find_commits(cwd, commits),
+                                       "files": find_files(cwd, files, self.server.file_index)})
         try:
+            if name == "shell":
+                folder = data.get("cwd") or cwd
+                if not isinstance(folder, str) or not os.path.isabs(folder):
+                    return json_response(400, {"error": "cwd must be an absolute folder"})
+                shell = self.server.shells.open(conversation_id, folder, data.get("cols"), data.get("rows"))
+                return json_response(200, {"shell": shell.public()})
             if name == "rename":
                 return self.rename(sessions, conversation_id, path, data.get("title"))
             if name == "send":
                 if not isinstance(data.get("text"), str):
                     return json_response(400, {"error": "expected {\"text\": \"...\"}"})
                 return json_response(200, {"sent": True, "live": send(sessions, conversation_id, data["text"])})
-            cwd = project_path_of(path) if path is not None else live["cwd"]
             if name == "go-live":
                 return json_response(200, {"started": True, "live": go_live(sessions, conversation_id, cwd)})
             session_id, info = new_session(sessions, cwd)
             return json_response(200, {"started": True, "session_id": session_id, "live": info})
-        except SendError as error:
+        except (SendError, ShellError) as error:
             return json_response(409, {"error": str(error)})
+
+    def shell_action(self, token, name, data):
+        shell = self.server.shells.get(token)
+        if shell is None:
+            return json_response(404, {"error": "shell not found"})
+        if name == "close":
+            self.server.shells.close(token)
+            return json_response(200, {"closed": True})
+        if name == "resize":
+            shell.resize(clamp(data.get("cols"), 80), clamp(data.get("rows"), 24))
+            return json_response(200, {"shell": shell.public()})
+        if not isinstance(data.get("data"), str):
+            return json_response(400, {"error": "expected {\"data\": \"...\"}"})
+        try:
+            shell.write(data["data"].encode("utf-8", "surrogateescape"))
+        except ShellError as error:
+            return json_response(409, {"error": str(error)})
+        return json_response(200, {"written": True})
+
+    def repo(self, conversation_id, view, params):
+        """A commit or a file of the conversation's folder; reading any file the user can read needs the key."""
+        state = self.key_state()
+        if state != "ok":
+            return json_response(403, {"error": KEY_ERRORS[state], "key": state})
+        path, live = locate(self.server.config, conversation_id)
+        if path is None and live is None:
+            return json_response(404, {"error": "conversation not found"})
+        cwd = project_path_of(path) if path is not None else live["cwd"]
+        # A commit a shell printed belongs to the repository the shell was in, which resolve reported as its cwd.
+        folder = params.get("cwd", [None])[0]
+        if folder is not None:
+            if not os.path.isabs(folder) or not os.path.isdir(folder):
+                return json_response(400, {"error": "cwd must be an absolute folder"})
+            cwd = folder
+        try:
+            if view == "commit":
+                return json_response(200, show_commit(cwd, params.get("sha", [""])[0]))
+            return json_response(200, read_file(cwd, params.get("path", [""])[0]))
+        except RepoError as error:
+            return json_response(404, {"error": str(error)})
 
     def rename(self, sessions, conversation_id, path, title):
         title = clean_title(title) if isinstance(title, str) else ""
@@ -262,8 +338,11 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, {"recaps": {i: recap_of(cache, config, i) for i in ids}})
         if path == "/api/totals":
             return json_response(200, cached_totals(cache, config, project))
-        if ACTION_ROUTE.fullmatch(path):
+        if ACTION_ROUTE.fullmatch(path) or SHELL_ACTION_ROUTE.fullmatch(path):
             return json_response(405, {"error": "method not allowed"}, (("Allow", "POST"),))
+        repo = REPO_ROUTE.fullmatch(path)
+        if repo:
+            return self.repo(*repo.groups(), params)
         match = CONVERSATION_ROUTE.fullmatch(path)
         if match:
             first = params.get("from", [None])[0]
@@ -334,14 +413,67 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def shell_stream(self, start):
+        """Server-sent events with the output of several shells, from 'token:offset,...' (or Last-Event-ID, which
+        every event sets to the offsets reached): data and exit per shell, then end once none is left. One stream
+        per page, since a browser opens at most six connections to a host, shared by all its tabs."""
+        offsets = {}
+        for part in (self.headers.get("Last-Event-ID") or start).split(","):
+            token, _, offset = part.partition(":")
+            if SHELL_TOKEN.fullmatch(token):
+                offsets[token] = int(offset) if offset.isdigit() else 0
+        if not offsets or len(offsets) > MAX_SHELLS:
+            return self.respond(json_response(400, {"error": f"expected from=token:offset,... with 1 to {MAX_SHELLS} shells"}))
+        self.send_response(200)
+        for name, value in (("Content-Type", "text/event-stream; charset=utf-8"), *COMMON_HEADERS.items()):
+            self.send_header(name, value)
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        self.close_connection = True
+        started = time.monotonic()
+        shells = self.server.shells
+        attached = [shell for shell in map(shells.get, offsets) if shell is not None]
+        for shell in attached:
+            shell.attach()
+
+        def event(name, data):
+            last = ",".join(f"{t}:{o}" for t, o in offsets.items())
+            self.wfile.write(f"id: {last}\nevent: {name}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
+
+        try:
+            while offsets and not self.server.stopping.is_set() and time.monotonic() - started < STREAM_LIFETIME:
+                changes = shells.read(offsets, HEARTBEAT)
+                for token, offset, data, exited, code in changes:
+                    if data:
+                        offsets[token] = offset
+                        event("data", {"id": token, "at": offset, "data": base64.b64encode(data).decode("ascii")})
+                    elif exited:
+                        del offsets[token]
+                        event("exit", {"id": token, "code": code})
+                if not changes:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+            if not offsets:
+                self.wfile.write(b"event: end\ndata: {}\n\n")
+                self.wfile.flush()
+        except OSError:
+            pass
+        finally:
+            for shell in attached:
+                shell.detach()
+
     def static(self, name):
         try:
             body = (self.server.static_dir / name).read_bytes()
         except OSError:
             return NOT_FOUND
         content_type = CONTENT_TYPES[Path(name).suffix]
-        headers = (("Content-Security-Policy", CSP),) if content_type.startswith("text/html") else ()
-        return Response(200, body, content_type, headers)
+        if not content_type.startswith("text/html"):
+            return Response(200, body, content_type)
+        nonce = secrets.token_urlsafe(18)
+        return Response(200, body.replace(NONCE_MARK, nonce.encode("ascii")), content_type,
+                        (("Content-Security-Policy", CSP.format(nonce=nonce)),))
 
     def respond(self, response):
         self.send_response(response.status)
@@ -365,8 +497,8 @@ class Watch:
         self.config, self.sessions, self.id, self.source = config, sessions, conversation_id, source
         self.started = self.beat = time.monotonic()
         self.log = self.stamp = self.info = self.pane = None
-        self.live_key = self.text = None
-        self.rescan = self.next_activity = 0.0
+        self.live_key = self.text = self.problem = None
+        self.rescan = self.next_activity = self.next_problem = 0.0
         self.first = True
 
     def age(self):
@@ -410,13 +542,18 @@ class Watch:
             events.append(("log", {"size": stamp and stamp[0]}))
         info = self.session(now)
         key = info and (info["pid"], info["updated_ms"], info["status"])
-        if key != self.live_key:
-            self.live_key = key
+        # Leaving shell mode shows on the screen but not always in the registry, so the problem is checked again.
+        problem = self.problem
+        if key != self.live_key or (info and now >= self.next_problem):
+            problem = info and send_problem(info)
+            self.next_problem = now + ACTIVITY_EVERY
+        if key != self.live_key or problem != self.problem:
+            self.live_key, self.problem = key, problem
             try:
                 self.pane = channel(info) if info else None
             except SendError:
                 self.pane = None
-            events.append(("live", {"live": info and public(info), "send_problem": info and send_problem(info)}))
+            events.append(("live", {"live": info and public(info), "send_problem": problem}))
         text = self.text
         if not (info and info["status"] == "busy" and self.pane):
             text = None
@@ -535,9 +672,17 @@ class Server(ThreadingHTTPServer):
         self.cache = StatsCache()
         self.transcripts = TranscriptCache()
         self.favorites = Favorites(favorites_path(config.projects_dir))
+        self.file_index = FileIndex()
+        self.shells = Shells()
         self.stopping = threading.Event()
         super().__init__((HOST, port), Handler)
+        threading.Thread(target=self.reap_shells, daemon=True, name="shell-reaper").start()
+
+    def reap_shells(self):
+        while not self.stopping.wait(SHELL_REAP_EVERY):
+            self.shells.reap()
 
     def server_close(self):
         self.stopping.set()
+        self.shells.close_all()
         super().server_close()

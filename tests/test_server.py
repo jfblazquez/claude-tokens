@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -160,11 +161,13 @@ class SecurityGateTest(ServerTestCase):
         status, headers, body = self.request("/")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
-        self.assertEqual(headers["Content-Security-Policy"], CSP)
+        nonce = re.search(r"'nonce-([\w-]{24})'", headers["Content-Security-Policy"]).group(1)
+        self.assertEqual(headers["Content-Security-Policy"], CSP.format(nonce=nonce))
         for directive in ("default-src 'self'", "script-src 'self'", "style-src 'self'", "object-src 'none'",
                           "base-uri 'none'", "frame-ancestors 'none'"):
             self.assertIn(directive, headers["Content-Security-Policy"])
         self.assertNotIn("http", CSP)
+        self.assertNotEqual(nonce, re.search(r"'nonce-([\w-]+)'", self.request("/")[1]["Content-Security-Policy"]).group(1))
         self.assertIsNone(self.request("/static/app.js")[1]["Content-Security-Policy"])
 
     def test_head_has_no_body(self):
@@ -189,9 +192,10 @@ class StaticFilesTest(ServerTestCase):
         types = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8"}
         self.assertEqual(sorted(STATIC_FILES), sorted([
-            "/", "/static/app.js", "/static/analysis.js", "/static/app.css", "/static/vendor/chart.umd.min.js",
+            "/", "/static/app.js", "/static/analysis.js", "/static/panels.js", "/static/app.css", "/static/vendor/chart.umd.min.js",
             "/static/vendor/marked.min.js", "/static/vendor/purify.min.js", "/static/vendor/highlight.min.js",
-            "/static/vendor/hljs-light.css", "/static/vendor/hljs-dark.css"]))
+            "/static/vendor/hljs-light.css", "/static/vendor/hljs-dark.css", "/static/vendor/xterm.min.js",
+            "/static/vendor/xterm.css"]))
         for route, name in STATIC_FILES.items():
             with self.subTest(route=route):
                 status, headers, body = self.request(route)

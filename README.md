@@ -365,7 +365,10 @@ Sending needs:
   `claude -p` or the SDK), with that pane in the foreground;
 - the session to be *idle* or *busy*: a permission prompt or another dialog
   would take the text, and the Enter after it, as its answer, so the box stays
-  disabled until you deal with it in the terminal;
+  disabled until you deal with it in the terminal. Shell mode is read from the
+  terminal itself (its prompt starts with `!` instead of `❯`), since Claude Code
+  does not always update its registry when shell mode ends, and text typed in
+  shell mode would run as a command;
 - the **send key**. `--serve` prints a link with `?key=...`; open it once and
   the browser remembers the key. A new run of the server makes a new key.
 
@@ -442,6 +445,56 @@ Renaming needs the send key. A live session that cannot take a message (outside
 tmux, not an interactive terminal, or waiting on a dialog) is not renamed, since
 its process keeps the name in memory and would write the old one back.
 
+### Commits, files and shells
+
+Inside a conversation, the commit hashes and file names its messages, tool calls,
+results and Bash commands mention become links once the server has checked them
+against the conversation's folder: a hash (7 to 40 hex digits) that names a
+commit of its git repository, and a name that is a file there. A file name is
+looked up as a path from the folder, as an absolute or `~` path, or as the end
+of any path in the repository (tracked files and untracked ones git does not
+ignore); `./x` and `../x` only from the folder. Anything else stays plain text.
+
+- A **commit** opens its message, author, parents (links themselves), refs and
+  the diff against its first parent, file by file and syntax-highlighted, with
+  old and new line numbers. A click on a line number opens the file there.
+- A **file** opens with line numbers and highlighting. `file:42`, `file:42:7`
+  and `file#L42` open it at that line; `file:40-50` marks the range. A name that
+  matches several files (`__init__.py`) shows a numbered list: press `1`, `2`...
+  (two digits when there are ten or more), use the arrows and Enter, or click.
+- **❯ Shell**, in the conversation header, opens an interactive shell (your
+  `$SHELL`) in the conversation's folder, and **❯ Shell here** in a file opens
+  one in the file's folder. It is a real terminal: `less`, `vim`, `top`, Ctrl+C
+  and job control work, and it follows the panel's size. What it prints links
+  as the conversation does: a URL opens in a new tab, and a commit or a file
+  (`grep -n` output too) opens its panel, looked up from the folder the shell is
+  in at that moment, so they still work after a `cd` into another repository. Closing its tab hangs
+  it up; a shell nobody shows for two minutes (the page was closed) is ended, and
+  at most 8 run at once. All the shells of a page share one connection, and a
+  hidden tab closes its streams and catches up when shown again, since a browser
+  opens at most six connections to a host, shared by all its tabs.
+
+They open in a **side panel**, one tab each, that you can widen by dragging its
+edge. Tabs shrink to fit; those that still do not fit scroll with the mouse
+wheel, and the **⌄** menu at the end of the tabs (**+3 ⌄** when three are out of
+view) lists every open panel, closes them all and switches the layout to a bottom
+panel, floating windows (dragged by the title, resized from the corner,
+minimized to a tray) or an overlay; the browser remembers the choice and the
+sizes. With the bottom panel, the message box of a live conversation stays above
+it. Middle click closes a tab, and Escape the panel that has the focus, except
+inside a terminal.
+
+All of this needs the send key, since it reads any file you can read and runs
+commands as you. The terminal is [xterm.js](https://xtermjs.org/), bundled like
+the other libraries; it draws with `<style>` elements, which the page lets in
+with a nonce that changes on every load.
+
+| Commit | File at a line |
+|---|---|
+| ![Side panel with a commit's message, parents and diff, next to the conversation that mentions it](docs/images/panel-commit.png) | ![Side panel with a file opened at the line the conversation names, the line marked](docs/images/panel-file.png) |
+| **Several files match** | **Shell** |
+| ![Numbered list of the two files a name matches, opened by pressing its number](docs/images/panel-pick.png) | ![Interactive shell in the conversation's folder, in the side panel](docs/images/panel-shell.png) |
+
 The screenshots show invented demo data, not real conversations.
 
 ![Totals: cost, tokens and volume, with daily cost by model, model share, projects, activity, tools and skills](docs/images/totals.png)
@@ -454,13 +507,14 @@ The screenshots show invented demo data, not real conversations.
 | **Files** | |
 | ![Files read, written and edited, with the sources that touched them](docs/images/files.png) | |
 
-It only listens on `127.0.0.1` and has no authentication for reading. It rejects
+It only listens on `127.0.0.1` and has no authentication for reading the logs. It rejects
 requests whose `Host` is not `localhost` or `127.0.0.1`, and anything but
 `GET`/`HEAD`, except the `POST`s that send a message, start claude, rename a
-conversation or star it. All of them need an `Origin`, when sent, that matches
-the `Host`, and all but starring also need the send key in an `X-Send-Key`
-header, since any user of the machine can reach `127.0.0.1` and a message runs
-whatever the session is allowed to run. It writes to the projects folder only to
+conversation, star it, check commits and files or drive a shell. All of them
+need an `Origin`, when sent, that matches the `Host`, and all but starring also
+need the send key in an `X-Send-Key` header, since any user of the machine can
+reach `127.0.0.1` and a message runs whatever the session is allowed to run. So
+do the `GET`s of a commit or a file, which read outside the projects folder. It writes to the projects folder only to
 rename a conversation that no process runs.
 `--serve` accepts `--port`, `--projects-dir`, `--pricing`,
 `--cold-summary-output` and `--context-window`; the project filter is chosen in
@@ -514,6 +568,12 @@ counterpart:
 | `POST /api/conversations/<id>/new-session` | body `{}` with `X-Send-Key`; `{"started": true, "session_id": ..., "live": {...}}`, both null when not registered within 30 s |
 | `POST /api/conversations/<id>/rename` | body `{"title": "..."}` (one line, up to 200 characters) with `X-Send-Key`; `{"title": the name the conversation now has}`, or 409 with the reason; a live session answers once its log has the new name (up to 5 s) |
 | `POST /api/conversations/<id>/favorite` | body `{"favorite": true\|false}`, no key needed; `{"favorite": ...}` |
+| `POST /api/conversations/<id>/resolve` | body `{"commits": [...], "files": [...], "shell"?: "<shell id>"}` (up to 500 each) with `X-Send-Key`; `{"cwd", "root", "commits": {"<hash>": {sha, subject, author, date}}, "files": {"<name>": [{path, display}]}}` with only those found, looked up from the shell's current folder when `shell` is given |
+| `GET /api/conversations/<id>/commit?sha=&cwd=` | with `X-Send-Key`, from the repository of `cwd` (an absolute folder) when given, else the conversation's: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
+| `GET /api/conversations/<id>/file?path=` | with `X-Send-Key`: `{path, display, root, size, binary, truncated, text}`, the first 2 MB; `path` absolute or from the folder |
+| `POST /api/conversations/<id>/shell` | body `{"cols", "rows", "cwd"?}` with `X-Send-Key`; `{"shell": {"id", "cwd", "pid", ...}}`, or 409 |
+| `GET /api/shells/stream?from=<shell id>:<offset>,...` | server-sent events with the output of up to 8 shells on one connection: `data` (`{"id", "at", "data": base64}`, `at` the byte offset reached), `exit` (`{"id", "code"}`, null when the shell is gone) and `end` once none is left; each event's `id` lists the offsets, so a reconnect resumes; the last 1 MB of each shell is kept |
+| `POST /api/shells/<shell id>/input` \| `resize` \| `close` | bodies `{"data": "..."}`, `{"cols", "rows"}` and `{}`, with `X-Send-Key` |
 
 ## Development
 
@@ -528,12 +588,14 @@ python3 tests/golden/refresh.py CASE   # regenerate a golden after a deliberate 
 ```
 
 The README screenshots come from a synthetic projects folder, so they never show
-real conversations. Regenerating them needs Playwright
-(`npm i --no-save playwright && npx playwright install chromium-headless-shell`):
+real conversations. Its api-gateway project is a small git repository with fixed
+commits, so the panels have something to open, and the server runs with a demo
+`HOME` whose `.bashrc` gives the shell a neutral prompt. Regenerating them needs
+Playwright (`npm i --no-save playwright && npx playwright install chromium-headless-shell`):
 
 ```bash
 python3 tools/demo_projects.py /tmp/demo        # prints the folder and the featured conversation id
-python3 claude_tokens.py --serve --port 8798 --projects-dir /tmp/demo/projects
-node tools/screenshots.js http://127.0.0.1:8798 /tmp/demo/projects <featured id> docs/images
+HOME=/tmp/demo/home SHELL=/bin/bash python3 claude_tokens.py --serve --port 8798 --projects-dir /tmp/demo/projects
+node tools/screenshots.js http://127.0.0.1:8798 /tmp/demo/projects <featured id> docs/images <key from the ?key= link>
 ```
 

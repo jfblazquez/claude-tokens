@@ -8,7 +8,8 @@ from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "ctokens" / "web" / "static"
 VENDOR = STATIC / "vendor"
-VENDORED = ["chart.umd.min.js", "marked.min.js", "purify.min.js", "highlight.min.js", "hljs-light.css", "hljs-dark.css"]
+VENDORED = ["chart.umd.min.js", "marked.min.js", "purify.min.js", "highlight.min.js", "hljs-light.css", "hljs-dark.css",
+            "xterm.min.js", "xterm.css"]
 
 
 class _Scan(HTMLParser):
@@ -66,9 +67,9 @@ class IndexHtmlTest(unittest.TestCase):
         self.assertEqual(self.scan.handlers, [])
 
     def test_references_only_served_files(self):
-        served = {"/static/app.js", "/static/analysis.js", "/static/app.css", "#/", "#/totals", "data:,"} | {f"/static/vendor/{f}" for f in VENDORED}
+        served = {"/static/app.js", "/static/analysis.js", "/static/panels.js", "/static/app.css", "#/", "#/totals", "data:,"} | {f"/static/vendor/{f}" for f in VENDORED}
         self.assertEqual(set(self.scan.refs) - served, set())
-        for name in VENDORED + ["analysis.js", "app.js", "app.css"]:
+        for name in VENDORED + ["analysis.js", "panels.js", "app.js", "app.css"]:
             self.assertIn(name, self.html)
 
 
@@ -90,7 +91,7 @@ class VendorTest(unittest.TestCase):
 
 class AppJsTest(unittest.TestCase):
     def test_innerhtml_only_with_dompurify(self):
-        source = (STATIC / "app.js").read_text(encoding="utf-8")
+        source = "\n".join((STATIC / name).read_text(encoding="utf-8") for name in ("panels.js", "app.js"))
         for line in source.splitlines():
             if "innerHTML" in line:
                 self.assertIn("DOMPurify.sanitize(", line)
@@ -98,7 +99,7 @@ class AppJsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is not installed")
     def test_syntax(self):
         # Both run as classic scripts in one global scope, so a name declared twice breaks the page.
-        source = "\n".join((STATIC / name).read_text(encoding="utf-8") for name in ("analysis.js", "app.js"))
+        source = "\n".join((STATIC / name).read_text(encoding="utf-8") for name in ("analysis.js", "panels.js", "app.js"))
         result = subprocess.run(["node", "--check"], input=source, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
