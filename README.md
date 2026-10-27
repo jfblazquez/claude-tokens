@@ -518,6 +518,13 @@ header on its own line, then the text) and **Ask Claude**, which puts the header
 and the text, fenced, into the message box where its cursor is. In a shell, as
 in a terminal, a right-click on a selection copies it and Ctrl+V pastes.
 
+**⚙**, at the right of the top bar, sets the interface theme (system, light or
+dark) and, apart from it, the shells' one (as the interface, light or dark: One
+Half Light and One Half Dark, as in Windows Terminal), and the shells' font, size
+in points and line height (Ubuntu Mono at 11 pt and 1.2 by default, the browser's
+monospace font when it is not installed). The browser keeps them, and an open
+shell and the other tabs of the app change at once.
+
 All of this needs the send key, since it reads any file you can read and runs
 commands as you. The terminal is [xterm.js](https://xtermjs.org/), bundled like
 the other libraries; it draws with `<style>` elements, which the page lets in
