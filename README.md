@@ -386,10 +386,28 @@ listed as **New session** (not while searching) and opens on its Conversation
 tab, ready for a first message. Both buttons need the send key; when no tmux
 server is running, a new tmux session is created for the window.
 
-Double-click a conversation id, project path, projects folder, file path, tool
-name or a code block in the last response to copy it to the clipboard. Bash
-commands and the last response have a clipboard button, and the conversation
-header has **Copy resume**, which copies `cd <project> && claude --resume <id>`.
+Double-click a conversation id, project path, projects folder, file path or tool
+name to copy it to the clipboard. Bash commands, the last response and every
+message of the Conversation tab have a clipboard button; code blocks and tables
+show one in their top right corner on hover, and images have one under them.
+The conversation header has **Copy resume**, which copies
+`cd <project> && claude --resume <id>`.
+
+A click on the button of a message, the last response, a code block or a table
+copies it **with format**: pasted into Teams, Word, Outlook or another rich text
+editor it keeps its headings, lists, tables and the colours of the code (always
+the light theme's), while a plain-text editor gets the Markdown. A click on an
+image copies it as a PNG. Right-click the button for the other formats:
+
+| Button | Formats |
+|---|---|
+| Assistant message, last response | With format, plain text (no Markdown marks), Markdown, HTML source |
+| User message | With format, plain text |
+| Code block | With format, plain text, Markdown (fenced, with its language) |
+| Table | With format, Markdown, CSV, tab-separated (pastes into a spreadsheet as cells) |
+| Image | PNG image, data URL, Markdown with the data URL, Base64, download the file |
+
+Text copies work over plain HTTP too; copying an image needs `localhost` or HTTPS.
 
 The screenshots show invented demo data, not real conversations.
 
