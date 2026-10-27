@@ -265,7 +265,8 @@ start-up reads every log; later ones only re-read the logs that changed.
 The list shows one card per conversation, 50 per page, most recent first and
 grouped by when they were last modified (today, yesterday, this week, last week,
 earlier this month, then by month; UTC days, weeks start on Monday). Each card
-has the title, the time, the newest recap Claude Code wrote while you were away
+has the title (the name given with `/rename`, else the one Claude Code
+generated), the time, the newest recap Claude Code wrote while you were away
 (cut to two lines; hover it for all of it), the project's last folder (hover it
 for the full path), the size and the subagents. Filter and search cover every
 conversation, not just the current page. Coming back from a conversation shows
@@ -409,6 +410,38 @@ image copies it as a PNG. Right-click the button for the other formats:
 
 Text copies work over plain HTTP too; copying an image needs `localhost` or HTTPS.
 
+### Favorites and names
+
+The star on each card and in a conversation's header marks it as a favorite.
+Favorites are listed above the other conversations, whatever the filters or the
+search, most recently active first, each with its title, its state (**Live**, or
+**GO LIVE** to resume it) and its project's last folder; they stay in the list
+below as well. They are kept in `~/.claude/claude-tokens/favorites.json` (next
+to the projects folder), so every browser and every run of the server sees the
+same ones, and starring needs no send key.
+
+Double-click a conversation's name, on its card, in the favorites or in its
+header, to rename it: **Enter** (or clicking elsewhere) saves and **Escape**
+cancels. The name is Claude Code's own, the one `/rename` sets, so the terminal,
+`claude --resume`, claude.ai and this list all show the same:
+
+- a **live** conversation is renamed by typing `/rename <name>` into its
+  terminal, as for a message, so it needs tmux and an *idle* or *busy* session.
+  Claude Code then writes the name to the log, the session registry and the
+  terminal's prompt, sends it to claude.ai when the session has Remote Control
+  on, and tells the model in a short note on its next turn. If another live
+  session already holds that name, Claude Code adds a suffix and the list shows
+  the name it chose;
+- a conversation **no process runs** gets the lines `/rename` writes appended to
+  its log (`custom-title` and `agent-name`) and its `custom-title.json`, so
+  `claude --resume` and the next GO LIVE start with that name; claude.ai shows
+  it once the session runs again with Remote Control. Its modified time is kept,
+  so it does not move to the top of the list.
+
+Renaming needs the send key. A live session that cannot take a message (outside
+tmux, not an interactive terminal, or waiting on a dialog) is not renamed, since
+its process keeps the name in memory and would write the old one back.
+
 The screenshots show invented demo data, not real conversations.
 
 ![Totals: cost, tokens and volume, with daily cost by model, model share, projects, activity, tools and skills](docs/images/totals.png)
@@ -423,11 +456,12 @@ The screenshots show invented demo data, not real conversations.
 
 It only listens on `127.0.0.1` and has no authentication for reading. It rejects
 requests whose `Host` is not `localhost` or `127.0.0.1`, and anything but
-`GET`/`HEAD`, except the `POST`s that send a message or start claude. Those
-also need the send key in an `X-Send-Key` header, since any user of the machine
-can reach `127.0.0.1` and a message runs whatever the session is allowed to run,
-and an `Origin`, when sent, that matches the `Host`. It never writes to the projects
-folder.
+`GET`/`HEAD`, except the `POST`s that send a message, start claude, rename a
+conversation or star it. All of them need an `Origin`, when sent, that matches
+the `Host`, and all but starring also need the send key in an `X-Send-Key`
+header, since any user of the machine can reach `127.0.0.1` and a message runs
+whatever the session is allowed to run. It writes to the projects folder only to
+rename a conversation that no process runs.
 `--serve` accepts `--port`, `--projects-dir`, `--pricing`,
 `--cold-summary-output` and `--context-window`; the project filter is chosen in
 the UI. A port that is already in use is an error.
@@ -452,7 +486,7 @@ the recaps, which only the UI uses:
 
 | Route | Same as |
 |---|---|
-| `GET /api/conversations?project=&q=` | the picker list, as `{"projects_dir", "conversations": [...]}`; `q` is the search |
+| `GET /api/conversations?project=&q=` | the picker list, as `{"projects_dir", "conversations": [...], "favorites": [...]}`; `q` is the search |
 | `GET /api/conversations/<id>` | `<id> --json` |
 | `GET /api/conversations/<id>/last-response` | `<id> --last-response --json` |
 | `GET /api/conversations/<id>/bash` | `<id> --bash --json` |
@@ -465,7 +499,10 @@ The list rows of live conversations also carry a `live` object (pid, status,
 `waiting_for`, `status_since`, `started`, name, entrypoint, version, cwd,
 `read_only` and `read_only_reason`); live sessions without a log yet are extra
 rows with `"new": true`, and the list says whether the request's send key is
-valid (`key`). These routes have no CLI counterpart:
+valid (`key`). Starred rows carry `"favorite": true`, and `favorites` lists every
+starred conversation (`id`, `title`, `project`, `modified`, and `live` or `new`
+when they apply) whatever `project` and `q` are. These routes have no CLI
+counterpart:
 
 | Route | Returns |
 |---|---|
@@ -475,6 +512,8 @@ valid (`key`). These routes have no CLI counterpart:
 | `POST /api/conversations/<id>/send` | body `{"text": "..."}` with `X-Send-Key`; `{"sent": true, "live": {...}}`, or 409 with the reason |
 | `POST /api/conversations/<id>/go-live` | body `{}` with `X-Send-Key`; `{"started": true, "live": {...} or null}` (null when it has not registered within 30 s), or 409 |
 | `POST /api/conversations/<id>/new-session` | body `{}` with `X-Send-Key`; `{"started": true, "session_id": ..., "live": {...}}`, both null when not registered within 30 s |
+| `POST /api/conversations/<id>/rename` | body `{"title": "..."}` (one line, up to 200 characters) with `X-Send-Key`; `{"title": the name the conversation now has}`, or 409 with the reason; a live session answers once its log has the new name (up to 5 s) |
+| `POST /api/conversations/<id>/favorite` | body `{"favorite": true\|false}`, no key needed; `{"favorite": ...}` |
 
 ## Development
 

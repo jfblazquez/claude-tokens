@@ -9,19 +9,21 @@ import re
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import NamedTuple, Optional
 from urllib.parse import parse_qs
 
-from ..catalog import (CONVERSATION_ID, conversation_rows, conversation_text, find_conversation, last_recap,
-                       project_path_of, session_title)
+from ..catalog import (CONVERSATION_ID, clean_title, conversation_rows, conversation_text, find_conversation, last_recap,
+                       project_path_of, save_title, session_title)
 from ..content import bash_commands, conversation_messages, last_response, touched_files
-from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, send,
+from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, rename, send,
                     send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache, TranscriptCache
+from .favorites import Favorites, favorites_path
 
 HOST = "127.0.0.1"
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -41,7 +43,7 @@ MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live))?")
-ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session)")
+ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session|rename|favorite)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
 # The events stream checks the log, the session and its status line this often; a new log line shows within a tick.
 EVENT_TICK = 0.25
@@ -51,6 +53,10 @@ HEARTBEAT = 15.0
 # EventSource reconnects by itself, so a stream ends now and then instead of holding a thread forever.
 STREAM_LIFETIME = 30 * 60
 SEND_KEY_HEADER = "X-Send-Key"
+MAX_TITLE_CHARS = 200
+# A running session writes its new name to the log within a moment of reading /rename.
+RENAME_TIMEOUT = 5.0
+RENAME_POLL = 0.1
 
 
 class Config(NamedTuple):
@@ -144,7 +150,8 @@ class Handler(BaseHTTPRequestHandler):
         return "ok" if hmac.compare_digest(given.encode("utf-8"), key.encode("utf-8")) else "wrong"
 
     def action(self, conversation_id, name):
-        """POST actions start or drive claude processes, so on top of the Host check they need the key."""
+        """POST actions start, drive or rename claude sessions, so on top of the Host check they need the key; starring
+        a conversation touches only this tool's own file."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -157,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin is not None and origin.lower() != f"http://{self.headers.get('Host', '').lower()}":
             return json_response(403, {"error": "origin not allowed"})
         state = self.key_state()
-        if state != "ok":
+        if state != "ok" and name != "favorite":
             return json_response(403, {"error": KEY_ERRORS[state], "key": state})
         if self.headers.get_content_type() != "application/json":
             return json_response(415, {"error": "expected application/json"})
@@ -172,7 +179,14 @@ class Handler(BaseHTTPRequestHandler):
         path, live = locate(config, conversation_id)
         if path is None and live is None:
             return json_response(404, {"error": "conversation not found"})
+        if name == "favorite":
+            if not isinstance(data.get("favorite"), bool):
+                return json_response(400, {"error": "expected {\"favorite\": true|false}"})
+            self.server.favorites.set(conversation_id, data["favorite"])
+            return json_response(200, {"favorite": data["favorite"]})
         try:
+            if name == "rename":
+                return self.rename(sessions, conversation_id, path, data.get("title"))
             if name == "send":
                 if not isinstance(data.get("text"), str):
                     return json_response(400, {"error": "expected {\"text\": \"...\"}"})
@@ -184,6 +198,30 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(200, {"started": True, "session_id": session_id, "live": info})
         except SendError as error:
             return json_response(409, {"error": str(error)})
+
+    def rename(self, sessions, conversation_id, path, title):
+        title = clean_title(title) if isinstance(title, str) else ""
+        if not title:
+            return json_response(400, {"error": "expected {\"title\": \"...\"} with some text"})
+        if len(title) > MAX_TITLE_CHARS:
+            return json_response(400, {"error": f"the name is longer than {MAX_TITLE_CHARS} characters"})
+        old = session_title(path) if path is not None else None
+        if old == title:
+            return json_response(200, {"title": title})
+        if conversation_id not in live_sessions(sessions):
+            save_title(path, conversation_id, title)
+            return json_response(200, {"title": session_title(path)})
+        # Its own /rename, since a running session keeps its name in memory and writes it back to the log.
+        rename(sessions, conversation_id, title)
+        deadline = time.monotonic() + RENAME_TIMEOUT
+        while path is not None:
+            new = session_title(path)
+            if new != old:
+                return json_response(200, {"title": new})
+            if time.monotonic() >= deadline:
+                raise SendError("The session did not take the new name; look at its terminal.")
+            time.sleep(RENAME_POLL)
+        return json_response(200, {"title": title})
 
     def discard_body(self):
         # Closing a socket with unread request data can reset the connection before the client reads the answer.
@@ -204,14 +242,19 @@ class Handler(BaseHTTPRequestHandler):
             search = params.get("q", [None])[0]
             rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache))
             live = live_sessions(sessions_dir(config.projects_dir))
+            starred = self.server.favorites.ids()
+            favorites = favorite_rows(starred, live, config.projects_dir, cache)
             for row in rows:
                 if row["id"] in live:
                     row["live"] = public(live.pop(row["id"]))
             if not search:
                 rows = sorted(rows + new_session_rows(live, project, config.projects_dir), key=lambda r: r["modified"],
                               reverse=True)
+            for row in rows:
+                if row["id"] in starred:
+                    row["favorite"] = True
             return json_response(200, {"projects_dir": str(config.projects_dir), "key": self.key_state(),
-                                       "conversations": rows})
+                                       "conversations": rows, "favorites": favorites})
         if path == "/api/recaps":
             ids = [i for i in params.get("ids", [""])[0].split(",") if i]
             if len(ids) > MAX_RECAP_IDS:
@@ -403,6 +446,30 @@ def new_session_rows(live, project, projects_dir):
             and not any(projects_dir.glob(f"*/{session_id}.jsonl"))]
 
 
+def favorite_rows(ids, live, projects_dir, cache):
+    """The starred conversations whatever the filters, most recently active first; those gone are left out."""
+    project_of, title_of = cached_meta(cache)
+    rows = []
+    for conversation_id in ids:
+        path, _ = find_conversation(conversation_id, projects_dir)
+        info = live.get(conversation_id)
+        if path is not None:
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            row = {"id": conversation_id, "title": title_of(path), "project": project_of(path),
+                   "modified": datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        elif info is not None and info["entrypoint"] == "cli" and info["cwd"] and info["started"]:
+            row = {"id": conversation_id, "title": "", "project": info["cwd"], "modified": info["started"], "new": True}
+        else:
+            continue
+        if info is not None:
+            row["live"] = public(info)
+        rows.append(row)
+    return sorted(rows, key=lambda r: r["modified"], reverse=True)
+
+
 def new_session_view(view, source):
     if view == "messages":
         if source != "main":
@@ -467,6 +534,7 @@ class Server(ThreadingHTTPServer):
         self.static_dir = Path(static_dir)
         self.cache = StatsCache()
         self.transcripts = TranscriptCache()
+        self.favorites = Favorites(favorites_path(config.projects_dir))
         self.stopping = threading.Event()
         super().__init__((HOST, port), Handler)
 

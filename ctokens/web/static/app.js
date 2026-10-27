@@ -79,6 +79,7 @@ const ICON_PATHS = {
   check: ["M20 6 9 17l-5-5"],
   failed: ["M18 6 6 18", "m6 6 12 12"],
   folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+  star: ["m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"],
 };
 
 function icon(name) {
@@ -664,6 +665,10 @@ function listRows(body) {
   const rows = Array.isArray(body) ? body : (body && body.conversations) || [];
   if (body && typeof body.projects_dir === "string") projectsDir = body.projects_dir;
   if (body && typeof body.key === "string") keyState = body.key;
+  if (body && Array.isArray(body.favorites)) {
+    favoriteRows = body.favorites;
+    favoriteIds = new Set(favoriteRows.map((r) => r.id));
+  }
   for (const row of [...rows].reverse()) convRows.set(row.id, row);
   return rows;
 }
@@ -803,9 +808,11 @@ async function loadRecaps(rows) {
 }
 
 function conversationCard(row, now) {
-  const card = h("a", { class: "conv-card", href: convHref(row.id, row.new ? "messages" : null) },
+  const href = convHref(row.id, row.new ? "messages" : null);
+  const card = h("a", { class: "conv-card", href },
     h("div", { class: "conv-top" },
-      h("span", { class: "conv-title" }, liveBadge(row.live, false, row.id), row.title || h("span", { class: "untitled" }, row.new ? "New session" : "Untitled")),
+      h("span", { class: "conv-title" }, liveBadge(row.live, false, row.id),
+        titleText(row.id, row.title, "card", href, h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
       h("time", { class: "conv-when", datetime: row.modified, title: `${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
     row.new ? h("p", { class: "recap" }, "No messages yet") : recapLine(row),
     h("div", { class: "conv-meta" },
@@ -814,7 +821,7 @@ function conversationCard(row, now) {
       row.subagents ? h("span", {}, `${fmt(row.subagents)} ${row.subagents === 1 ? "subagent" : "subagents"}`) : null));
   // A button cannot sit inside the card's link, so it is laid over the card's corner instead.
   const actions = row.live ? null : h("div", { class: "conv-actions" }, startError(row.id), startButton(row.id, "go-live"));
-  return h("div", { class: actions ? "conv-item has-actions" : "conv-item" }, card, actions);
+  return h("div", { class: actions ? "conv-item has-actions" : "conv-item" }, card, starButton(row.id), actions);
 }
 
 // Rows come most recent first; each card group is a date range of the whole list, not only of the page.
@@ -888,20 +895,160 @@ VIEWS.list = {
       h("label", { class: "field" }, "Search", search),
       h("label", { class: "switch", title: "Only conversations running in a Claude Code process now" }, liveOnly, " Live only")), count)];
   },
-  render({ search, rows }) {
-    if (!rows.length && !search) {
-      return emptyState("No conversations found", `No conversations were found in ${folderText()}. `
-        + "Conversations appear here after you use Claude Code.");
-    }
-    const shown = listShown(rows);
-    if (!shown.length) {
-      const why = [listFilter && `a project matching “${listFilter}”`, search && `“${search}” in its title or messages`];
-      if (listLiveOnly && !why.some(Boolean)) return emptyState("No live conversations", "No conversation is running in a Claude Code process now.");
-      return emptyState("No matching conversations", `No ${listLiveOnly ? "live " : ""}conversation has ${why.filter(Boolean).join(" and ")}.`);
-    }
-    return h("div", { class: "section" }, conversationCards(shown));
+  render(data) {
+    return [favoritesSection(), listBody(data)];
   },
 };
+
+function listBody({ search, rows }) {
+  if (!rows.length && !search) {
+    return emptyState("No conversations found", `No conversations were found in ${folderText()}. `
+      + "Conversations appear here after you use Claude Code.");
+  }
+  const shown = listShown(rows);
+  if (!shown.length) {
+    const why = [listFilter && `a project matching “${listFilter}”`, search && `“${search}” in its title or messages`];
+    if (listLiveOnly && !why.some(Boolean)) return emptyState("No live conversations", "No conversation is running in a Claude Code process now.");
+    return emptyState("No matching conversations", `No ${listLiveOnly ? "live " : ""}conversation has ${why.filter(Boolean).join(" and ")}.`);
+  }
+  return h("div", { class: "section" }, conversationCards(shown));
+}
+
+// ---------- favorites: starred conversations, listed above the others whatever the filters ----------
+// The server's list of starred conversations, most recently active first, and their ids.
+let favoriteRows = [];
+let favoriteIds = new Set();
+
+function starButton(id) {
+  const on = favoriteIds.has(id), label = on ? "Remove from favorites" : "Add to favorites";
+  return h("button", { class: `btn icon-btn star${on ? " on" : ""}`, type: "button", title: label, "aria-label": label, "aria-pressed": String(on),
+    onclick: (e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(id); } }, icon("star"));
+}
+
+// Drawn at once and undone if the server refuses.
+function markFavorite(id, on) {
+  favoriteRows = favoriteRows.filter((r) => r.id !== id);
+  const row = convRows.get(id);
+  if (on && row) {
+    favoriteRows = [...favoriteRows, { id, title: row.title, project: row.project, modified: row.modified, live: row.live, new: row.new }]
+      .sort((a, b) => compareValues(b.modified, a.modified));
+  }
+  favoriteIds = new Set(on ? [...favoriteIds, id] : [...favoriteIds].filter((i) => i !== id));
+  redrawStart(id);
+}
+
+async function toggleFavorite(id) {
+  const on = !favoriteIds.has(id);
+  startErrors.delete(id);
+  markFavorite(id, on);
+  try {
+    await api(`/api/conversations/${encodeURIComponent(id)}/favorite`, { method: "POST",
+      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ favorite: on }) });
+  } catch (err) {
+    startErrors.set(id, `${on ? "Not starred" : "Still starred"}: ${err.message}`);
+    markFavorite(id, !on);
+  }
+}
+
+function favoriteItem(row) {
+  const href = convHref(row.id, row.new ? "messages" : null);
+  return h("li", { class: "fav-item" }, starButton(row.id),
+    h("a", { class: "fav-title", href }, titleText(row.id, row.title, "favorite", href,
+      h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
+    h("span", { class: "fav-state" }, startError(row.id), row.live ? liveBadge(row.live, false, row.id) : startButton(row.id, "go-live")),
+    h("span", { class: "project", title: row.project }, icon("folder"), lastFolder(row.project)));
+}
+
+function favoritesSection() {
+  if (!favoriteRows.length) return null;
+  return h("section", { class: "section favorites", "aria-labelledby": "favorites-head" },
+    h("h2", { class: "conv-group", id: "favorites-head" }, "Favorites", h("span", { class: "n" }, fmt(favoriteRows.length))),
+    h("ul", { class: "fav-list" }, favoriteRows.map(favoriteItem)));
+}
+
+// ---------- renaming: double-click a conversation's name ----------
+// The name being edited, and where: the conversation header, a card or a favorite (one id may show in two places).
+const renaming = { id: null, where: null, draft: "", saving: false };
+// Long enough to tell a click on a name inside a link from the first click of a double-click.
+const DOUBLE_CLICK_MS = 300;
+
+// The name, or the box editing it; inside a link (href) a single click opens the link only once no second click came.
+function titleText(id, title, where, href, fallback) {
+  if (renaming.id === id && renaming.where === where) return renameBox(id, where);
+  const canRename = keyState === "ok";
+  const el = h("span", { class: "title-text", title: canRename ? "Double-click to rename" : `Double-click to rename · ${KEY_NOTES[keyState] || KEY_NOTES.missing}` },
+    title || fallback);
+  let timer = null;
+  if (href) {
+    el.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      clearTimeout(timer);
+      if (e.detail < 2) timer = setTimeout(() => { location.hash = href; }, DOUBLE_CLICK_MS);
+    });
+  }
+  el.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    clearTimeout(timer);
+    getSelection().removeAllRanges();
+    if (!canRename) {
+      startErrors.set(id, `Not renamed: ${KEY_NOTES[keyState] || KEY_NOTES.missing}`);
+      redrawStart(id);
+      return;
+    }
+    startErrors.delete(id);
+    Object.assign(renaming, { id, where, draft: title || "", saving: false });
+    redrawStart(id);
+    const box = $(`rename-${where}`);
+    if (box) {
+      box.focus();
+      box.select();
+    }
+  });
+  return el;
+}
+
+function renameBox(id, where) {
+  const stop = (e) => { e.stopPropagation(); if (e.type === "click") e.preventDefault(); };
+  const box = h("input", { class: "rename-box", id: `rename-${where}`, type: "text", value: renaming.draft, maxlength: 200,
+    "aria-label": "New name · Enter saves, Escape cancels", title: "Enter saves, Escape cancels", disabled: renaming.saving,
+    onclick: stop, ondblclick: stop, onmousedown: (e) => e.stopPropagation(),
+    oninput: (e) => { renaming.draft = e.target.value; },
+    onkeydown: (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); saveName(); }
+      else if (e.key === "Escape") { e.preventDefault(); endRename(id); }
+    },
+    // Not when a redraw took the box away: the new one carries on with the draft.
+    onblur: () => setTimeout(() => { if (box.isConnected && renaming.id === id && !renaming.saving) saveName(); }, 0) });
+  return box;
+}
+
+function endRename(id) {
+  Object.assign(renaming, { id: null, where: null, draft: "", saving: false });
+  redrawStart(id);
+}
+
+async function saveName() {
+  const id = renaming.id, title = renaming.draft.trim();
+  if (!title || title === ((convRows.get(id) || {}).title || "")) {
+    endRename(id);
+    return;
+  }
+  renaming.saving = true;
+  redrawStart(id);
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(id)}/rename`, { method: "POST",
+      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
+    for (const row of [convRows.get(id), ...favoriteRows.filter((r) => r.id === id)]) if (row) row.title = data.title;
+  } catch (err) {
+    startErrors.set(id, `Not renamed: ${err.message}`);
+  }
+  endRename(id);
+  if (app.route && app.route.view === "list") load({ refresh: true });
+  else await refreshList();
+}
 
 // ---------- live sessions: conversations running in a Claude Code process ----------
 // The key that lets this browser type into sessions; --serve prints a link that carries it once in ?key=.
@@ -1129,7 +1276,16 @@ function convView(path, spec) {
 function redrawConvHead(id) {
   const route = app.route;
   if (!route || route.id !== id || !$("conv-head")) return;
-  $("conv-head").replaceWith(convHead(route));
+  const editing = document.activeElement && document.activeElement.id === "rename-head" ? document.activeElement : null;
+  const head = convHead(route), oldName = $("conv-head").querySelector("h1"), newName = head.querySelector("h1");
+  // An unchanged name keeps its node, so a double-click is not lost when the header is drawn again between its clicks.
+  if (oldName && newName && !editing && oldName.isEqualNode(newName)) newName.replaceWith(oldName);
+  $("conv-head").replaceWith(head);
+  const box = editing && $("rename-head");
+  if (box) {
+    box.focus();
+    box.setSelectionRange(editing.selectionStart, editing.selectionEnd);
+  }
   drawConvNav();
   document.title = `${VIEWS[route.view].title(route, app.data)} · claude-tokens`;
 }
@@ -1149,7 +1305,8 @@ function convHead(route) {
       h("span", {}, `${fmtBytes(row.size_bytes)} · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
   }
   return h("div", { class: "page-head", id: "conv-head" },
-    h("h1", {}, title),
+    h("div", { class: "conv-name" }, starButton(route.id),
+      h("h1", {}, titleText(route.id, (row && row.title) || convTasks.get(route.id) || "", "head", null, title))),
     h("div", { class: "meta" }, meta));
 }
 
@@ -1981,8 +2138,10 @@ async function appendNew() {
 // Replaces the messages from index from on, in the data and in the page, without drawing the rest again.
 function patchMessages(route, data, from, fresh) {
   const before = data.messages.length;
-  data.messages = data.messages.slice(0, from).concat(fresh);
   const list = document.querySelector(".msgs");
+  // Drawing the page again pulls the tail again, so an empty conversation that did not change would loop.
+  if (!list && before === from + fresh.length && JSON.stringify(data.messages.slice(from)) === JSON.stringify(fresh)) return;
+  data.messages = data.messages.slice(0, from).concat(fresh);
   if (noteConvData(route.id, "/messages", data)) drawConvNav();
   if (!list) {
     renderedBodies.delete(data);

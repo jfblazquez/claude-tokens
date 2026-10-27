@@ -194,6 +194,15 @@ def send(directory, session_id, text):
         raise SendError("The message is empty.")
     if len(text) > MAX_MESSAGE_CHARS:
         raise SendError(f"The message is longer than {MAX_MESSAGE_CHARS:,} characters.")
+    return type_in(directory, session_id, text)
+
+
+def rename(directory, session_id, title):
+    """Name a running session with its own /rename, which also renames it in its terminal and on claude.ai."""
+    return type_in(directory, session_id, f"/rename {title}")
+
+
+def type_in(directory, session_id, text):
     info = live_sessions(directory).get(session_id)
     if info is None:
         raise SendError("The conversation is not running in any Claude Code process.")
