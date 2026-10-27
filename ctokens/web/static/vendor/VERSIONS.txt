@@ -6,3 +6,6 @@ purify.min.js  dompurify  3.4.16  MPL-2.0 OR Apache-2.0  2c90a9b46d6463f26038a29
 highlight.min.js  highlight.js  11.11.2  BSD-3-Clause  62960a35954a685dbe12958092f661a185231e9f5f5c44dc3c1e237d9e087d5a  https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.2/highlight.min.js
 hljs-light.css  highlight.js  11.11.2  BSD-3-Clause  593ee2475d42ac9ae701a177a353825bd661b6249fa1ad4bad232540825e9e83  https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.2/styles/atom-one-light.min.css
 hljs-dark.css  highlight.js  11.11.2  BSD-3-Clause  4237ffca7ce6aadb438c457e0a675b125c534bbdda5b87f41f3a1495603bcc9b  https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.2/styles/atom-one-dark.min.css
+xterm.min.js  xterm  6.0.0  MIT  14903579ff54664cd72f8e8699e6961a6272c21863ec1c3b118cdc8af5d4a972  https://cdnjs.cloudflare.com/ajax/libs/xterm/6.0.0/xterm.js
+xterm.css  xterm  6.0.0  MIT  a8ffe31ec8698c885dfd91345c389a3f32b50ac193c909925fd48df4b4ce8273  https://cdnjs.cloudflare.com/ajax/libs/xterm/6.0.0/xterm.min.css
+LICENSES/xterm.txt  xterm  6.0.0  MIT  b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd  https://raw.githubusercontent.com/xtermjs/xterm.js/6.0.0/LICENSE

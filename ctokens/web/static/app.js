@@ -1299,7 +1299,7 @@ function convHead(route) {
     h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
       resume && !live ? copyButton(resume, resume, "Copy resume") : null),
     h("span", { class: "conv-actions-head" }, live ? null : startButton(route.id, "go-live"), startButton(route.id, "new-session"),
-      startError(route.id))];
+      row || live ? shellButton(route.id, row ? row.project : live.cwd) : null, startError(route.id))];
   if (row) {
     meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmtBytes(row.size_bytes)} · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
@@ -2660,6 +2660,7 @@ function updateToTop() {
 
 function boot() {
   takeSendKey();
+  startPanels();
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
   document.body.append(h("button", { class: "btn to-top", id: "to-top", type: "button", title: "Back to top", "aria-label": "Back to top", hidden: true,
     onclick: () => window.scrollTo({ top: 0, behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "↑"));

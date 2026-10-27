@@ -1,10 +1,14 @@
 """Build a synthetic Claude Code projects folder for the README screenshots: invented projects, no real data.
 
 Usage: python3 tools/demo_projects.py OUTPUT_DIR   (writes OUTPUT_DIR/projects; same seed, same files)
+
+The api-gateway project is also a real git repository at OUTPUT_DIR/home/dev/projects/api-gateway, so its links to
+commits and files open, and OUTPUT_DIR/home holds a .bashrc with a neutral prompt for the shell panel.
 """
 import json
 import os
 import random
+import subprocess
 import sys
 import uuid
 from collections import namedtuple
@@ -81,7 +85,8 @@ SUBAGENT_TASKS = ["Explore call sites of the limiter", "Review the rate limit te
                   "Check the docs for outdated examples", "Benchmark the middleware", "Find similar bugs elsewhere"]
 LAST_RESPONSE = """## Rate limiting is in place
 
-Requests are now limited **per API key** with a token bucket stored in Redis.
+Requests are now limited **per API key** with a token bucket stored in Redis. It landed in {limit}, and
+{retry} added `Retry-After`; the middleware is `src/middleware/rate_limit.py:15` and is exported from `__init__.py`.
 
 | Endpoint | Limit | Burst |
 |---|---|---|
@@ -104,6 +109,114 @@ All 214 tests pass. Next steps:
 1. Expose the remaining quota in `X-RateLimit-Remaining`.
 2. Add a dashboard panel for rejected requests.
 """
+
+
+ROUTER_V1 = """from fastapi import FastAPI
+
+from .cache import cache
+from .middleware import auth
+
+app = FastAPI()
+app.middleware("http")(auth)
+
+
+@app.get("/v1/items")
+async def items():
+    return await cache.get_or_load("items")
+
+
+@app.post("/v1/items")
+async def create_item(item: dict):
+    await cache.invalidate("items")
+    return {"created": item}
+
+
+@app.post("/v1/export")
+async def export():
+    return {"queued": True}
+"""
+RATE_LIMIT_V1 = """import time
+
+from fastapi.responses import JSONResponse
+
+from .buckets import RedisBuckets
+
+LIMITS = {
+    ("GET", "/v1/items"): (600, 100),
+    ("POST", "/v1/items"): (120, 20),
+    ("POST", "/v1/export"): (10, 2),
+}
+buckets = RedisBuckets(LIMITS)
+
+
+async def rate_limit(request, call_next):
+    key = request.state.api_key
+    bucket = await buckets.take(key, request.method, request.url.path)
+    if bucket.empty:
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(bucket.limit)
+    return response
+"""
+FILES_V1 = {
+    "README.md": "# api-gateway\n\nPublic HTTP API in front of the item and export services.\n\n"
+                 "```bash\npython3 -m pytest -q\n```\n",
+    "src/__init__.py": "from .router import app\n\n__all__ = [\"app\"]\n",
+    "src/router.py": ROUTER_V1,
+    "src/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n"
+                    "    async def get_or_load(self, key):\n        return self.entries.setdefault(key, [])\n\n"
+                    "    async def invalidate(self, key):\n        self.entries.pop(key, None)\n\n\ncache = Cache()\n",
+    "src/middleware/__init__.py": "from .auth import auth\n\n__all__ = [\"auth\"]\n",
+    "src/middleware/auth.py": "from fastapi.responses import JSONResponse\n\n\nasync def auth(request, call_next):\n"
+                              "    key = request.headers.get(\"X-API-Key\")\n    if not key:\n"
+                              "        return JSONResponse({\"error\": \"missing API key\"}, status_code=401)\n"
+                              "    request.state.api_key = key\n    return await call_next(request)\n",
+    "tests/test_router.py": "def test_items(client):\n    assert client.get(\"/v1/items\").status_code == 200\n",
+}
+FILES_V2 = {
+    "src/middleware/__init__.py": "from .auth import auth\nfrom .rate_limit import rate_limit\n\n"
+                                  "__all__ = [\"auth\", \"rate_limit\"]\n",
+    "src/middleware/rate_limit.py": RATE_LIMIT_V1,
+    "src/router.py": ROUTER_V1.replace("from .middleware import auth\n", "from .middleware import auth, rate_limit\n")
+                              .replace("app.middleware(\"http\")(auth)\n",
+                                       "app.middleware(\"http\")(rate_limit)\napp.middleware(\"http\")(auth)\n"),
+    "tests/test_rate_limit.py": "def test_burst_is_limited(client):\n"
+                                "    codes = [client.post(\"/v1/export\").status_code for _ in range(3)]\n"
+                                "    assert codes == [200, 200, 429]\n",
+}
+FILES_V3 = {
+    "src/middleware/rate_limit.py": RATE_LIMIT_V1.replace(
+        "        return JSONResponse({\"error\": \"rate limited\"}, status_code=429)\n",
+        "        return JSONResponse({\"error\": \"rate limited\"}, status_code=429,\n"
+        "                            headers={\"Retry-After\": str(bucket.retry_after)})\n"),
+}
+COMMITS = [("Initial API gateway", FILES_V1, 0),
+           ("Add token bucket rate limiting per API key\n\nLimits come from LIMITS and the buckets live in Redis, so "
+            "every gateway\ninstance shares them.", FILES_V2, 28),
+           ("Return Retry-After on 429", FILES_V3, 29)]
+BASHRC = "PS1='dev@demo:\\W\\$ '\nalias ls='ls --color=auto'\n"
+
+
+def build_repo(repo):
+    """The api-gateway repository with fixed authors and dates, so the commit ids are the same on every build."""
+    shas = []
+    for i, (message, files, day) in enumerate(COMMITS):
+        when = stamp(START + timedelta(days=day, hours=9 + i))
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com", "GIT_AUTHOR_DATE": when,
+               "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com", "GIT_COMMITTER_DATE": when,
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, stdout=subprocess.PIPE,
+                                           text=True).stdout.strip()
+        if i == 0:
+            repo.mkdir(parents=True)
+            git("init", "-q", "-b", "main")
+        for name, text in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", message)
+        shas.append(git("rev-parse", "--short=7", "HEAD"))
+    return shas
 
 
 def stamp(t):
@@ -190,20 +303,28 @@ def conversation(rnd, root, project, title, day, model, steps, skill, tasks, las
 
 def build(base):
     rnd = random.Random(SEED)
-    root = Path(base) / "projects"
+    base = Path(base).resolve()
+    root = base / "projects"
+    api = PROJECTS[0]
+    repo = base / api.cwd.lstrip("/")
+    shas = build_repo(repo)
+    (base / "home").mkdir(exist_ok=True)
+    (base / "home" / ".bashrc").write_text(BASHRC, encoding="utf-8")
+    projects = [api._replace(cwd=str(repo))] + PROJECTS[1:]
     for _ in range(48):
         day = rnd.randint(0, DAYS - 2)
         if rnd.random() < 0.25 and day % 7 in (5, 6):
             continue
-        project = rnd.choices(PROJECTS, [p.weight for p in PROJECTS])[0]
+        project = rnd.choices(projects, [p.weight for p in projects])[0]
         title = rnd.choice(project.titles)
         model = "claude-opus-5" if day < 14 and rnd.random() < 0.7 else rnd.choices(
             ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"], [6, 3, 1])[0]
         conversation(rnd, root, project, title, day, model, steps=(rnd.randint(6, 45), rnd.randint(1, 6)),
                      skill=rnd.choice(SKILLS) if rnd.random() < 0.35 else None,
                      tasks=rnd.choices(SUBAGENT_TASKS, k=rnd.choice([0, 0, 0, 1, 2, 3])), last=f"Done: {title.lower()}.")
-    featured = conversation(rnd, root, PROJECTS[0], FEATURED_TITLE, DAYS - 1, "claude-opus-5-5", steps=(40, 6),
-                            skill=rnd.choice(SKILLS[:3]), tasks=SUBAGENT_TASKS[:5], last=LAST_RESPONSE)
+    last = LAST_RESPONSE.replace("{limit}", shas[1]).replace("{retry}", shas[2])
+    featured = conversation(rnd, root, projects[0], FEATURED_TITLE, DAYS - 1, "claude-opus-5-5", steps=(40, 6),
+                            skill=rnd.choice(SKILLS[:3]), tasks=SUBAGENT_TASKS[:5], last=last)
     return root, featured
 
 

@@ -26,6 +26,8 @@ LIBRARIES = {
                                                  "hljs-light.css": "styles/atom-one-light.min.css",
                                                  "hljs-dark.css": "styles/atom-one-dark.min.css"},
                      "https://raw.githubusercontent.com/highlightjs/highlight.js/{v}/LICENSE"),
+    "xterm": ("6.0.0", "MIT", {"xterm.min.js": "xterm.js", "xterm.css": "xterm.min.css"},
+              "https://raw.githubusercontent.com/xtermjs/xterm.js/{v}/LICENSE"),
 }
 
 
