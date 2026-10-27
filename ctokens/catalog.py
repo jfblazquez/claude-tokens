@@ -25,7 +25,7 @@ def project_path_of(path):
 
 
 def session_title(path, tail=131072):
-    """Last user-facing session rename (aiTitle); empty when there is none."""
+    """The session's name: its last rename (customTitle), else its last generated title (aiTitle); empty when none."""
     try:
         with path.open("rb") as f:
             size = path.stat().st_size
@@ -34,17 +34,66 @@ def session_title(path, tail=131072):
             data = f.read()
     except OSError:
         return ""
-    title = ""
+    custom = ai = None
     for line in data.decode("utf-8", "ignore").splitlines():
-        if '"aiTitle"' not in line:
+        key = "customTitle" if '"customTitle"' in line else "aiTitle" if '"aiTitle"' in line else None
+        if key is None:
             continue
         try:
-            value = json.loads(line).get("aiTitle")
-        except json.JSONDecodeError:
+            value = json.loads(line).get(key)
+        except (json.JSONDecodeError, AttributeError):
             continue
-        if value:
-            title = value
-    return title
+        if key == "customTitle" and isinstance(value, str):
+            custom = value
+        elif value:
+            ai = value
+    # Claude Code writes the name to the log again now and then; a rename older than the tail is only in its sidecar.
+    if custom is None:
+        custom = sidecar_title(path)
+    return custom or ai or ""
+
+
+def title_sidecar(path):
+    return path.parent / path.stem / "custom-title.json"
+
+
+def sidecar_title(path):
+    try:
+        value = json.loads(title_sidecar(path).read_text(encoding="utf-8")).get("customTitle")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def clean_title(text):
+    """A name as one line of printable text, or "" when nothing is left."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
+
+
+def compact(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def save_title(path, session_id, title):
+    """Rename a conversation no process runs, writing what /rename writes; its modified time stays."""
+    stat = path.stat()
+    entries = [{"type": "custom-title", "customTitle": title, "sessionId": session_id},
+               {"type": "agent-name", "agentName": title, "sessionId": session_id}]
+    with path.open("rb+") as f:
+        end = f.seek(0, 2)
+        torn = False
+        if end:
+            f.seek(end - 1)
+            torn = f.read(1) != b"\n"
+        # Compact like Claude Code's own lines: it finds them by looking for "customTitle":" in the text.
+        f.write((("\n" if torn else "") + "".join(compact(e) + "\n" for e in entries)).encode("utf-8"))
+    sidecar = title_sidecar(path)
+    sidecar.parent.mkdir(mode=0o700, exist_ok=True)
+    temporary = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.tmp")
+    temporary.write_text(compact({"customTitle": title}), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, sidecar)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 
 
 RECAP_HINT = re.compile(r"\s*\(disable recaps in /config\)\s*$")

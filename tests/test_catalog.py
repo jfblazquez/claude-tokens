@@ -7,7 +7,8 @@ from unittest import mock
 
 from fixtures import AMBIGUOUS, API, BILLING, CONV_A, CONV_B, CONV_EMPTY, build_projects, write_jsonl, user
 
-from ctokens.catalog import conversation_rows, find_conversation, last_recap, list_conversations
+from ctokens.catalog import (clean_title, conversation_rows, find_conversation, last_recap, list_conversations, save_title,
+                             session_title)
 
 
 class ConversationRowsTest(unittest.TestCase):
@@ -121,6 +122,56 @@ class LastRecapTest(unittest.TestCase):
         self.write(*filler, recap("Far from the end.", "2026-09-28T09:00:00.000Z"), *filler)
         self.assertEqual(last_recap(self.path), last_recap(self.path, block=7))
         self.assertEqual(last_recap(self.path, block=7)["text"], "Far from the end.")
+
+
+class TitleTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / f"{CONV_A}.jsonl"
+
+    def write(self, *events):
+        write_jsonl(self.path, events, 1790000000)
+
+    def test_rename_wins_over_the_generated_title(self):
+        self.write({"type": "ai-title", "aiTitle": "Generated"}, {"type": "custom-title", "customTitle": "Old name"},
+                   {"type": "custom-title", "customTitle": "Mine"}, {"type": "ai-title", "aiTitle": "Generated later"})
+        self.assertEqual(session_title(self.path), "Mine")
+
+    def test_cleared_rename_falls_back_to_the_generated_title(self):
+        self.write({"type": "custom-title", "customTitle": "Mine"}, {"type": "ai-title", "aiTitle": "Generated"},
+                   {"type": "custom-title", "customTitle": ""})
+        self.assertEqual(session_title(self.path), "Generated")
+
+    def test_rename_older_than_the_tail_comes_from_the_sidecar(self):
+        self.write({"type": "custom-title", "customTitle": "Lost"}, user("x" * 400, "/w", "2026-09-28T10:00:00.000Z", "u1"),
+                   {"type": "ai-title", "aiTitle": "Generated"})
+        self.assertEqual(session_title(self.path, tail=300), "Generated")
+        (self.path.parent / CONV_A).mkdir()
+        (self.path.parent / CONV_A / "custom-title.json").write_text('{"customTitle":"From sidecar"}')
+        self.assertEqual(session_title(self.path, tail=300), "From sidecar")
+        self.assertEqual(session_title(self.path), "Lost")
+
+    def test_save_title_writes_what_rename_writes_and_keeps_the_modified_time(self):
+        self.write(user("Hi", "/w", "2026-09-28T10:00:00.000Z", "u1"), {"type": "ai-title", "aiTitle": "Generated"})
+        save_title(self.path, CONV_A, "Nueva versión \"2\"")
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[-2:], ['{"type":"custom-title","customTitle":"Nueva versión \\"2\\"","sessionId":"%s"}' % CONV_A,
+                                      '{"type":"agent-name","agentName":"Nueva versión \\"2\\"","sessionId":"%s"}' % CONV_A])
+        self.assertEqual(session_title(self.path), 'Nueva versión "2"')
+        sidecar = self.path.parent / CONV_A / "custom-title.json"
+        self.assertEqual(sidecar.read_text(encoding="utf-8"), '{"customTitle":"Nueva versión \\"2\\""}')
+        self.assertEqual(oct(sidecar.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(self.path.stat().st_mtime, 1790000000)
+
+    def test_save_title_after_a_torn_last_line(self):
+        self.path.write_text('{"type":"user"')
+        save_title(self.path, CONV_A, "Name")
+        self.assertEqual(self.path.read_text().splitlines()[1], '{"type":"custom-title","customTitle":"Name","sessionId":"%s"}' % CONV_A)
+
+    def test_clean_title(self):
+        self.assertEqual(clean_title("  two\nlines\tand\x1b[31m colour  "), "two lines and [31m colour")
+        self.assertEqual(clean_title(" \n\x00 "), "")
 
 
 class FindConversationTest(unittest.TestCase):

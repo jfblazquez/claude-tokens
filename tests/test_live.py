@@ -8,12 +8,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fixtures import CONV_A, CONV_B, build_projects, user
+from fixtures import API, BILLING, CONV_A, CONV_B, build_projects, user
 from test_server import http_request, start_server, stop_server
 
 from ctokens import live
 from ctokens.content import Transcript, transcript
 from ctokens.pricing import load_prices
+from ctokens.web import server as web_server
 from ctokens.web.server import Config, Handler
 
 PANE, SOCKET, TTY = "%7", "/tmp/tmux-1000/default", "/dev/pts/7"
@@ -152,6 +153,11 @@ class SendTest(LiveTestCase):
             with self.subTest(problem=problem), self.assertRaisesRegex(live.SendError, problem):
                 live.send(self.sessions, session, text)
         self.run.assert_not_called()
+
+    def test_rename_types_the_rename_command(self):
+        live.rename(self.sessions, CONV_A, "New name")
+        load = next(call for call in self.run.call_args_list if "load-buffer" in call.args[0])
+        self.assertEqual(load.kwargs["input"], "/rename New name")
 
     def test_tmux_failure(self):
         self.run.side_effect = lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "no server running")
@@ -293,6 +299,78 @@ class LiveApiTest(LiveApiCase):
                 self.assertEqual(self.post(CONV_B, {}, key="nope", action=action)[0], 403)
                 go.assert_not_called()
                 new.assert_not_called()
+
+
+class RenameAndFavoritesApiTest(LiveApiCase):
+    def log(self, folder, conversation_id):
+        return self.projects / folder / f"{conversation_id}.jsonl"
+
+    def test_live_session_renames_itself_and_the_answer_waits_for_its_log(self):
+        def rename(sessions, conversation_id, title):
+            with self.log(API, conversation_id).open("a") as f:
+                f.write(json.dumps({"type": "custom-title", "customTitle": f"{title}-2"}) + "\n")
+        with mock.patch("ctokens.web.server.rename", side_effect=rename) as typed:
+            self.assertEqual(self.post(CONV_A, {"title": " Release\nnotes "}, action="rename"), (200, {"title": "Release notes-2"}))
+        self.assertEqual(typed.call_args.args, (self.projects.parent / "sessions", CONV_A, "Release notes"))
+
+    def test_live_session_that_does_not_take_the_name(self):
+        with mock.patch("ctokens.web.server.rename"), mock.patch.object(web_server, "RENAME_TIMEOUT", 0.2):
+            status, data = self.post(CONV_A, {"title": "Name"}, action="rename")
+        self.assertEqual(status, 409)
+        self.assertIn("did not take the new name", data["error"])
+
+    def test_live_session_without_a_terminal_is_not_written_behind_its_back(self):
+        record(self.sessions, 41, CONV_A, entrypoint="sdk-cli")
+        before = self.log(API, CONV_A).read_bytes()
+        status, data = self.post(CONV_A, {"title": "Name"}, action="rename")
+        self.assertEqual(status, 409)
+        self.assertIn("interactive terminal", data["error"])
+        self.assertEqual(self.log(API, CONV_A).read_bytes(), before)
+
+    def test_conversation_no_process_runs_is_renamed_in_its_log(self):
+        with mock.patch("ctokens.web.server.rename") as typed:
+            self.assertEqual(self.post(CONV_B, {"title": "Ledger work"}, action="rename"), (200, {"title": "Ledger work"}))
+        typed.assert_not_called()
+        self.assertIn('"customTitle":"Ledger work"', self.log(BILLING, CONV_B).read_text())
+        rows = {r["id"]: r for r in self.get("/api/conversations")[2]["conversations"]}
+        self.assertEqual(rows[CONV_B]["title"], "Ledger work")
+
+    def test_rename_refusals(self):
+        cases = (({"key": "nope"}, {"title": "x"}, 403), ({"key": None}, {"title": "x"}, 403), ({}, {"title": " \n "}, 400),
+                 ({}, {"name": "x"}, 400), ({}, {"title": "x" * 201}, 400))
+        with mock.patch("ctokens.web.server.rename") as typed, mock.patch("ctokens.web.server.save_title") as saved:
+            for options, body, code in cases:
+                with self.subTest(body=body, options=options):
+                    self.assertEqual(self.post(CONV_B, body, action="rename", **options)[0], code)
+            self.assertEqual(self.post(CONV_A, {"title": "Add request-cache invalidation"}, action="rename"),
+                             (200, {"title": "Add request-cache invalidation"}))
+        typed.assert_not_called()
+        saved.assert_not_called()
+
+    def test_favorites_need_no_key_and_show_whatever_the_filters(self):
+        self.assertEqual(self.post(CONV_B, {"favorite": True}, key=None, action="favorite"), (200, {"favorite": True}))
+        self.assertEqual(self.post(CONV_A, {"favorite": True}, key=None, action="favorite"), (200, {"favorite": True}))
+        data = self.get("/api/conversations?project=billing")[2]
+        self.assertEqual([r["id"] for r in data["favorites"]], [CONV_A, CONV_B])
+        self.assertEqual(data["favorites"][0]["live"]["pid"], 41)
+        self.assertEqual(data["favorites"][1], {"id": CONV_B, "title": "", "project": "/home/dev/projects/billing-service",
+                                                "modified": data["favorites"][1]["modified"]})
+        self.assertEqual({r["id"]: r.get("favorite") for r in data["conversations"]}[CONV_B], True)
+        self.assertEqual(self.post(CONV_A, {"favorite": False}, key=None, action="favorite"), (200, {"favorite": False}))
+        data = self.get("/api/conversations")[2]
+        self.assertEqual([r["id"] for r in data["favorites"]], [CONV_B])
+        self.assertNotIn("favorite", {r["id"]: r for r in data["conversations"]}[CONV_A])
+        stored = json.loads((self.projects.parent / "claude-tokens" / "favorites.json").read_text())
+        self.assertEqual(stored, {"favorites": [CONV_B]})
+
+    def test_favorite_refusals(self):
+        cases = (({"origin": "http://evil.example"}, {"favorite": True}, 403), ({}, {"favorite": "yes"}, 400),
+                 ({"content_type": "text/plain"}, {"favorite": True}, 415))
+        for options, body, code in cases:
+            with self.subTest(body=body, options=options):
+                self.assertEqual(self.post(CONV_B, body, action="favorite", **options)[0], code)
+        self.assertEqual(self.post("55555555-5555-4555-8555-555555555555", {"favorite": True}, action="favorite")[0], 404)
+        self.assertEqual(self.get("/api/conversations")[2]["favorites"], [])
 
 
 class LaunchTest(LiveTestCase):

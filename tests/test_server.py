@@ -287,7 +287,7 @@ class ApiParityTest(ServerTestCase):
         status, data = self.get_json("/api/conversations")
         self.assertEqual(status, 200)
         self.assertEqual(data, {"projects_dir": str(self.projects), "key": "disabled",
-                                "conversations": conversation_rows(self.projects)})
+                                "conversations": conversation_rows(self.projects), "favorites": []})
         self.assertEqual([row["id"] for row in data["conversations"]],
                          [CONV_A, CONV_B, AMBIGUOUS, AMBIGUOUS, CONV_EMPTY])
 
@@ -401,7 +401,8 @@ class EmptyFolderTest(unittest.TestCase):
                         port = server.server_address[1]
                         status, data = get_json(port, "/api/conversations")
                         self.assertEqual((status, data),
-                                         (200, {"projects_dir": str(folder), "key": "disabled", "conversations": []}))
+                                         (200, {"projects_dir": str(folder), "key": "disabled", "conversations": [],
+                                                "favorites": []}))
                         status, data = get_json(port, "/api/totals")
                         self.assertEqual(status, 200)
                         self.assertEqual(data, json.loads(json.dumps(
