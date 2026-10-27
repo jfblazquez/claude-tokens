@@ -1789,14 +1789,20 @@ const onlyImages = (result) => !!(result.images && /^(\s*\[image\])+\s*$/.test(r
 // Past this a whole text shows without highlighting, which would hold the page for seconds.
 const FULL_HIGHLIGHT_MAX = 400_000;
 
+// Where the whole of a clipped text of the open conversation comes from; null when it cannot be asked for.
+function fullUrl(at) {
+  const route = app.route;
+  if (at == null || !route || !route.id) return null;
+  return `/api/conversations/${encodeURIComponent(route.id)}/full?at=${at}&source=${encodeURIComponent(messagesState.source)}`;
+}
+
 // A clipped text says so, and Show all fetches the rest only when asked; unwrap(text) takes the part shown from it.
 function clippedPre(item, lang = null) {
   const pre = codePre(item.text, lang);
   if (!(item.size > item.text.length)) return [pre];
   const note = h("div", { class: "footnote" }, `Showing the first ${fmt(item.text.length)} of ${fmt(item.size)} characters`);
-  const route = app.route;
-  if (item.at == null || !route || !route.id) return [pre, note];
-  const url = `/api/conversations/${encodeURIComponent(route.id)}/full?at=${item.at}&source=${encodeURIComponent(messagesState.source)}`;
+  const url = fullUrl(item.at);
+  if (!url) return [pre, note];
   const button = h("button", { class: "btn small", type: "button", title: `Load the other ${fmt(item.size - item.text.length)} characters`,
     onclick: async () => {
       button.disabled = true;
@@ -1911,17 +1917,45 @@ function xmlSections(text, cut = false) {
 
 const tagChips = (sections) => (sections || []).map((x) => h("span", { class: "chip tag" }, x.tag));
 
+// Short enough to show open: a glance says what it is, while long ones would push the conversation away.
+const EVENT_OPEN_CHARS = 1000;
+const EVENT_OPEN_LINES = 15;
+
+// JSON on one line is laid out to be read; clipped JSON no longer parses and stays as it is.
+function readableJson(item) {
+  if (!highlighting() || !looksJson(item.text)) return [item, null];
+  if (item.size > item.text.length || item.text.includes("\n")) return [item, "json"];
+  try {
+    const text = JSON.stringify(JSON.parse(item.text), null, 2);
+    return [{ ...item, text, size: text.length }, "json"];
+  } catch (_) {
+    return [item, "json"];
+  }
+}
+
+const jsonPre = (item) => clippedPre(...readableJson(item));
+
 // The tags go next to the block's name, and the text shows without them.
 function eventBlock(m) {
   const cut = m.size > m.text.length, sections = xmlSections(m.text, cut);
   const name = h("span", { class: "chip" }, m.kind === "system" ? `system · ${m.name}` : m.name);
-  if (!sections) return lazyDetails("blk", [name], () => clippedPre(m));
   const missing = m.size - m.text.length;
   // Only the last section can be the clipped one; its whole text is the event's, from which that section is taken.
   const part = (x, last) => ({ text: x.text, size: x.text.length + (last ? missing : 0), at: last ? m.at : null,
     unwrap: (text) => { const all = xmlSections(text); return all ? all[all.length - 1].text : text; } });
-  return lazyDetails("blk", [name, ...tagChips(sections)], () => (sections.length === 1 ? clippedPre(part(sections[0], true))
-    : sections.map((x, i) => labelled(x.tag, part(x, i === sections.length - 1)))));
+  const box = !sections ? lazyDetails("blk", [name], () => jsonPre(m))
+    : lazyDetails("blk", [name, ...tagChips(sections)], () => (sections.length === 1 ? jsonPre(part(sections[0], true))
+      : sections.map((x, i) => labelled(x.tag, ...readableJson(part(x, i === sections.length - 1))))));
+  if (!cut && m.text.length <= EVENT_OPEN_CHARS && m.text.split("\n").length <= EVENT_OPEN_LINES) box.open = true;
+  return box;
+}
+
+// Every event can be copied as it was logged, the whole of it when the page only has its beginning.
+function eventCopy(m) {
+  if (!m.text) return null;
+  const url = m.size > m.text.length ? fullUrl(m.at) : null;
+  return copyButton(url ? () => api(url).then((data) => writeText(data.text)) : m.text,
+    url ? "Copy the whole text" : "Copy the text");
 }
 
 function eventBody(m) {
@@ -1941,7 +1975,7 @@ function eventBody(m) {
 function eventItem(m, time) {
   const level = EVENT_LEVELS[m.kind] || 5;
   return h("li", { class: `msg event${m.kind === "refusal" ? " failed" : ""}${level > 1 ? ` v${level}` : ""}` },
-    h("div", { class: "msg-head" }, time, eventBody(m)));
+    h("div", { class: "msg-head" }, time, eventBody(m)), eventCopy(m));
 }
 
 // Shown from level 3: time spent thinking and the effort the response ran with.

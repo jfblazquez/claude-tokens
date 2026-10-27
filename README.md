@@ -318,7 +318,10 @@ first one, and goes away once you scroll to them. Tool inputs and results and
 the text of events show their first 4,000 characters; **Show all**, under one
 that is longer, loads the rest of that text only. An event whose text is wrapped
 in tags, such as `<system-reminder>…</system-reminder>`, shows without them, the
-tag next to the event's name, and so does injected context. Opened tool calls are
+tag next to the event's name, and so does injected context. Events up to 1,000
+characters and 15 lines show open; JSON is coloured as such (laid out when it
+came on one line), and every event has a clipboard button that copies its whole
+text, fetched when the page only has its beginning. Opened tool calls are
 syntax-highlighted: Bash commands as shell, Write/Edit text and Read results by
 file extension. Other results are recognised by their own markers (JSON, diffs,
 `#!` scripts, XML), or take the language of the files the command reads
