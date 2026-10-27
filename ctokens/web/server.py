@@ -19,8 +19,8 @@ from urllib.parse import parse_qs
 from ..catalog import (CONVERSATION_ID, active_time, clean_title, conversation_rows, conversation_text, find_conversation,
                        iso_utc, last_activity, last_recap, project_path_of, save_title, session_title)
 from ..content import bash_commands, conversation_messages, last_response, touched_files
-from ..live import (SendError, activity, channel, go_live, live_sessions, new_session, public, read_record, rename, send,
-                    send_problem, sessions_dir)
+from ..live import (SendError, activity, answer, channel, go_live, live_sessions, new_session, public, read_record, rename,
+                    send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
 from ..repo import FileIndex, RepoError, find_commits, find_files, read_file, repo_root, show_commit
 from ..reports import report, scan_totals, totals_report
@@ -48,7 +48,7 @@ MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live))?")
-ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|go-live|new-session|rename|favorite|resolve|shell)")
+ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|new-session|rename|favorite|resolve|shell)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
 REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
 SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close)")
@@ -227,6 +227,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(data.get("text"), str):
                     return json_response(400, {"error": "expected {\"text\": \"...\"}"})
                 return json_response(200, {"sent": True, "live": send(sessions, conversation_id, data["text"])})
+            if name == "answer":
+                return json_response(200, {"live": answer(sessions, conversation_id, data.get("steps"))})
             if name == "go-live":
                 return json_response(200, {"started": True, "live": go_live(sessions, conversation_id, cwd)})
             session_id, info = new_session(sessions, cwd)
@@ -331,6 +333,9 @@ class Handler(BaseHTTPRequestHandler):
                     row["favorite"] = True
             return json_response(200, {"projects_dir": str(config.projects_dir), "key": self.key_state(),
                                        "conversations": rows, "favorites": favorites})
+        if path == "/api/live":
+            live = live_sessions(sessions_dir(config.projects_dir))
+            return json_response(200, {"key": self.key_state(), "live": {i: public(info) for i, info in live.items()}})
         if path == "/api/recaps":
             ids = [i for i in params.get("ids", [""])[0].split(",") if i]
             if len(ids) > MAX_RECAP_IDS:
@@ -497,7 +502,7 @@ class Watch:
         self.config, self.sessions, self.id, self.source = config, sessions, conversation_id, source
         self.started = self.beat = time.monotonic()
         self.log = self.stamp = self.info = self.pane = None
-        self.live_key = self.text = self.problem = None
+        self.live_key = self.text = self.problem = self.shown = None
         self.rescan = self.next_activity = self.next_problem = 0.0
         self.first = True
 
@@ -542,18 +547,19 @@ class Watch:
             events.append(("log", {"size": stamp and stamp[0]}))
         info = self.session(now)
         key = info and (info["pid"], info["updated_ms"], info["status"])
-        # Leaving shell mode shows on the screen but not always in the registry, so the problem is checked again.
-        problem = self.problem
+        # Leaving shell mode and moving through a dialog show on the screen but not in the registry, so both are read
+        # again now and then.
+        problem, shown = self.problem, self.shown
         if key != self.live_key or (info and now >= self.next_problem):
-            problem = info and send_problem(info)
+            problem, shown = info and send_problem(info), info and public(info)
             self.next_problem = now + ACTIVITY_EVERY
-        if key != self.live_key or problem != self.problem:
-            self.live_key, self.problem = key, problem
+        if key != self.live_key or problem != self.problem or shown != self.shown:
+            self.live_key, self.problem, self.shown = key, problem, shown
             try:
                 self.pane = channel(info) if info else None
             except SendError:
                 self.pane = None
-            events.append(("live", {"live": info and public(info), "send_problem": problem}))
+            events.append(("live", {"live": shown, "send_problem": problem}))
         text = self.text
         if not (info and info["status"] == "busy" and self.pane):
             text = None

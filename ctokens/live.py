@@ -27,6 +27,17 @@ SPINNER = re.compile(r"^[·✢✳✶✻✽*]\s+(\S[^…]*….*?)\s*$")
 # The prompt box sits between two rules; its first character is ❯ (or >) for a message and ! in shell mode.
 RULE = re.compile(r"^\s*[─━]{8}")
 PROMPT_MARKS = {"❯": "prompt", ">": "prompt", "!": "shell"}
+# A dialog (a question, a permission prompt) lists its choices as "1. Yes", the highlighted one behind ❯; a multiple
+# choice question puts a box in front of each label.
+OPTION = re.compile(r"^(\s*)(❯)?\s*([1-9])\.\s+(\S.*?)\s*$")
+CHECKBOX = re.compile(r"^\[([ ✔])\]\s*")
+UNNUMBERED = re.compile(r"^\s*(❯)?\s*(\S.*?)\s*$")
+DASHES = re.compile(r"^\s*[╌─━]+$")
+# What the page can press in a dialog: a choice's digit, moving between choices and questions, confirming, cancelling.
+DIALOG_KEYS = frozenset({"Enter", "Escape", "Up", "Down", "Left", "Right", "Tab", *"123456789"})
+MAX_DIALOG_STEPS = 8
+# Room for Claude Code to take a key before the next one, and to draw the dialog again before it is read back.
+STEP_DELAY = 0.15
 
 
 class SendError(Exception):
@@ -105,14 +116,30 @@ def live_sessions(directory):
 
 
 def public(info):
-    """What the API shows of a live session: read_only when no message can ever be typed into it."""
+    """What the API shows of a live session: read_only when no message can ever be typed into it, its status as its
+    screen shows it, and the dialog it waits on."""
     try:
-        channel(info)
+        socket, pane = channel(info)
         problem = None
     except SendError as error:
         problem = str(error)
-    return {**{key: value for key, value in info.items() if key != "updated_ms"},
+    status, shown = info.get("status"), None
+    if problem is None:
+        lines = screen(socket, pane)
+        status = screen_status(status, prompt_mode(socket, pane, lines))
+        shown = dialog(lines) if status == "waiting" else None
+    return {**{key: value for key, value in info.items() if key != "updated_ms"}, "status": status, "dialog": shown,
             "read_only": problem is not None, "read_only_reason": problem}
+
+
+def screen_status(status, mode):
+    """Claude Code does not always write the registry when shell mode ends, and typing into shell mode runs a command,
+    so the screen has the last word on shell mode either way."""
+    if status in SENDABLE and mode == "shell":
+        return "shell"
+    if status == "shell" and mode == "prompt":
+        return "idle"
+    return status
 
 
 def tmux(socket, *args, text=None):
@@ -155,12 +182,17 @@ def channel(info):
     return socket, pane
 
 
-def prompt_mode(socket, pane):
-    """'prompt' or 'shell' from the prompt box on the session's screen; None when no box is found."""
+def screen(socket, pane):
+    """The lines the session's pane shows now; [] when it cannot be read."""
     try:
-        lines = tmux(socket, "capture-pane", "-p", "-t", pane).splitlines()
+        return tmux(socket, "capture-pane", "-p", "-t", pane).splitlines()
     except SendError:
-        return None
+        return []
+
+
+def prompt_mode(socket, pane, lines=None):
+    """'prompt' or 'shell' from the prompt box on the session's screen; None when no box is found."""
+    lines = screen(socket, pane) if lines is None else lines
     rules = [i for i, line in enumerate(lines) if RULE.match(line)]
     for top, bottom in zip(rules[-2::-1], rules[:0:-1]):
         inside = [line.strip() for line in lines[top + 1:bottom] if line.strip()]
@@ -169,25 +201,66 @@ def prompt_mode(socket, pane):
     return None
 
 
+def dialog(lines):
+    """The dialog at the bottom of a screen: {"text", "question", "options", "hint"}, or None when there is none.
+    Its text starts below the rule above its first choice; the tool behind it is only logged once it is answered."""
+    lines = [line.rstrip() for line in lines]
+    while lines and not lines[-1]:
+        lines.pop()
+    numbered = [i for i, line in enumerate(lines) if OPTION.match(line)]
+    first = next((i for i in reversed(numbered) if OPTION.match(lines[i]).group(3) == "1"), None)
+    if first is None:
+        return None
+    top = max((i for i in range(first) if RULE.match(lines[i])), default=-1)
+    text = lines[top + 1:first]
+    while text and not text[0].strip():
+        text.pop(0)
+    while text and not text[-1].strip():
+        text.pop()
+    indent = min((len(line) - len(line.lstrip()) for line in text if line.strip() and not DASHES.match(line)), default=0)
+    hint = lines[-1].strip() if len(lines) - 1 > numbered[-1] and not lines[-2].strip() else None
+    options, column = [], 0
+    for line in lines[first:len(lines) - 1 if hint else len(lines)]:
+        match = OPTION.match(line)
+        if match:
+            label, box = match.group(4), CHECKBOX.match(match.group(4))
+            column = match.start(4) + (box.end() if box else 0)
+            options.append({"key": match.group(3), "label": label[box.end():] if box else label, "detail": "",
+                            "current": bool(match.group(2)), "checked": box.group(1) != " " if box else None})
+            continue
+        item = UNNUMBERED.match(line)
+        if not item or RULE.match(line):
+            continue
+        # Below a choice and in line with its label it goes on with it; further left it is a choice without a digit,
+        # such as the Submit of a multiple choice question, reached with the arrows.
+        if item.start(2) >= column:
+            options[-1]["detail"] = f"{options[-1]['detail']}\n{item.group(2)}".lstrip("\n")
+        else:
+            options.append({"key": None, "label": item.group(2), "detail": "", "current": bool(item.group(1)),
+                            "checked": None})
+    question = next((line.strip() for line in reversed(text) if line.strip()), "")
+    return {"text": "\n".join(line[indent:] for line in text), "question": question, "options": options, "hint": hint}
+
+
 def target(info):
     """(tmux socket, pane) showing this session's prompt, or SendError saying why text cannot go there now."""
     socket, pane = channel(info)
     status = info.get("status")
-    # Claude Code does not always write the registry when shell mode ends, and typing into shell mode runs a command,
-    # so the screen has the last word on shell mode either way.
     if status in SENDABLE or status == "shell":
-        mode = prompt_mode(socket, pane)
-        if mode == "shell":
+        status = screen_status(status, prompt_mode(socket, pane))
+        if status == "shell":
             raise SendError("The session is in shell mode; deal with it in its terminal first.")
-        if mode == "prompt":
-            status = status if status in SENDABLE else "idle"
     if status not in SENDABLE:
         state = f"waiting ({info['waiting_for']})" if info.get("waiting_for") else STATES.get(status, status)
         raise SendError(f"The session is {state}; deal with it in its terminal first.")
+    foreground(info)
+    return socket, pane
+
+
+def foreground(info):
     stat = proc_stat(info["pid"])
     if not stat or stat[2] != stat[5]:
         raise SendError("The session is not in the foreground of its terminal.")
-    return socket, pane
 
 
 def activity(socket, pane):
@@ -239,6 +312,40 @@ def type_in(directory, session_id, text):
     time.sleep(ENTER_DELAY)
     tmux(socket, "send-keys", "-t", pane, "Enter")
     return public(info)
+
+
+def dialog_step(step):
+    """A key from DIALOG_KEYS or one line of text; a line break would answer the dialog halfway through the text."""
+    if not isinstance(step, dict) or len(step) != 1:
+        return False
+    if "key" in step:
+        return step["key"] in DIALOG_KEYS
+    text = step.get("text")
+    return (isinstance(text, str) and bool(text.strip()) and len(text) <= MAX_MESSAGE_CHARS
+            and not any(c in text for c in "\r\n\x1b"))
+
+
+def answer(directory, session_id, steps):
+    """Press keys and type text into the dialog a session waits on, as if in its terminal; its live info after."""
+    if not isinstance(steps, list) or not 0 < len(steps) <= MAX_DIALOG_STEPS or not all(map(dialog_step, steps)):
+        raise SendError(f"Expected 1 to {MAX_DIALOG_STEPS} steps, each a key ({', '.join(sorted(DIALOG_KEYS))}) "
+                        "or one line of text.")
+    info = live_sessions(directory).get(session_id)
+    if info is None:
+        raise SendError("The conversation is not running in any Claude Code process.")
+    socket, pane = channel(info)
+    # A key meant for a dialog, typed into the prompt instead, would end up in the next message.
+    if info.get("status") != "waiting" or dialog(screen(socket, pane)) is None:
+        raise SendError("The session is not waiting on a question or a dialog any more.")
+    foreground(info)
+    for step in steps:
+        if "text" in step:
+            tmux(socket, "send-keys", "-t", pane, "-l", step["text"])
+        else:
+            tmux(socket, "send-keys", "-t", pane, step["key"])
+        time.sleep(STEP_DELAY)
+    found = read_record(Path(directory) / f"{info['pid']}.json")
+    return public(found[1]) if found and found[0] == session_id else None
 
 
 def launch(cwd, command, name):

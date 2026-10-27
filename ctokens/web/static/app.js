@@ -691,6 +691,25 @@ function projectChip(project) {
     } }, icon("folder"), lastFolder(project));
 }
 
+// What a live session waits on, from its screen: the question (or the permission it asks for) and a way to answer it.
+function dialogLine(row) {
+  const dialog = row.live && row.live.dialog;
+  if (!dialog) return null;
+  const answer = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = convHref(row.id, "messages"); };
+  return h("p", { class: "dialog-line", title: dialog.text },
+    h("b", {}, dialogKind(row.live)), " ", dialogSummary(row.live),
+    h("span", { class: "btn answer", onclick: answer }, "Answer"));
+}
+
+// A permission prompt names the tool on its first line and frames what it would run between dashed lines.
+function dialogSummary(live) {
+  const dialog = live.dialog, lines = dialog.text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (live.waiting_for !== "permission prompt") return dialog.question || lines.join(" ");
+  const framed = lines.findIndex((l) => /^[╌─━]+$/.test(l));
+  const body = framed < 0 ? null : lines.slice(framed + 1).find((l) => !/^[╌─━]+$/.test(l));
+  return body && body !== dialog.question ? `${lines[0]}: ${body}` : dialog.question || lines[0];
+}
+
 const projectMatches = (row, filter) => !filter || String(row.project || "").toLowerCase().includes(filter.toLowerCase());
 
 let listFilter = "";
@@ -827,6 +846,7 @@ function conversationCard(row, now) {
       h("span", { class: "conv-title" }, liveBadge(row.live, false, row.id),
         titleText(row.id, row.title, "card", href, h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
       h("time", { class: "conv-when", datetime: row.modified, title: `Last message ${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
+    dialogLine(row),
     row.new ? h("p", { class: "recap" }, "No messages yet") : recapLine(row),
     h("div", { class: "conv-meta" }, projectChip(row.project),
       h("span", {}, fmtBytes(row.size_bytes)),
@@ -910,7 +930,41 @@ VIEWS.list = {
   render(data) {
     return [favoritesSection(), listBody(data)];
   },
+  after() {
+    const timer = setInterval(pollListLive, LIST_LIVE_MS);
+    return () => clearInterval(timer);
+  },
 };
+
+// ---------- live states on the list: polled, since a session changes state (and asks questions) without logging ----------
+const LIST_LIVE_MS = 3000;
+
+async function pollListLive() {
+  if (document.hidden || app.busy || renaming.id || app.phase !== "ready" || !app.route || app.route.view !== "list") return;
+  let body;
+  try {
+    body = await api("/api/live", { headers: sendHeaders() });
+  } catch (_) {
+    return;
+  }
+  if (app.busy || !app.route || app.route.view !== "list" || !listState.data) return;
+  const live = body.live || {}, rows = listState.data.rows;
+  const known = new Set(rows.map((r) => r.id));
+  // A session started elsewhere shows up without a log, and one that never wrote a log goes away when it ends.
+  const appeared = !listSearch && Object.entries(live).some(([id, l]) => !known.has(id) && l.entrypoint === "cli" && l.cwd);
+  if (appeared || rows.some((r) => r.new && !live[r.id])) {
+    load({ refresh: true });
+    return;
+  }
+  let changed = false;
+  for (const row of [...rows, ...favoriteRows]) {
+    const next = live[row.id] || null;
+    if (JSON.stringify(next) === JSON.stringify(row.live || null)) continue;
+    row.live = next;
+    changed = true;
+  }
+  if (changed) show({ keepScroll: true });
+}
 
 function listBody({ search, rows }) {
   if (!rows.length && !search) {
@@ -1091,6 +1145,18 @@ function liveState(live) {
   return live.status || "running";
 }
 
+// Claude Code says "input needed" while it asks a question and "permission prompt" while it asks to run a tool.
+function dialogKind(live) {
+  if (live.waiting_for === "input needed") return "Question:";
+  if (live.waiting_for === "permission prompt") return "Permission:";
+  return "Waiting:";
+}
+
+function shortState(live) {
+  if (live.status !== "waiting") return live.status || "running";
+  return { "input needed": "question", "permission prompt": "permission" }[live.waiting_for] || "waiting";
+}
+
 // With an id the badge opens that conversation's Conversation tab, even from inside a card's link.
 function liveBadge(live, long = false, id = null) {
   if (!live) return null;
@@ -1101,7 +1167,7 @@ function liveBadge(live, long = false, id = null) {
   return h("span", { class: `live ${live.status || ""}${live.read_only ? " read-only" : ""}${id ? " link" : ""}`,
     title: `Running in Claude Code process ${live.pid}${live.name ? ` (${live.name})` : ""} · ${state}${since}`
       + (live.read_only ? `\nRead only: ${live.read_only_reason}` : "") + (id ? "\nClick to open the conversation" : ""), onclick: open },
-  h("i", { "aria-hidden": "true" }), long ? `Live · ${state}${readOnly}` : `Live${readOnly}`);
+  h("i", { "aria-hidden": "true" }), long ? `Live · ${state}${readOnly}` : `Live · ${shortState(live)}${readOnly}`);
 }
 
 // ---------- starting claude in a new tmux window: GO LIVE (resume) and New session ----------
@@ -1978,7 +2044,8 @@ function messagesPath(route) {
 
 // ---------- composer: typing into the running session, as if in its terminal ----------
 const STICK_MARGIN = 80;
-const composer = { id: null, el: null, text: null, button: null, note: null, sending: false, sent: null, error: null };
+const composer = { id: null, el: null, text: null, button: null, note: null, sending: false, sent: null, error: null,
+  dialog: null, dialogBody: null, own: null, answer: null, answerButton: null, answering: false };
 
 const KEY_NOTES = {
   disabled: "Sending is disabled on this server.",
@@ -1990,6 +2057,7 @@ function composerNote(status) {
   if (status.live.read_only) return [`Read only: ${status.live.read_only_reason}`, "warn"];
   if (composer.error) return [composer.error, "error"];
   if (KEY_NOTES[status.key]) return [KEY_NOTES[status.key], "warn"];
+  if (status.live.dialog) return ["Each button presses its key in the session's terminal; you can also answer there.", ""];
   if (status.send_problem) return [status.send_problem, "warn"];
   const sent = composer.sent ? `Sent at ${utcTime(composer.sent)} UTC · ` : "";
   return [`${sent}Typed into the session's terminal · Enter sends, Shift+Enter adds a line`, ""];
@@ -2006,9 +2074,103 @@ function buildComposer(id) {
   const button = h("button", { class: "btn primary", type: "submit" }, "Send");
   const note = h("div", { class: "composer-note", "aria-live": "polite" });
   const working = h("div", { class: "composer-activity", hidden: true });
+  const answerButton = h("button", { class: "btn primary", type: "button", onclick: () => typeAnswer() }, "Answer");
+  const answer = h("input", { id: "dialog-text", type: "text", placeholder: "Your own answer", "aria-label": "Your own answer",
+    onkeydown: (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      e.preventDefault();
+      typeAnswer();
+    },
+    oninput: () => { answerButton.disabled = composer.answering || !answer.value.trim(); } });
+  // The box for an own answer stays the same node, so it keeps its text and focus while the dialog is drawn again.
+  const own = h("div", { class: "dialog-own" }, answer, answerButton);
+  const dialogBody = h("div", { class: "dialog-body" }), dialogKeys = h("div", { class: "dialog-keys" });
+  const dialog = h("div", { class: "dialog", hidden: true }, dialogBody, own, dialogKeys);
   const el = h("form", { class: "composer", id: "composer", onsubmit: (e) => { e.preventDefault(); sendMessage(); } },
-    working, h("div", { class: "composer-row" }, text, button), note);
-  Object.assign(composer, { id, el, text, button, note, working, sending: false, sent: null, error: null });
+    working, dialog, h("div", { class: "composer-row" }, text, button), note);
+  Object.assign(composer, { id, el, text, button, note, working, dialog, dialogBody, dialogKeys, own, answer, answerButton,
+    sending: false, sent: null, error: null, answering: false });
+}
+
+// ---------- dialogs: a question or a permission prompt the session waits on, answered as if in its terminal ----------
+const DIALOG_KEYS = [["Up", "↑", "Previous choice"], ["Down", "↓", "Next choice"], ["Left", "←", "Previous question"],
+  ["Right", "→", "Next question, or the answers to submit"], ["Enter", "Enter", "Confirm the highlighted choice"],
+  ["Escape", "Esc", "Cancel the dialog"]];
+// The choice whose label is a text box in the terminal ("Type something."): its digit puts the cursor there.
+const ownAnswer = (dialog) => dialog.options.find((o) => /^type something/i.test(o.label));
+
+// The keys that highlight a choice: its digit, unless the highlight is on the text box (the digit would be typed there)
+// or on a choice without one (digits do nothing there), when the arrows take it.
+function dialogReach(dialog, target) {
+  const options = dialog.options, current = options.find((o) => o.current);
+  if (target === current) return [];
+  if (target.key && current && current.key && current !== ownAnswer(dialog)) return [{ key: target.key }];
+  const from = options.indexOf(current), to = options.indexOf(target);
+  if (from < 0 || Math.abs(to - from) > 6) return null;
+  return Array(Math.abs(to - from)).fill({ key: to > from ? "Down" : "Up" });
+}
+
+// A digit chooses at once; reached with the arrows, or already highlighted, a choice takes Enter.
+function dialogSteps(dialog, target) {
+  const steps = dialogReach(dialog, target);
+  return steps && (steps.length === 1 && steps[0].key === target.key ? steps : [...steps, { key: "Enter" }]);
+}
+
+function drawDialog(status) {
+  const dialog = status.live.dialog, panel = composer.dialog;
+  panel.hidden = !dialog;
+  if (!dialog) return;
+  const disabled = status.key !== "ok" || composer.answering;
+  const press = (key) => answerDialog([{ key }]);
+  const own = ownAnswer(dialog);
+  const options = dialog.options.map((o) => {
+    const typed = o === own;
+    const steps = dialogSteps(dialog, o);
+    return h("button", { class: `btn option${o.current ? " current" : ""}`, type: "button", disabled: disabled || !steps,
+      title: typed ? "Write your answer in the box below" : o.key ? `Press ${o.key} in the terminal` : "Move to it with the arrows and press Enter",
+      onclick: () => (typed ? composer.answer.focus() : answerDialog(steps)) },
+    h("span", { class: "key" }, o.key || "↵"), o.checked == null ? null : h("span", { class: "check" }, o.checked ? "☑" : "☐"),
+    h("span", { class: "label" }, o.label, o.detail ? h("small", {}, o.detail) : null));
+  });
+  composer.own.hidden = !own;
+  composer.answer.disabled = disabled;
+  composer.answerButton.disabled = disabled || !composer.answer.value.trim();
+  composer.dialogBody.replaceChildren(
+    h("div", { class: "dialog-head" }, h("b", {}, dialogKind(status.live).replace(/:$/, "")),
+      dialog.hint ? h("span", { class: "hint" }, `Terminal: ${dialog.hint}`) : null),
+    h("pre", { class: "dialog-text" }, dialog.text),
+    h("div", { class: "dialog-options" }, options));
+  composer.dialogKeys.replaceChildren(...DIALOG_KEYS.map(([key, label, title]) =>
+    h("button", { class: "btn", type: "button", title, disabled, onclick: () => press(key) }, label)));
+}
+
+async function answerDialog(steps) {
+  const id = composer.id, status = liveStatus.get(id);
+  if (composer.answering || !status || !status.live || !status.live.dialog) return false;
+  Object.assign(composer, { answering: true, error: null });
+  drawComposer();
+  let done = false;
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(id)}/answer`, { method: "POST",
+      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ steps }) });
+    liveStatus.set(id, { ...status, live: data.live });
+    done = true;
+  } catch (err) {
+    composer.error = `Not answered: ${err.message}`;
+  } finally {
+    composer.answering = false;
+    fetchLive(id);
+    drawComposer();
+  }
+  return done;
+}
+
+async function typeAnswer() {
+  const status = liveStatus.get(composer.id), text = composer.answer.value.trim();
+  const dialog = status && status.live && status.live.dialog, own = dialog && ownAnswer(dialog);
+  const steps = own && dialogReach(dialog, own);
+  if (!steps || !text) return;
+  if (await answerDialog([...steps, { text }, { key: "Enter" }])) composer.answer.value = "";
 }
 
 const canSend = (status) => !!(status && status.live && status.key === "ok" && !status.send_problem);
@@ -2030,6 +2192,8 @@ function drawComposer() {
   composer.working.hidden = !busy;
   composer.working.replaceChildren(h("span", { class: "spinner small", "aria-hidden": "true" }),
     busy && stream.id === route.id && stream.activity ? stream.activity : "Working…");
+  drawDialog(status);
+  composer.el.querySelector(".composer-row").hidden = !!status.live.dialog;
   const [message, tone] = composerNote(status);
   composer.note.textContent = message;
   composer.note.className = `composer-note ${tone}`;

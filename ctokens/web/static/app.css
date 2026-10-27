@@ -165,6 +165,27 @@ body:has(#composer) .to-top { bottom: 140px; }
 .composer-note { font-size: var(--t-xs); color: var(--muted); overflow-wrap: anywhere; }
 .composer-note.warn { color: var(--warn-fg); }
 .composer-note.error { color: var(--err-fg); }
+.composer-row[hidden], .dialog[hidden], .dialog-own[hidden] { display: none; }
+.dialog { display: grid; gap: var(--s2); max-height: 60vh; overflow: auto; }
+.dialog-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); }
+.dialog-head b { color: var(--warn-fg); }
+.dialog-head .hint { color: var(--muted); font-size: var(--t-xs); }
+.dialog-text { margin: 0; padding: var(--s2) var(--s3); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono);
+  font-size: var(--t-xs); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; max-height: 30vh; overflow: auto; }
+.dialog-options { display: grid; gap: var(--s1); }
+.dialog .option { display: flex; align-items: flex-start; gap: var(--s2); text-align: left; padding: 6px 10px; }
+.dialog .option.current { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.dialog .option .key { font-family: var(--mono); font-weight: 650; color: var(--accent); }
+.dialog .option .label { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.dialog .option small { color: var(--muted); white-space: pre-wrap; }
+.dialog-own { display: flex; gap: var(--s2); }
+.dialog-own input { flex: 1; min-width: 0; padding: 6px 10px; font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; }
+.dialog-keys { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.dialog-keys .btn { padding: 2px 10px; font-size: var(--t-xs); font-family: var(--mono); }
+.dialog-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2); margin: 0; padding: 4px 8px;
+  border-radius: 6px; background: var(--warn-bg); color: var(--warn-fg); font-size: 13.5px; overflow-wrap: anywhere; }
+.dialog-line .btn.answer { margin-left: auto; padding: 0 10px; font-size: var(--t-xs); cursor: pointer; }
 .project.link { cursor: pointer; font: inherit; color: inherit; }
 .project.link:hover { border-color: var(--accent); color: var(--accent); }
 

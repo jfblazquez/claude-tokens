@@ -339,11 +339,14 @@ itself writes to the session, next to the estimate computed here.
 ### Live conversations
 
 A conversation that a Claude Code process is running right now is marked
-**Live** in the list (with **Live only** to show just those; clicking the badge
-opens its Conversation tab) and in its header,
-with the process id and its state: *idle* (waiting for a prompt), *busy*
-(working, the dot pulses), *waiting* (a permission prompt or another dialog) or
-*shell* (shell mode). It comes from the registry Claude Code keeps in
+**Live** with its state in the list (**Live · busy**, **Live · idle**, **Live ·
+shell**, **Live · question**, **Live · permission**; with **Live only** to show
+just those; clicking the badge opens its Conversation tab) and in its header,
+with the process id: *idle* (waiting for a prompt), *busy* (working, the dot
+pulses), *waiting* (a question, a permission prompt or another dialog) or
+*shell* (shell mode). The list asks for the states every 3 seconds, so they
+change on their own; a card waiting on a question or a permission shows it,
+with an **Answer** button that opens the conversation. It comes from the registry Claude Code keeps in
 `~/.claude/sessions/<pid>.json` (next to the projects folder); a record only
 counts while its process is alive and has the same start time, so a crashed
 session or a reused pid is not shown as live.
@@ -378,6 +381,16 @@ Sending needs:
 
 Text already in the session's prompt stays there, and the message is appended
 to it.
+
+While the session waits on a question (AskUserQuestion) or a permission prompt,
+the box shows that dialog instead: its text, its choices as buttons (with the
+highlighted one marked and the boxes of a multiple choice question), a box for
+your own answer when the question offers one, and ↑ ↓ ← → Enter Esc. Claude Code
+logs the question only once it is answered, so it is read from the session's
+screen. Each button presses its key in the terminal (a choice's digit, or the
+arrows and Enter where digits do nothing, such as on **Submit**), only while the
+screen still shows a dialog, so a late click never ends up in the prompt; you
+can also answer in the terminal.
 
 A live session that can never take a message (it runs outside tmux, or is not
 an interactive terminal) is marked **Live · read only**, with the reason on
