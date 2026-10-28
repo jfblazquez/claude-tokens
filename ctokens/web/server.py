@@ -110,6 +110,11 @@ class Handler(BaseHTTPRequestHandler):
         super().setup()
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+    def log_error(self, format, *args):
+        # A kept-alive connection the browser did not use again ends quietly, not as an error.
+        if not format.startswith("Request timed out"):
+            super().log_error(format, *args)
+
     def __getattr__(self, name):
         # BaseHTTPRequestHandler answers 501 when do_<METHOD> is missing; every other method gets 405.
         if name.startswith("do_"):
