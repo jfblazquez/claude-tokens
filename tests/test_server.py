@@ -182,9 +182,27 @@ class SecurityGateTest(ServerTestCase):
             while chunk := raw.recv(65536):
                 data += chunk
         head, _, body = data.partition(b"\r\n\r\n")
-        self.assertTrue(head.startswith(b"HTTP/1.0 400 "), head)
+        self.assertTrue(head.startswith(b"HTTP/1.1 400 "), head)
         self.assertIn(b"Content-Type: application/json; charset=utf-8", head)
         self.assertIn("error", json.loads(body))
+
+    def test_connection_is_reused(self):
+        # Through an ssh tunnel a new connection costs a round trip, and a response split in two writes another one.
+        with socket.create_connection(("127.0.0.1", self.port), timeout=30) as raw:
+            for _ in range(2):
+                raw.sendall(f"GET /static/app.js HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode())
+                data = raw.recv(65536)
+                head, _, body = data.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 200 "), head)
+                self.assertEqual(body, (self.static / "app.js").read_bytes())
+
+    def test_unread_body_closes_the_connection(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=30) as raw:
+            raw.sendall(f"POST /static/app.js HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nContent-Length: {(1 << 20) + 1}\r\n\r\n".encode())
+            data = b""
+            while chunk := raw.recv(65536):
+                data += chunk
+        self.assertTrue(data.startswith(b"HTTP/1.1 405 "), data)
 
 
 class StaticFilesTest(ServerTestCase):

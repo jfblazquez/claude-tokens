@@ -565,8 +565,14 @@ When the tool runs on a remote machine, open an SSH tunnel and browse
 `http://localhost:8765` on your own machine (any local port works):
 
 ```bash
-ssh -N -L 8765:localhost:8765 <remote-host>
+ssh -tt -L 8765:localhost:8765 <remote-host> 'exec sleep infinity' </dev/null
 ```
+
+A plain `ssh -N -L` tunnel works too, but it leaves Nagle's algorithm on, so in
+a shell each keystroke whose echo follows another packet waits one more round
+trip; ssh turns it off only for a session with a terminal, hence `-tt` and a
+remote command that just waits. With stdin on `/dev/null` the local terminal
+stays as it is and Ctrl+C closes the tunnel.
 
 Every request re-reads the logs that changed since the previous one, so the data
 is always current. The first totals load parses everything (about as long as

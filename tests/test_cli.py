@@ -112,7 +112,7 @@ class ServeOptionsTest(unittest.TestCase):
                 proc.communicate()
         self.assertEqual(banner, [f"Serving on http://127.0.0.1:{port}  (Ctrl+C to stop)\n",
                                   f"  projects dir: {self.projects}\n",
-                                  f"  from your machine: ssh -N -L {port}:localhost:{port} <this-host>\n"])
+                                  f"  from your machine: ssh -tt -L {port}:localhost:{port} <this-host> 'exec sleep infinity' </dev/null\n"])
         self.assertEqual(proc.returncode, 0, err)
         self.assertNotIn("Traceback", err)
 

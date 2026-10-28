@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 import traceback
@@ -44,6 +45,7 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'nonce-{nonce}';
        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 NONCE_MARK = b"{{style-nonce}}"
 COMMON_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
+STREAM_HEADERS = (("Content-Type", "text/event-stream; charset=utf-8"), ("Connection", "close"), *COMMON_HEADERS.items())
 MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
@@ -59,6 +61,8 @@ EVENT_TICK = 0.25
 EVENT_RESCAN = 2.0
 ACTIVITY_EVERY = 1.0
 HEARTBEAT = 15.0
+# A browser keeps an idle connection open for a while to reuse it; the thread waiting on it gives up after this long.
+KEEP_ALIVE = 120.0
 # EventSource reconnects by itself, so a stream ends now and then instead of holding a thread forever.
 STREAM_LIFETIME = 30 * 60
 SEND_KEY_HEADER = "X-Send-Key"
@@ -95,6 +99,21 @@ KEY_ERRORS = {"disabled": "sending is disabled", "missing": "send key missing", 
 class Handler(BaseHTTPRequestHandler):
     server_version = "claude-tokens"
     sys_version = ""
+    # Through an ssh tunnel every new connection opens a channel first, one round trip more for each keystroke of a
+    # shell; HTTP/1.1 reuses the connection. Headers and body leave in one write, as a second small one waits for the
+    # ack of the first (Nagle), another round trip.
+    protocol_version = "HTTP/1.1"
+    wbufsize = -1
+    timeout = KEEP_ALIVE
+
+    def setup(self):
+        super().setup()
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+    def log_error(self, format, *args):
+        # A kept-alive connection the browser did not use again ends quietly, not as an error.
+        if not format.startswith("Request timed out"):
+            super().log_error(format, *args)
 
     def __getattr__(self, name):
         # BaseHTTPRequestHandler answers 501 when do_<METHOD> is missing; every other method gets 405.
@@ -303,13 +322,16 @@ class Handler(BaseHTTPRequestHandler):
         return json_response(200, {"title": title})
 
     def discard_body(self):
-        # Closing a socket with unread request data can reset the connection before the client reads the answer.
+        # Closing a socket with unread request data can reset the connection before the client reads the answer;
+        # a body left unread would be taken for the next request on it.
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            length = 0
+            length = -1
         if 0 < length <= MAX_DISCARDED_BODY:
             self.rfile.read(length)
+        elif length:
+            self.close_connection = True
 
     def route(self, path, query):
         if path in STATIC_FILES:
@@ -406,9 +428,10 @@ class Handler(BaseHTTPRequestHandler):
         if path is None and live is None:
             return self.respond(json_response(404, {"error": "conversation not found"}))
         self.send_response(200)
-        for name, value in (("Content-Type", "text/event-stream; charset=utf-8"), *COMMON_HEADERS.items()):
+        for name, value in STREAM_HEADERS:
             self.send_header(name, value)
         self.end_headers()
+        self.wfile.flush()
         if self.command == "HEAD":
             return
         self.close_connection = True
@@ -436,9 +459,10 @@ class Handler(BaseHTTPRequestHandler):
         if not offsets or len(offsets) > MAX_SHELLS:
             return self.respond(json_response(400, {"error": f"expected from=token:offset,... with 1 to {MAX_SHELLS} shells"}))
         self.send_response(200)
-        for name, value in (("Content-Type", "text/event-stream; charset=utf-8"), *COMMON_HEADERS.items()):
+        for name, value in STREAM_HEADERS:
             self.send_header(name, value)
         self.end_headers()
+        self.wfile.flush()
         if self.command == "HEAD":
             return
         self.close_connection = True

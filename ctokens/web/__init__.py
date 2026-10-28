@@ -24,7 +24,7 @@ def serve(config, port):
         return 1
     print(f"Serving on http://{HOST}:{port}  (Ctrl+C to stop)\n"
           f"  projects dir: {config.projects_dir}\n"
-          f"  from your machine: ssh -N -L {port}:localhost:{port} <this-host>\n"
+          f"  from your machine: ssh -tt -L {port}:localhost:{port} <this-host> 'exec sleep infinity' </dev/null\n"
           f"  to send messages to running sessions, open once: http://localhost:{port}/?key={config.send_key}",
           flush=True)
     try:
