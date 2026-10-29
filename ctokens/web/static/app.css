@@ -637,6 +637,7 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
   border: 0; background: none; color: var(--fg); font: inherit; font-size: var(--t-sm); text-align: left; cursor: pointer; }
 .log-row:hover { background: var(--surface-2); }
 .log-row:focus-visible { background: var(--accent-soft); outline: none; }
+.log-row.here { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
 .log-mark { text-align: center; font-weight: 700; color: var(--muted); }
 .log-row.out .log-mark { color: var(--accent); }
 .log-row.in .log-mark { color: var(--add-fg); }

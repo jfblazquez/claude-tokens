@@ -309,6 +309,32 @@ check("searches the files, with case, whole word and globs", async ({ page }) =>
   await page.evaluate(() => localStorage.removeItem("ctokens.search"));
 });
 
+check("searches while the query and the globs are typed, without Enter", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click("#conv-head button:has-text('Search')");
+  const searches = [];
+  page.on("request", (r) => { if (r.url().includes("/search?")) searches.push(new URL(r.url()).searchParams.get("q")); });
+  await page.locator(".search-q").pressSequentially("Rate_Limit", { delay: 20 });
+  await page.waitForFunction(() => document.querySelectorAll(".search-file").length === 3);
+  // Typed at that pace, the word goes as one search.
+  assert.deepEqual(searches, ["Rate_Limit"]);
+  await page.click(".search-filters summary");
+  await page.fill(".search-glob[aria-label='Files to exclude']", "middleware/");
+  await page.waitForFunction(() => document.querySelectorAll(".search-file").length === 1);
+  await page.evaluate(() => localStorage.removeItem("ctokens.search"));
+});
+
+check("a commit's view opens the list of commits at that commit", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click("#conv-head button:has-text('Commits')");
+  await page.click(".log-row:has-text('Add token bucket')");
+  await page.waitForSelector(".commit-subject:has-text('Add token bucket')");
+  await page.click(".commit-head button:has-text('Commits')");
+  await page.waitForSelector(".log-row.here");
+  assert.match(await page.locator(".log-row.here .log-subject").textContent(), /^Add token bucket/);
+  assert.equal(await page.locator(".dock-tab").count(), 2);
+});
+
 // Selects the text of the first element matching selector, as a drag would, and lets go of the mouse over it.
 async function selectText(page, selector, text) {
   await page.evaluate(([sel, wanted]) => {

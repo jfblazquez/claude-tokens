@@ -2,6 +2,7 @@ import base64
 import http.client
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -14,12 +15,13 @@ from fixtures import user
 
 from ctokens.pricing import load_prices
 from ctokens.repo import (FileIndex, RepoError, find_commits, find_files, list_commits, list_dir, numstat_files, pathspecs,
-                          read_file, search, show_commit, stat_paths)
+                          read_file, ripgrep_globs, search, search_command, show_commit, stat_paths)
 from ctokens.web.server import Config, Handler, Server
 from ctokens.web.shells import Shells
 
 CONV = "55555555-5555-4555-8555-555555555555"
 KEY = "repo-key"
+RIPGREP = shutil.which("rg")
 
 
 def git(repo, *args):
@@ -204,6 +206,14 @@ class HistoryTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
+    def searchers(self):
+        """git grep, and ripgrep too where it is installed."""
+        for name, path in (("git grep", None), ("ripgrep", RIPGREP)):
+            if name == "git grep" or path:
+                with self.subTest(searcher=name), mock.patch("ctokens.repo.shutil.which", return_value=path):
+                    self.assertEqual(search_command(self.origin, self.origin, "x", *[False] * 5)[1], bool(path))
+                    yield name
+
     def test_pushed_and_incoming(self):
         log = list_commits(self.clone / "src")
         self.assertEqual((log["branch"], log["upstream"], log["ahead"], log["behind"], log["more"]), ("main", "origin/main", 1, 1, False))
@@ -223,22 +233,24 @@ class HistoryTest(unittest.TestCase):
             list_commits(self.plain)
 
     def test_search_in_a_repository(self):
-        found = search(self.clone, "todo")
-        self.assertEqual([(f["display"], f["matches"]) for f in found["files"]],
-                         [("src/server.py", [{"line": 2, "text": "    return 3  # TODO: Serve more"}])])
-        self.assertEqual(found["files"][0]["path"], str(self.clone / "src" / "server.py"))
-        self.assertEqual(search(self.clone, "todo", case=True)["matches"], 0)
-        self.assertEqual(search(self.clone / "src", "serve", word=True)["matches"], 2)
-        self.assertEqual(search(self.clone / "src", "serve")["files"][0]["display"], "server.py")
-        self.assertEqual(search(self.clone, r"return [0-9]", regex=True)["matches"], 1)
-        self.assertEqual(search(self.clone, "return [0-9]")["matches"], 0)
-        # Untracked files count, binary ones do not.
-        self.assertEqual([f["display"] for f in search(self.origin, "new")["files"]], ["untracked.txt"])
-        self.assertEqual(search(self.origin, "data")["matches"], 0)
+        for _ in self.searchers():
+            found = search(self.clone, "todo")
+            self.assertEqual([(f["display"], f["matches"]) for f in found["files"]],
+                             [("src/server.py", [{"line": 2, "text": "    return 3  # TODO: Serve more"}])])
+            self.assertEqual(found["files"][0]["path"], str(self.clone / "src" / "server.py"))
+            self.assertEqual(search(self.clone, "todo", case=True)["matches"], 0)
+            self.assertEqual(search(self.clone / "src", "serve", word=True)["matches"], 2)
+            self.assertEqual(search(self.clone / "src", "serve")["files"][0]["display"], "server.py")
+            self.assertEqual(search(self.clone, r"return [0-9]", regex=True)["matches"], 1)
+            self.assertEqual(search(self.clone, "return [0-9]")["matches"], 0)
+            # Untracked files count, binary ones do not.
+            self.assertEqual([f["display"] for f in search(self.origin, "new")["files"]], ["untracked.txt"])
+            self.assertEqual(search(self.origin, "data")["matches"], 0)
 
     def test_include_and_exclude(self):
-        def names(**kw):
-            return [f["display"] for query in ("web", "serve") for f in search(self.origin, query, **kw)["files"]]
+        for _ in self.searchers():
+            def names(**kw):
+                return [f["display"] for query in ("web", "serve") for f in search(self.origin, query, **kw)["files"]]
 
         self.assertEqual(names(), ["src/web/server.py", "src/server.py"])
         self.assertEqual(names(include="web"), ["src/web/server.py"])
@@ -247,20 +259,38 @@ class HistoryTest(unittest.TestCase):
         self.assertEqual(names(include="*.md"), [])
         self.assertEqual(pathspecs("*.py, ./build/,", True), [":(exclude,glob)**/*.py", ":(exclude,glob)**/*.py/**",
                                                                ":(exclude,glob)build", ":(exclude,glob)build/**"])
+        self.assertEqual(ripgrep_globs("*.py, ./build/", True), ["-g", "!**/*.py", "-g", "!**/*.py/**", "-g", "!/build",
+                                                                "-g", "!/build/**"])
+
+    def test_search_with_a_pipe_for_standard_input(self):
+        # As under a process that started the server with one: ripgrep without a path would wait on it.
+        read, write = os.pipe()
+        saved = os.dup(0)
+        try:
+            os.dup2(read, 0)
+            with mock.patch("ctokens.repo.GIT_TIMEOUT", 3):
+                for _ in self.searchers():
+                    found = search(self.clone, "todo")
+                    self.assertEqual((found["matches"], found["timed_out"]), (1, False))
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, read, write):
+                os.close(fd)
 
     def test_search_outside_a_repository_and_limits(self):
-        found = search(self.plain, "TODO")
-        self.assertEqual((found["root"], [(f["display"], f["matches"][0]["line"]) for f in found["files"]]), (None, [("a.txt", 1)]))
-        with mock.patch("ctokens.repo.MAX_SEARCH_MATCHES", 1):
-            found = search(self.origin, "e")
-        self.assertEqual((found["matches"], found["truncated"]), (1, True))
-        for query in ("", "a\nb", "x" * 1001):
-            with self.subTest(query=query), self.assertRaises(RepoError):
-                search(self.origin, query)
-        with self.assertRaisesRegex(RepoError, "Unmatched"):
-            search(self.origin, "a(", regex=True)
-        with self.assertRaises(RepoError):
-            search(self.plain / "nope", "x")
+        for _ in self.searchers():
+            found = search(self.plain, "TODO")
+            self.assertEqual((found["root"], [(f["display"], f["matches"][0]["line"]) for f in found["files"]]), (None, [("a.txt", 1)]))
+            with mock.patch("ctokens.repo.MAX_SEARCH_MATCHES", 1):
+                found = search(self.origin, "e")
+            self.assertEqual((found["matches"], found["truncated"]), (1, True))
+            for query in ("", "a\nb", "x" * 1001):
+                with self.subTest(query=query), self.assertRaises(RepoError):
+                    search(self.origin, query)
+            with self.assertRaisesRegex(RepoError, "Unmatched|unclosed"):
+                search(self.origin, "a(", regex=True)
+            with self.assertRaises(RepoError):
+                search(self.plain / "nope", "x")
 
 
 class ShellsTest(unittest.TestCase):

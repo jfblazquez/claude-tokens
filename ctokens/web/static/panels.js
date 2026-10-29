@@ -1040,7 +1040,9 @@ function commitView(conv, item, data) {
       copyable(h("span", { class: "mono" }, data.sha), data.sha),
       h("span", {}, `${data.author} · ${data.author_date.replace("T", " ").slice(0, 16)}`),
       parents.length ? h("span", {}, parents.length > 1 ? "Parents " : "Parent ", parents) : h("span", { class: "muted" }, "Root commit"),
-      data.refs ? h("span", { class: "chip" }, data.refs) : null),
+      data.refs ? h("span", { class: "chip" }, data.refs) : null,
+      h("button", { class: "btn small", type: "button", title: "The history of the repository, with this commit in it",
+        onclick: () => openCommits(conv, data.root, data.sha) }, "☰ Commits")),
     h("div", { class: "meta" }, `${fmt(data.files.length)} file${data.files.length === 1 ? "" : "s"} changed`,
       h("span", { class: "plus" }, `+${fmt(data.files.reduce((n, f) => n + (f.added || 0), 0))}`),
       h("span", { class: "minus" }, `−${fmt(data.files.reduce((n, f) => n + (f.deleted || 0), 0))}`),
@@ -1064,15 +1066,17 @@ function ago(when) {
 }
 
 // One panel per folder, for the repository it is in; cwd null is the conversation's folder.
-function openCommits(conv, cwd = null) {
+// sha: the commit to point at in the list, when it comes from that commit's view.
+function openCommits(conv, cwd = null, sha = null) {
   const problem = keyProblem();
   if (problem) return alert(problem);
-  openPanel(`commits:${cwd || conv}`, "Commits", "commits", conv, (item) => {
+  const panel = openPanel(`commits:${cwd || conv}`, "Commits", "commits", conv, (item) => {
     item.body.append(skeleton(10));
     item.view = commitsView(item, cwd);
     // Pushes and commits made meanwhile show up when the panel comes back into view.
     item.onShow = () => { if (Date.now() - item.view.loaded > 5000) item.view.load(); };
   });
+  if (sha) panel.view.point(sha);
 }
 
 function refChips(refs) {
@@ -1085,21 +1089,33 @@ function refChips(refs) {
 
 function commitsView(item, cwd) {
   const conv = item.conv;
-  const state = { data: null, commits: [], loading: false };
+  const state = { data: null, commits: [], loading: false, point: null, scroll: false };
   const status = h("div", { class: "log-status" });
   const list = h("div", { class: "log-list", role: "list" });
   const more = h("button", { class: "btn small", type: "button", hidden: true, onclick: () => load(state.commits.length) }, "Load more");
   const refresh = h("button", { class: "btn small", type: "button", title: "Read the history again", onclick: () => load() }, "Refresh");
   const shellHere = h("button", { class: "btn small", type: "button", title: "A shell in the repository, to push or pull",
     onclick: () => openShell(conv, (state.data && state.data.root) || cwd) }, "❯ Shell");
-  const view = { loaded: 0, load };
+  const view = { loaded: 0, load, point: (sha) => {
+    Object.assign(state, { point: sha, scroll: true });
+    if (state.data) pointAt();
+  } };
+
+  function pointAt() {
+    for (const old of list.querySelectorAll(".log-row.here")) old.classList.remove("here");
+    const el = state.point && list.querySelector(`.log-row[data-sha="${state.point}"]`);
+    if (!el) return;
+    el.classList.add("here");
+    if (state.scroll) el.scrollIntoView({ block: "center" });
+    state.scroll = false;
+  }
 
   function row(c, mark) {
     const when = Date.parse(c.date);
     const marks = { out: ["↑", "Not pushed: no remote branch has it yet"], in: ["↓", "On the upstream branch, not here yet: pull it"],
       pushed: ["·", "Pushed"], none: ["", ""] };
     const [sign, tip] = marks[mark];
-    return h("button", { class: `log-row ${mark}`, type: "button", role: "listitem",
+    return h("button", { class: `log-row ${mark}`, type: "button", role: "listitem", "data-sha": c.sha,
       title: `${c.sha}\n${c.subject}\n${c.author} · ${new Date(when).toISOString().replace("T", " ").slice(0, 16)} UTC${tip ? `\n${tip}` : ""}`,
       onclick: () => openCommit(conv, c.sha, null, state.data.root) },
     h("span", { class: "log-mark", "aria-label": tip || null }, sign),
@@ -1132,6 +1148,7 @@ function commitsView(item, cwd) {
     ...state.commits.map((c) => row(c, mark(c))),
     ...(state.commits.length ? [] : [h("div", { class: "muted pad" }, "No commits yet.")]));
     more.hidden = !data.more;
+    pointAt();
   }
 
   async function load(skip = 0) {
@@ -1164,6 +1181,8 @@ function commitsView(item, cwd) {
 // ---------- search in files ----------
 const SEARCH_KEY = "ctokens.search";
 const SEARCH_OPEN_FILES = 100;
+// Long enough for a word typed at an ordinary pace to go as one search.
+const SEARCH_DELAY_MS = 300;
 
 // One panel per folder; a query from a selection runs in the panel already open.
 function openSearch(conv, cwd = null, query = null) {
@@ -1221,6 +1240,11 @@ function searchView(item, cwd) {
   } catch (_) { /* defaults */ }
   const opts = { case: !!saved.case, word: !!saved.word, regex: !!saved.regex };
   const keep = () => store(SEARCH_KEY, JSON.stringify({ ...opts, include: include.value, exclude: exclude.value }));
+  let timer = null;
+  const later = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => run(), SEARCH_DELAY_MS);
+  };
   const onEnter = (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -1228,7 +1252,7 @@ function searchView(item, cwd) {
     }
   };
   const input = h("input", { class: "search-q", type: "search", placeholder: "Search", "aria-label": "Search in files", spellcheck: "false",
-    autocomplete: "off", onkeydown: onEnter });
+    autocomplete: "off", onkeydown: onEnter, oninput: later });
   const toggle = (name, label, tip) => {
     const b = h("button", { class: "search-opt", type: "button", title: tip, "aria-label": tip, "aria-pressed": String(opts[name]),
       onclick: () => {
@@ -1240,7 +1264,10 @@ function searchView(item, cwd) {
     return b;
   };
   const glob = (placeholder, label, value) => h("input", { class: "search-glob", type: "text", placeholder, "aria-label": label, value: value || "",
-    spellcheck: "false", autocomplete: "off", onkeydown: onEnter, onchange: keep });
+    spellcheck: "false", autocomplete: "off", onkeydown: onEnter, oninput: () => {
+      keep();
+      if (input.value) later();
+    } });
   const include = glob("e.g. *.py, src/", "Files to include", saved.include);
   const exclude = glob("e.g. tests/, *.min.js", "Files to exclude", saved.exclude);
   const filters = h("details", { class: "search-filters", open: !!(saved.include || saved.exclude) },
@@ -1255,9 +1282,12 @@ function searchView(item, cwd) {
     h("div", { class: "search-row" }, input, toggle("case", "Aa", "Match case"), toggle("word", "ab", "Match whole word"),
       toggle("regex", ".*", "Use a regular expression")), filters, where),
   h("div", { class: "search-bar" }, summary, collapse), h("div", { class: "dir-scroll" }, results));
-  let seq = 0;
+  let seq = 0, asking = null;
 
   async function run(query = input.value) {
+    clearTimeout(timer);
+    if (asking) asking.abort();
+    asking = null;
     input.value = query;
     const n = ++seq;
     if (!query) {
@@ -1271,9 +1301,10 @@ function searchView(item, cwd) {
     for (const name of ["case", "word", "regex"]) if (asked[name]) params.set(name, "1");
     if (cwd) params.set("cwd", cwd);
     summary.textContent = "Searching…";
+    const controller = asking = new AbortController();
     let data;
     try {
-      data = await api(`${convApi(conv, "/search")}?${params}`, { headers: sendHeaders() });
+      data = await api(`${convApi(conv, "/search")}?${params}`, { headers: sendHeaders(), signal: controller.signal });
     } catch (err) {
       if (n === seq) {
         summary.textContent = err.message;
