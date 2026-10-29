@@ -363,6 +363,52 @@ check("the header folds into the app bar while the page scrolls", async ({ page 
   await page.waitForSelector("#bar-conv[hidden]", { state: "attached" });
 });
 
+check("a long conversation opens at its end and draws the earlier messages above it", async ({ page }) => {
+  const id = await demoConversation(page, "Add rate limiting to the public API");
+  const drawn = () => page.locator(".msgs > li").evaluateAll((els) => els.map((e) => (e.dataset.i ?? "day") + (e.querySelector(".n")?.textContent || "")));
+  await page.goto(`${page.base}/#/c/${id}/messages`);
+  await page.waitForSelector(".msgs");
+  const whole = await drawn();
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  await page.route(/\/messages(\?tail=\d+)?$/, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.has("tail")) {
+      url.searchParams.set("tail", "6");
+      return route.continue({ url: url.href });
+    }
+    await held;
+    return route.continue();
+  });
+  // A page loaded anew: nothing of the conversation in memory.
+  await page.reload();
+  await page.waitForSelector("#messages-count:has-text('Loading the earlier messages')");
+  const part = await drawn();
+  assert.ok(part.length < 10, part.join(" "));
+  assert.deepEqual(part.filter((x) => x !== "day"), whole.filter((x) => x !== "day").slice(-part.filter((x) => x !== "day").length));
+  release();
+  await page.waitForFunction((n) => document.querySelectorAll(".msgs > li").length === n, whole.length);
+  assert.deepEqual(await drawn(), whole);
+  assert.match(await page.locator("#messages-count").textContent(), /messages · .* responses/);
+  assert.ok(await page.evaluate(() => innerHeight + scrollY >= document.documentElement.scrollHeight - 2), "still at the end");
+});
+
+check("a conversation opened again from the list is drawn from memory and takes only what is new", async ({ page }) => {
+  const id = await demoConversation(page, "Add rate limiting to the public API");
+  await page.goto(`${page.base}/#/c/${id}/messages`);
+  await page.waitForSelector("#messages-count:not(:has-text('Loading'))");
+  await page.evaluate(() => { document.querySelector(".msgs").dataset.kept = "1"; });
+  await page.evaluate(() => { location.hash = "#/"; });
+  await page.waitForSelector(".conv-item");
+  const asked = [];
+  page.on("request", (r) => { if (r.url().includes("/api/conversations/")) asked.push(new URL(r.url()).pathname.split("/").pop() + new URL(r.url()).search); });
+  await page.evaluate((conv) => { location.hash = `#/c/${conv}/messages`; }, id);
+  await page.waitForSelector(".msgs[data-kept='1']");
+  await page.waitForTimeout(500);
+  assert.deepEqual(asked.filter((a) => a.startsWith("messages") && !a.includes("from=")), []);
+  assert.ok(asked.some((a) => a.startsWith("messages?from=")), asked.join(" "));
+});
+
 // Selects the text of the first element matching selector, as a drag would, and lets go of the mouse over it.
 async function selectText(page, selector, text) {
   await page.evaluate(([sel, wanted]) => {

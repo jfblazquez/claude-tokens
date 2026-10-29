@@ -730,6 +730,16 @@ class RealTimeApiTest(LiveApiCase):
         self.assertEqual(self.get(f"/api/conversations/{CONV_A}/messages?from=x")[0], 400)
         self.assertEqual(self.get(f"/api/conversations/{CONV_A}/messages?from=0&source=nope")[0], 404)
 
+    def test_messages_tail(self):
+        _, _, full = self.get(f"/api/conversations/{CONV_A}/messages")
+        total = len(full["messages"])
+        for tail, start in ((1, total - 1), (total + 5, 0)):
+            with self.subTest(tail=tail):
+                _, _, end = self.get(f"/api/conversations/{CONV_A}/messages?tail={tail}")
+                self.assertEqual(end, {"source": "main", "sources": full["sources"], "from": start, "total": total,
+                                       "numbered_before": start, "messages": full["messages"][start:]})
+        self.assertEqual(self.get(f"/api/conversations/{CONV_A}/messages?tail=-1")[0], 400)
+
     def test_events_report_log_growth_and_session_changes(self):
         with mock.patch("ctokens.web.server.EVENT_TICK", 0.02):
             connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)

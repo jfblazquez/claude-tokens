@@ -17,10 +17,11 @@ from characterization import DATA, ENV, SCRIPT
 from fixtures import API, AMBIGUOUS, CONV_A, CONV_B, CONV_EMPTY, ROOT, SUB_EXPLORE, build_projects, user
 
 from ctokens.catalog import conversation_rows, last_recap
+from ctokens.content import tool_calls
 from ctokens.logs import file_stats, parse_log
 from ctokens.pricing import load_prices
 from ctokens.reports import scan_totals, totals_report
-from ctokens.web.cache import StatsCache
+from ctokens.web.cache import StatsCache, Workers
 from ctokens.web.server import CSP, STATIC_FILES, Config, Handler, Server
 
 DEFAULT_HOST = object()
@@ -50,7 +51,7 @@ def write_static(root):
     return Path(root)
 
 
-def http_request(port, path, method="GET", host=DEFAULT_HOST, body=None):
+def http_request(port, path, method="GET", host=DEFAULT_HOST, body=None, headers=()):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     try:
         connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
@@ -58,6 +59,8 @@ def http_request(port, path, method="GET", host=DEFAULT_HOST, body=None):
             host = f"127.0.0.1:{port}"
         if host is not None:
             connection.putheader("Host", host)
+        for name, value in headers:
+            connection.putheader(name, value)
         if body is not None:
             connection.putheader("Content-Length", str(len(body)))
         connection.endheaders(body)
@@ -91,8 +94,8 @@ class ServerTestCase(unittest.TestCase):
         cls.tmp.cleanup()
         cls.quiet.stop()
 
-    def request(self, path, method="GET", host=DEFAULT_HOST, body=None, port=None):
-        return http_request(port or self.port, path, method, host, body)
+    def request(self, path, method="GET", host=DEFAULT_HOST, body=None, port=None, headers=()):
+        return http_request(port or self.port, path, method, host, body, headers)
 
     def get_json(self, path, port=None):
         status, headers, body = self.request(path, port=port)
@@ -151,7 +154,8 @@ class SecurityGateTest(ServerTestCase):
                              ("/", "HEAD")):
             with self.subTest(path=path, method=method):
                 _, headers, _ = self.request(path, method=method)
-                self.assertEqual(headers["Cache-Control"], "no-store")
+                # Scripts are kept and asked again every time (see test_unchanged_files_are_not_sent_again).
+                self.assertEqual(headers.get_all("Cache-Control"), ["no-cache" if path.startswith("/static/") else "no-store"])
                 self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
                 self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         _, headers, _ = self.request("/", host="evil.example")
@@ -221,6 +225,18 @@ class StaticFilesTest(ServerTestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(body, (self.static / name).read_bytes())
                 self.assertEqual(headers["Content-Type"], types[Path(name).suffix])
+
+    def test_unchanged_files_are_not_sent_again(self):
+        _, headers, _ = self.request("/static/app.js")
+        tag = headers["ETag"]
+        self.assertEqual(headers.get_all("Cache-Control"), ["no-cache"])
+        status, headers, body = self.request("/static/app.js", headers=[("If-None-Match", tag)])
+        self.assertEqual((status, body, headers["ETag"], headers["Content-Length"]), (304, b"", tag, None))
+        self.assertEqual(self.request("/static/app.js", headers=[("If-None-Match", '"other"')])[0], 200)
+        self.assertNotEqual(self.request("/static/app.css")[1]["ETag"], tag)
+        # The page carries a new nonce on every load.
+        _, headers, _ = self.request("/", headers=[("If-None-Match", tag)])
+        self.assertEqual((headers["ETag"], headers.get_all("Cache-Control")), (None, ["no-store"]))
 
     def test_missing_file_is_404(self):
         missing = Path(self.tmp.name) / "missing-static"
@@ -464,6 +480,46 @@ class EmptyFolderTest(unittest.TestCase):
                         stop_server(server, thread)
 
 
+class WorkersTest(unittest.TestCase):
+    """Many logs out of date are read at once in worker processes; a few, or no processes at all, by the thread."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.logs = []
+        for n in range(4):
+            path = Path(self.tmp.name) / f"{n}.jsonl"
+            path.write_text("{}\n" * (n + 1), encoding="utf-8")
+            self.logs.append(path)
+        self.missing = Path(self.tmp.name) / "gone.jsonl"
+        self.cache, self.workers = StatsCache(), Workers(2)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.workers.close)
+
+    def never(self, path):
+        raise AssertionError(f"read again: {path}")
+
+    def test_reads_out_of_date_logs_in_processes(self):
+        with mock.patch("ctokens.web.cache.WARM_MIN", 2):
+            self.cache.warm("stats", [*self.logs, self.missing], file_stats, self.workers)
+            self.assertEqual([self.cache.get("stats", path, self.never) for path in self.logs], list(map(file_stats, self.logs)))
+            self.logs[0].write_text("{}\n{}\n{}\n{}\n{}\n", encoding="utf-8")
+            with mock.patch.object(self.workers, "map", wraps=self.workers.map) as batch:
+                self.cache.warm("stats", self.logs, file_stats, self.workers)
+                batch.assert_not_called()
+            self.workers.reap()
+            self.assertIsNotNone(self.workers._pool)
+            with mock.patch("ctokens.web.cache.WORKERS_IDLE", 0):
+                self.workers.reap()
+            self.assertIsNone(self.workers._pool)
+
+    def test_without_processes_the_thread_reads_them(self):
+        with mock.patch("ctokens.web.cache.WARM_MIN", 2), \
+                mock.patch("ctokens.web.cache.ProcessPoolExecutor", side_effect=OSError("no processes")):
+            self.cache.warm("stats", self.logs, file_stats, self.workers)
+        self.assertEqual(self.cache.paths("stats"), set())
+        self.assertEqual(self.cache.get("stats", self.logs[0], file_stats), file_stats(self.logs[0]))
+
+
 class StatsCacheTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -623,6 +679,15 @@ class CacheWiringTest(unittest.TestCase):
             parse.reset_mock()
             self.assertEqual(self.get(f"/api/conversations/{CONV_A}"), expected)
             parse.assert_not_called()
+
+    def test_bash_and_files_read_each_log_once(self):
+        expected = [self.cli(CONV_A, flag, "--json") for flag in ("--bash", "--files")]
+        with mock.patch("ctokens.web.server.tool_calls", wraps=tool_calls) as calls:
+            self.assertEqual([self.get(f"/api/conversations/{CONV_A}/{view}") for view in ("bash", "files")], expected)
+            self.assertEqual(calls.call_count, 3)
+            calls.reset_mock()
+            self.assertEqual([self.get(f"/api/conversations/{CONV_A}/{view}") for view in ("bash", "files")], expected)
+            calls.assert_not_called()
 
     def test_subagent_description_change_without_log_change(self):
         self.get(f"/api/conversations/{CONV_A}")

@@ -1366,18 +1366,23 @@ async function refreshList() {
   }
 }
 
-// ---------- conversation cache: every tab of the open conversation, kept until the list is shown again ----------
-// path (API suffix) -> { promise, data, at, stale }; data stays undefined until the first answer.
-const convCache = { id: null, entries: new Map() };
+// ---------- conversation cache: every tab of the last conversations opened, so going back to one is instant ----------
+// id -> path (API suffix) -> { promise, data, at, stale }; data stays undefined until the first answer.
+const convCache = new Map();
+const CONVS_KEPT = 3;
 const PREFETCHED = ["", "/messages", "/last-response", "/bash", "/files"];
 
 function convEntries(id) {
-  if (convCache.id !== id) Object.assign(convCache, { id, entries: new Map() });
-  return convCache.entries;
+  const entries = convCache.get(id) || new Map();
+  convCache.delete(id);
+  convCache.set(id, entries);
+  while (convCache.size > CONVS_KEPT) convCache.delete(convCache.keys().next().value);
+  return entries;
 }
 
-function clearConvCache() {
-  Object.assign(convCache, { id: null, entries: new Map() });
+// What the kept conversations show is read again when one is opened, but for its messages, which take only what is new.
+function staleConvCache() {
+  for (const entries of convCache.values()) for (const [path, entry] of entries) if (!path.startsWith("/messages")) entry.stale = true;
   liveStatus.clear();
   messagesState.anchor = null;
 }
@@ -1414,7 +1419,7 @@ function fetchConv(id, path, force) {
 }
 
 function peekConv(id, path) {
-  const entry = convCache.id === id ? convCache.entries.get(path) : null;
+  const entry = convCache.has(id) ? convCache.get(id).get(path) : null;
   return entry && entry.data !== undefined ? { data: entry.data, at: entry.at, stale: entry.stale } : null;
 }
 
@@ -2696,7 +2701,8 @@ function tailStart(messages) {
 
 async function appendNew() {
   const route = app.route, data = app.data;
-  if (!route || route.view !== "messages" || app.phase !== "ready" || !data || !data.messages) return;
+  // Only the end of the conversation is in the page yet: what is new comes with the rest of it.
+  if (!route || route.view !== "messages" || app.phase !== "ready" || !data || !data.messages || data.from) return;
   const from = tailStart(data.messages);
   const query = `${data.source === "main" ? "" : `source=${encodeURIComponent(data.source)}&`}from=${from}`;
   const got = await api(`/api/conversations/${encodeURIComponent(route.id)}/messages?${query}`);
@@ -2745,9 +2751,11 @@ function patchMessages(route, data, from, fresh) {
 }
 
 // Same numbering as the CLI: tool results are not counted, since they render under their call, nor are events.
-function prepared(list) {
-  let n = 0;
-  return (list || []).map((m, i) => markClipped({ ...m, blocks: m.blocks || [], i, n: numbered(m) ? ++n : null, when: parseStamp(m.timestamp) }));
+// The last part of a conversation, drawn first, starts at index from after numbered messages.
+function prepared(list, from = 0, numberedBefore = 0) {
+  let n = numberedBefore;
+  return (list || []).map((m, i) => markClipped({ ...m, blocks: m.blocks || [], i: from + i, n: numbered(m) ? ++n : null,
+    when: parseStamp(m.timestamp) }));
 }
 
 // Where each clipped text sits in the transcript, as the server's full view takes it, so Show all can ask for the rest.
@@ -2775,7 +2783,8 @@ function toolsOf(messages) {
 
 const shownOf = (messages, tools) => messages.filter((m) => !(m.kind === "tool_result" && m.blocks.every((b) => tools.calls.has(b.tool_use_id))));
 
-function countText(messages) {
+function countText(messages, partial) {
+  if (partial) return "Loading the earlier messages…";
   const responses = messages.filter((m) => m.role === "assistant");
   const cost = responses.reduce((sum, m) => sum + (m.estimated_cost_usd || 0), 0);
   return `${fmt(visibleMessages(messages).length)} messages · ${fmt(responses.length)} responses · `
@@ -2787,13 +2796,13 @@ VIEWS.messages = convView(messagesPath, {
   load: (route, opts) => {
     // A fresh open starts at the latest message; a refresh keeps the reader where they are.
     if (!opts.refresh) Object.assign(messagesState, { toBottom: true, restore: false });
-    return loadConversation(route, messagesPath(route), opts);
+    return opts.refresh ? loadConversation(route, messagesPath(route), opts) : loadEnd(route, messagesPath(route));
   },
   // Coming back from another tab reattaches the same nodes, so the anchor is still in the page; otherwise start at the end.
   enter: () => Object.assign(messagesState, { toBottom: true, restore: true }),
   leave: () => { messagesState.anchor = topMessage(); },
   render(data) {
-    const messages = prepared(data.messages);
+    const messages = prepared(data.messages, data.from, data.numbered_before);
     // A refresh draws a new list over the one on screen: remember which message the reader was at, and what is new.
     const key = `${data.source}|${messages.length}`, old = document.querySelector(".msgs");
     const [oldSource, oldCount] = old && messagesState.id === app.route.id ? old.dataset.key.split("|") : [];
@@ -2815,12 +2824,12 @@ VIEWS.messages = convView(messagesPath, {
             "aria-valuetext": LEVELS[messagesState.level],
             oninput: (e) => { setLevel(Number(e.target.value)); e.target.setAttribute("aria-valuetext", LEVELS[messagesState.level]); } }),
           h("span", { class: "level-name", id: "level-name" }, LEVELS[messagesState.level]))),
-      h("span", { class: "count", id: "messages-count" }, countText(messages)));
+      h("span", { class: "count", id: "messages-count" }, countText(messages, data.from)));
     const meta = h("div", { class: "meta" }, "Every message in log order · token usage of each assistant response · times in UTC");
     if (!shown.length) return [meta, toolbar, emptyState("No messages", "This log has no user or assistant messages yet.")];
     return [meta, toolbar, h("ol", { class: `msgs lvl-${messagesState.level}`, "data-key": key }, messageItems(shown, tools, itemContext([])))];
   },
-  after: () => {
+  after: (data) => {
     const { anchor, restore, toBottom, keep, unread } = messagesState;
     Object.assign(messagesState, { anchor: null, restore: false, toBottom: false, keep: null });
     drawComposer();
@@ -2831,12 +2840,67 @@ VIEWS.messages = convView(messagesPath, {
     if (unread != null) requestAnimationFrame(showNewNotice);
     // The log may have grown while this tab was hidden or loading.
     pullTail();
+    if (data.from) fillEarlier(app.route, data);
     return () => {
       dropNewNotice();
       if (composer.el) composer.el.remove();
     };
   },
 });
+
+// A long conversation opens at its end, with the earlier messages drawn above it while the reader is already there.
+const END_MESSAGES = 80;
+const EARLIER_PER_FRAME = 100;
+
+async function loadEnd(route, path) {
+  const [data] = await Promise.all([api(`/api/conversations/${encodeURIComponent(route.id)}${path}${path.includes("?") ? "&" : "?"}tail=${END_MESSAGES}`),
+    convRows.has(route.id) ? null : refreshList(), fetchLive(route.id)]);
+  if (data.from) return data;
+  const whole = { source: data.source, sources: data.sources, messages: data.messages };
+  const entry = { data: whole, at: new Date(), stale: false, promise: Promise.resolve(whole) };
+  convEntries(route.id).set(path, entry);
+  if (noteConvData(route.id, path, whole)) redrawConvHead(route.id);
+  prefetchConv(route.id);
+  return whole;
+}
+
+async function fillEarlier(route, part) {
+  let whole;
+  try {
+    whole = await fetchConv(route.id, messagesPath(route), false);
+  } catch (err) {
+    const count = $("messages-count");
+    if (count && app.data === part) count.textContent = `The earlier messages did not load: ${err.message}`;
+    return;
+  }
+  const body = renderedBodies.get(part), list = document.querySelector(".msgs");
+  if (app.route !== route || app.data !== part || !body || !list) return;
+  const messages = prepared(whole.messages), tools = toolsOf(messages), shown = shownOf(messages, tools);
+  const earlier = shown.filter((m) => m.i < part.from);
+  const stick = atBottom(), top = topMessage();
+  const keep = top && top.el.dataset.i != null ? { i: Number(top.el.dataset.i), offset: top.offset } : null;
+  // The end is drawn again: its calls, results and days may need what comes before it.
+  list.replaceChildren(...messageItems(shown.filter((m) => m.i >= part.from), tools, itemContext(earlier)));
+  list.dataset.key = `${whole.source}|${messages.length}`;
+  app.data = whole;
+  renderedBodies.set(whole, body);
+  const count = $("messages-count");
+  if (count) count.textContent = countText(messages);
+  const kept = keep && shownFrom(keep.i);
+  if (stick) scrollToEnd();
+  else if (kept) window.scrollTo(0, kept.getBoundingClientRect().top + window.scrollY - keep.offset);
+  pullTail();
+  for (let end = earlier.length; end > 0;) {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    if (renderedBodies.get(whole) !== body) return;
+    const start = Math.max(0, end - EARLIER_PER_FRAME), first = list.firstElementChild, y = first.getBoundingClientRect().top;
+    list.prepend(...messageItems(earlier.slice(start, end), tools, itemContext(earlier.slice(0, start))));
+    // The browser may keep the reader's place itself; whatever it did not make up for is scrolled here.
+    if (list.isConnected) window.scrollBy(0, first.getBoundingClientRect().top - y);
+    end = start;
+  }
+  prefetchConv(route.id);
+}
 
 // ---------- context breakdown (analysis.js) ----------
 const CONTEXT_PARTS = {
@@ -3218,7 +3282,7 @@ function navigate() {
   const leaving = app.route && VIEWS[app.route.view];
   if (leaving && leaving.leave) leaving.leave();
   const route = parseRoute(location.hash);
-  if (route.view === "list") clearConvCache();
+  if (route.view === "list") staleConvCache();
   app.route = route;
   const view = VIEWS[route.view];
   const hit = view.cached ? view.cached(route) : null;

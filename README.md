@@ -260,7 +260,8 @@ The conversation list filters by project as you type. **Search** runs when you
 stop typing (or press Enter) and keeps the conversations whose title, prompts or
 assistant text contain a word or phrase, ignoring case and line breaks; thinking,
 tool calls, tool results and subagents are not searched. The first search after
-start-up reads every log; later ones only re-read the logs that changed.
+start-up reads every log, several at a time in separate processes; later ones only
+re-read the logs that changed.
 
 The list shows one card per conversation, 50 per page, most recent first and
 grouped by the time of their last message (today, yesterday, this week, last week,
@@ -282,8 +283,15 @@ the conversations modified since. A conversation without recaps shows none.
 
 Opening a conversation loads the other tabs (usage, conversation, last
 response, Bash commands, files) in the background, so switching tabs is
-immediate. They are kept until you go back to the list; **Refresh** reloads the
-current tab and the others reload the next time you open them.
+immediate. The browser keeps the tabs of the last three conversations opened:
+going back to one from the list shows it at once, its messages as they were drawn
+plus those written since, while the other tabs reload behind. **Refresh** reloads
+the current tab and the others reload the next time you open them.
+
+A long conversation opens at its end: the server sends the last 80 messages
+first, and the earlier ones follow and are drawn above them, a hundred per frame,
+without moving what you are reading. Until they are all there the count above the
+messages says *Loading the earlier messages…*.
 
 Inside a conversation the top bar holds its tabs and a **← Conversations**
 button, so they stay on screen however far you scroll. Once the conversation's
@@ -668,8 +676,19 @@ remote command that just waits. With stdin on `/dev/null` the local terminal
 stays as it is and Ctrl+C closes the tunnel.
 
 Every request re-reads the logs that changed since the previous one, so the data
-is always current. The first totals load parses everything (about as long as
-`--totals`); later loads take a fraction of a second when nothing changed.
+is always current. The server keeps what it found in each log until the log
+changes: the usage of each one, its Bash and file calls, the text the list search
+looks in. When a request needs many logs it has not read yet (the first totals,
+a conversation with hundreds of subagents), it reads them several at a time in
+worker processes, up to 16, one per core: the server's threads share one Python
+interpreter, so a long read in one of them would hold back every other request.
+The first totals load then takes a fraction of what `--totals` takes; later loads
+take a fraction of a second when nothing changed. The worker processes start with
+the first such request, end after two minutes without work, and end with the
+server too, however it is stopped.
+
+The page and its scripts are sent with an `ETag`: a reload asks for them again,
+but they travel only when they changed, which spares a megabyte through a tunnel.
 
 The browser libraries (Chart.js, marked, DOMPurify, highlight.js) are bundled in
 `ctokens/web/static/vendor/`, so the UI works offline and loads nothing from
@@ -701,6 +720,7 @@ counterpart:
 | Route | Returns |
 |---|---|
 | `GET /api/conversations/<id>/messages?source=&from=N` | the messages from index `N` on, with `from` and `total` and without `sources`; only the lines added to the log since the last request are read |
+| `GET /api/conversations/<id>/messages?source=&tail=N` | about the last `N` messages, with `sources`, `from` (their first index, moved back so they do not start among the results of a tool call), `total` and `numbered_before` (the prompts and responses before them, to number the rest) |
 | `GET /api/conversations/<id>/events?source=` | server-sent events while the conversation is open: `log` (the log grew), `live` (`{"live", "send_problem"}` when the session changes) and `activity` (`{"text"}`, the terminal's status line while it works) |
 | `GET /api/conversations/<id>/live` | `{"live": {...} or null, "key": "ok"\|"missing"\|"wrong"\|"disabled", "send_problem": why it cannot take a message now, or null}` |
 | `POST /api/conversations/<id>/send` | body `{"text": "...", "images"?: {"N": path}}` with `X-Send-Key`; the text is typed into the session's terminal and each `[Image #N]` whose `N` is in `images` is pasted as that path; `{"sent": true, "live": {...}}`, or 409 with the reason |
@@ -744,7 +764,8 @@ preview, Ctrl+G, reloading what changed on disk, images in the message box (agai
 session faked in the page), the right-click menus and Go offline, the commit list and
 what it marks as pushed and a commit's way back to it, the search with its options and
 globs (also as you type), the selection menus and copy buttons pasting into a shell
-without Enter, and the header row under the top bar. The script builds the demo
+without Enter, the header row under the top bar, a long conversation opening at its
+end, and a conversation coming back from memory. The script builds the demo
 folder below in a temporary directory, adds a conversation of its own and starts
 a server on it, so it needs nothing else:
 

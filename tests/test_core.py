@@ -10,7 +10,7 @@ from fixtures import (API, BILLING, CONV_A, CONV_B, LAST_RESPONSE, SUB_EXPLORE, 
                       text, tool, usage, write_jsonl)
 
 from ctokens.cli import show_bash_commands
-from ctokens.content import (CLIP, bash_commands, conversation_messages, full_text, last_response, touched_files,
+from ctokens.content import (CLIP, bash_commands, conversation_messages, full_text, last_response, tool_calls, touched_files,
                               transcript)
 from ctokens.logs import conversation_sources, discover, file_stats, parse_log
 from ctokens.pricing import estimated_cost, load_prices, rate_of, usage_key
@@ -311,6 +311,27 @@ class ContentTest(CoreTest):
         ], {})
         self.assertEqual([c["command"] for c in bash_commands(path)], ["make"])
         self.assertEqual(touched_files(path), {"/src/a.py": {"Read": 0, "Write": 0, "Edit": 1, "sources": ["main"]}})
+
+    def test_quick_tool_calls_find_the_same(self):
+        def quick(path):
+            return tool_calls(path, quick=True)
+
+        self.assertEqual(bash_commands(self.conv_a, quick), bash_commands(self.conv_a))
+        self.assertEqual(touched_files(self.conv_a, quick), touched_files(self.conv_a))
+
+    def test_the_end_of_a_conversation_starts_at_a_call_not_at_its_results(self):
+        kinds = ["prompt", "response", "tool_result", "tool_result", "event", "response", "tool_result", "prompt"]
+        messages = [{"role": "event" if k == "event" else "assistant" if k == "response" else "user", "kind": k, "blocks": []}
+                    for k in kinds]
+
+        def read(path, prices):
+            return messages
+
+        for tail, start, before in ((1, 7, 3), (2, 5, 2), (3, 5, 2), (4, 4, 2), (5, 1, 1), (6, 1, 1), (8, 0, 0), (50, 0, 0)):
+            with self.subTest(tail=tail):
+                data = conversation_messages(self.conv_a, "main", None, read, tail)
+                self.assertEqual((data["from"], data["numbered_before"], data["total"]), (start, before, len(kinds)))
+                self.assertEqual(data["messages"], messages[start:])
 
     def test_touched_files_one_row_per_file_with_summed_counts_and_sources(self):
         self.assertEqual(touched_files(self.conv_a), {
