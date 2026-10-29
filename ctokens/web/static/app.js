@@ -554,10 +554,10 @@ class ApiError extends Error {
   }
 }
 
-async function api(path, { method = "GET", headers = {}, body: payload } = {}) {
+async function api(path, { method = "GET", headers = {}, body: payload, signal } = {}) {
   let response;
   try {
-    response = await fetch(path, { method, headers: { Accept: "application/json", ...headers }, body: payload, cache: "no-store" });
+    response = await fetch(path, { method, headers: { Accept: "application/json", ...headers }, body: payload, cache: "no-store", signal });
   } catch (_) {
     throw new ApiError("Could not reach the server. Check that claude_tokens.py --serve is still running, then retry.", 0, null);
   }

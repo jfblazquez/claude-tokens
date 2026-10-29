@@ -546,17 +546,24 @@ highlighting splits into several pieces still links whole.
   the repository last fetched; it never fetches by itself, so a pull or a push of
   yours shows on **Refresh**, or when the panel comes back into view. A click on a
   commit opens it; **Load more** brings the next hundred, and **❯ Shell** opens a
-  shell in the repository to push or pull.
+  shell in the repository to push or pull. A commit's view has its own **☰ Commits**
+  button, which opens the list with that commit marked and scrolled into view.
 - **Search** (a magnifying glass), in the conversation header and in a folder, looks for text in its
-  files, as an editor's *Find in files*: Enter searches, **Aa** matches case,
-  **ab** whole words and **.\*** takes a regular expression (git's extended
-  ones). Under **Files to include and exclude** go comma-separated globs:
+  files, as an editor's *Find in files*: it searches as you type, once you stop
+  for 300 ms (Enter searches at once), and so do changes to the globs and options;
+  a search still running when the next one starts is dropped. **Aa** matches case,
+  **ab** whole words and **.\*** takes a regular expression. Under **Files to
+  include and exclude** go comma-separated globs:
   `*.py` matches anywhere, `./build/` from the folder searched, and a folder takes
   in what it holds. Results come grouped by file with their line numbers and the
-  matches marked; a click opens the file at that line. It runs `git grep` over
-  the tracked files and the untracked ones git does not ignore (outside a
+  matches marked; a click opens the file at that line. It runs
+  [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) when it is installed,
+  as editors do, and `git grep` otherwise; on a large repository ripgrep answers
+  in a tenth of the time, since it reads the files on every core. Either way it
+  covers the tracked files and the untracked ones git does not ignore (outside a
   repository, the files `.gitignore` does not hide), leaves binary files out and
-  stops at 5000 results, saying so. The options and globs are remembered.
+  stops at 5000 results, saying so. Regular expressions are ripgrep's (Rust
+  syntax) or git's extended ones. The options and globs are remembered.
 
 They open in a **side panel**, one tab each, that you can widen by dragging its
 edge. Tabs shrink to fit; those that still do not fit scroll with the mouse
@@ -704,7 +711,7 @@ counterpart:
 | `GET /api/conversations/<id>/commit?sha=&cwd=` | with `X-Send-Key`, from the repository of `cwd` (an absolute folder) when given, else the conversation's: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
 | `GET /api/conversations/<id>/file?path=` | with `X-Send-Key`: `{path, display, root, size, mtime, stamp, binary, truncated, text}`, the first 2 MB; `path` absolute or from the folder |
 | `GET /api/conversations/<id>/commits?skip=&cwd=` | with `X-Send-Key`, from the repository of `cwd` when given, else the conversation's: `{root, branch, upstream, ahead, behind, remotes, fetched, commits: [{sha, parents, author, date, refs, subject, pushed}], incoming: [...], more, skip}`, 100 commits of `HEAD` from `skip`; `pushed` is whether a remote branch has the commit (null with no remote), `incoming` the upstream's commits `HEAD` lacks (up to 100), `fetched` when the repository last fetched, 404 outside a repository |
-| `GET /api/conversations/<id>/search?q=&case=1&word=1&regex=1&include=&exclude=&cwd=` | with `X-Send-Key`, in the folder `cwd` when given, else the conversation's: `{folder, root, matches, truncated, timed_out, files: [{path, display, matches: [{line, text}]}]}`; `q` one line, up to 1000 characters, a fixed string unless `regex`; `include` and `exclude` comma-separated globs; up to 5000 matches, each line up to 1000 characters; 404 with git's message for a bad expression |
+| `GET /api/conversations/<id>/search?q=&case=1&word=1&regex=1&include=&exclude=&cwd=` | with `X-Send-Key`, in the folder `cwd` when given, else the conversation's: `{folder, root, matches, truncated, timed_out, files: [{path, display, matches: [{line, text}]}]}`; `q` one line, up to 1000 characters, a fixed string unless `regex`; `include` and `exclude` comma-separated globs; up to 5000 matches, each line up to 1000 characters; 404 with ripgrep's or git's message for a bad expression |
 | `GET /api/conversations/<id>/dir?path=` | with `X-Send-Key`: `{path, display, root, parent, stamp, truncated, entries: [{name, type, link, size, mtime, ignored}]}`, folders first and up to 5000; `path` absolute or from the folder, which it is by default; `ignored` when git ignores the entry |
 | `POST /api/conversations/<id>/shell` | body `{"cols", "rows", "cwd"?}` with `X-Send-Key`; `{"shell": {"id", "cwd", "pid", ...}}`, or 409 |
 | `GET /api/shells/stream?from=<shell id>:<offset>,...` | server-sent events with the output of up to 8 shells on one connection: `data` (`{"id", "at", "data": base64}`, `at` the byte offset reached), `exit` (`{"id", "code"}`, null when the shell is gone) and `end` once none is left; each event's `id` lists the offsets, so a reconnect resumes; the last 1 MB of each shell is kept |
@@ -723,13 +730,17 @@ python3 tests/coverage.py              # line coverage of the CLI characterizati
 python3 tests/golden/refresh.py CASE   # regenerate a golden after a deliberate output change
 ```
 
+The search tests run with `git grep`, and again with ripgrep where `rg` is
+installed.
+
 The panels are also checked in a browser, with Playwright (`npm i --no-save
 playwright && npx playwright install chromium-headless-shell`): links in the
 conversation and in a shell (wrapped lines too), the folder browser, the Markdown
 preview, Ctrl+G, reloading what changed on disk, images in the message box (against a
 session faked in the page), the right-click menus and Go offline, the commit list and
-what it marks as pushed, the search with its options and globs, and the selection menus
-and copy buttons pasting into a shell without Enter. The script builds the demo
+what it marks as pushed and a commit's way back to it, the search with its options and
+globs (also as you type), and the selection menus and copy buttons pasting into a
+shell without Enter. The script builds the demo
 folder below in a temporary directory, adds a conversation of its own and starts
 a server on it, so it needs nothing else:
 

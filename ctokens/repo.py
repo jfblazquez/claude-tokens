@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -330,6 +331,36 @@ def pathspecs(patterns, exclude):
     return specs
 
 
+def ripgrep_globs(patterns, exclude):
+    """pathspecs() in ripgrep's globs, which follow .gitignore: a leading / anchors to the folder searched."""
+    globs = []
+    for spec in pathspecs(patterns, exclude):
+        pattern = spec.partition(")")[2]
+        globs += ["-g", ("!" if exclude else "") + (pattern if pattern.startswith("**") else "/" + pattern)]
+    return globs
+
+
+def search_command(folder, root, query, case, word, regex, include, exclude):
+    """ripgrep when it is installed, ten times faster than git grep on a large tree; both skip what git ignores."""
+    rg = shutil.which("rg")
+    if rg:
+        args = [rg, "--no-config", "-n", "--null", "--no-heading", "--with-filename", "--color", "never", "--hidden",
+                "--no-require-git", "-g", "!.git", *ripgrep_globs(include, False), *ripgrep_globs(exclude, True)]
+    else:
+        args = ["git", "-C", str(folder), "grep", "-n", "-I", "-z", "--no-color", "-E" if regex else "-F"]
+        args += ["--untracked"] if root is not None else ["--no-index", "--exclude-standard"]
+    if rg and not regex:
+        args.append("-F")
+    if not case:
+        args.append("-i")
+    if word:
+        args.append("-w")
+    args += ["-e", query]
+    if not rg:
+        args += ["--", *pathspecs(include, False), *pathspecs(exclude, True)]
+    return args, bool(rg)
+
+
 def search(cwd, query, case=False, word=False, regex=False, include="", exclude=""):
     """Lines of the files under cwd that hold the query, grouped by file: git's tracked and untracked files in a
     repository, the ones .gitignore does not hide elsewhere. Binary files are left out."""
@@ -339,17 +370,12 @@ def search(cwd, query, case=False, word=False, regex=False, include="", exclude=
         raise RepoError("not a folder")
     folder = Path(cwd)
     root = repo_root(folder)
-    args = ["git", "-C", str(folder), "grep", "-n", "-I", "-z", "--no-color", "-E" if regex else "-F"]
-    args += ["--untracked"] if root is not None else ["--no-index", "--exclude-standard"]
-    if not case:
-        args.append("-i")
-    if word:
-        args.append("-w")
-    args += ["-e", query, "--", *pathspecs(include, False), *pathspecs(exclude, True)]
+    args, ripgrep = search_command(folder, root, query, case, word, regex, include, exclude)
     files, count, truncated = {}, 0, False
     with tempfile.TemporaryFile() as errors:
         try:
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors,
+            # Without a path ripgrep searches its standard input when that is not a terminal.
+            proc = subprocess.Popen(args, cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
                                     env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"})
         except OSError as error:
             raise RepoError(f"cannot run git: {error}") from None
@@ -357,7 +383,8 @@ def search(cwd, query, case=False, word=False, regex=False, include="", exclude=
         timer.start()
         try:
             for raw in proc.stdout:
-                parts = raw.rstrip(b"\n").split(b"\0", 2)
+                parts = raw.rstrip(b"\n").split(b"\0", 1)
+                parts[1:] = parts[1].split(b":" if ripgrep else b"\0", 1) if len(parts) == 2 else []
                 if len(parts) != 3 or not parts[1].isdigit():
                     continue
                 if count >= MAX_SEARCH_MATCHES:
@@ -375,8 +402,9 @@ def search(cwd, query, case=False, word=False, regex=False, include="", exclude=
             timer.cancel()
         errors.seek(0)
         message = errors.read().decode("utf-8", "replace").strip()
-    if code not in (0, 1) and not truncated and not timed_out:
+    # ripgrep also ends with 2 when a file could not be read, after the matches of the others.
+    if code not in (0, 1) and not truncated and not timed_out and not (ripgrep and count):
         raise RepoError(message.splitlines()[-1].removeprefix("fatal: ") if message else "the search failed")
     return {"folder": str(folder), "root": str(root) if root else None, "matches": count, "truncated": truncated,
             "timed_out": timed_out, "files": [{"path": str(folder / rel), "display": rel, "matches": found}
-                                              for rel, found in files.items()]}
+                                              for rel, found in sorted(files.items())]}
