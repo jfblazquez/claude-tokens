@@ -165,6 +165,13 @@ body:has(#composer) .to-top { bottom: 140px; }
 .composer-note.warn { color: var(--warn-fg); }
 .composer-note.error { color: var(--err-fg); }
 .composer-row[hidden], .dialog[hidden], .dialog-own[hidden] { display: none; }
+.composer.dropping { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.composer-images { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.composer-images[hidden] { display: none; }
+.composer-image { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 3px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--surface-2); font-size: var(--t-xs); }
+.composer-image img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; background: var(--surface); }
+.composer-image.loading { opacity: 0.7; }
 .dialog { display: grid; gap: var(--s2); max-height: 60vh; overflow: auto; }
 .dialog-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); }
 .dialog-head b { color: var(--warn-fg); }
@@ -370,9 +377,11 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .copy-menu-item .muted { font-size: var(--t-xs); }
 .copyable { cursor: copy; position: relative; }
 .copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
-.copyable[data-copied]::after { content: attr(data-copied); position: absolute; left: 0; bottom: 100%; margin-bottom: 4px;
+.copy-flash { position: relative; }
+:is(.copyable, .copy-flash)[data-copied]::after { content: attr(data-copied); position: absolute; left: 0; bottom: 100%; margin-bottom: 4px;
   padding: 1px 8px; border-radius: 4px; background: var(--fg); color: var(--bg); font: 600 var(--t-xs)/1.5 var(--font);
   white-space: nowrap; pointer-events: none; z-index: 2; }
+.copyable.copied-below[data-copied]::after { bottom: auto; top: 100%; margin: 4px 0 0; }
 
 /* Conversation messages */
 .msgs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s3); }
@@ -455,6 +464,7 @@ tr.group .n { margin-left: var(--s2); color: var(--muted); font-weight: 400; }
 .ref { color: var(--ref); text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; border-radius: 3px; }
 .ref:hover, .ref:focus-visible { text-decoration-style: solid; background: var(--accent-soft); }
 .ref-file.many::after { content: "⋯"; font-size: 0.8em; margin-left: 1px; color: var(--muted); }
+a.ref-url { color: var(--ref); }
 
 body.dock-side main, body.dock-side .appbar-in { margin-right: var(--dock-w); }
 body.dock-side main { max-width: none; }
@@ -488,9 +498,10 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
 .dock-tab .dock-title { flex: 1; min-width: 0; }
 .dock-tab .dock-x { visibility: hidden; }
 .dock-tab:hover .dock-x, .dock-tab[aria-selected="true"] .dock-x, .dock-tab:focus-within .dock-x { visibility: visible; }
-.dock-menu-btn { flex: none; align-self: center; margin-bottom: 4px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px;
+.dock-menu-btn { flex: none; display: inline-flex; align-items: center; gap: 2px; align-self: center; margin-bottom: 4px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface); color: var(--muted); font-size: var(--t-xs); font-weight: 600; cursor: pointer; white-space: nowrap; }
 .dock-menu-btn:hover { color: var(--fg); background: var(--surface-2); }
+.dock-menu-btn .icon { width: 14px; height: 14px; }
 .win-title .dock-menu-btn { margin: 0; }
 .dock-menu { z-index: 41; max-width: min(420px, 90vw); max-height: 70vh; overflow: auto; }
 .dock-menu .copy-menu-item { justify-content: flex-start; gap: 6px; max-width: 100%; }
@@ -501,6 +512,9 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
 .dock-menu .copy-menu-item[role="menuitemradio"].on::before { content: "●"; color: var(--accent); }
 .dock-menu hr { width: 100%; margin: var(--s1) 0; border: 0; border-top: 1px solid var(--border); }
 .dock-title { overflow: hidden; text-overflow: ellipsis; }
+/* Changed on disk and not reloaded yet. */
+:is(.dock-tab, .win-title, .tray-item).changed .dock-kind::after, .tray-item.changed::after { content: "●"; margin-left: 3px; color: var(--warn-fg);
+  font-size: 0.75em; vertical-align: super; }
 .dock-kind { font-family: var(--mono); color: var(--accent); }
 .dock-x { border: 0; background: none; color: var(--muted); cursor: pointer; border-radius: 4px; padding: 0 5px; font-size: 16px; line-height: 1.2; }
 .dock-x:hover { background: var(--border); color: var(--fg); }
@@ -508,7 +522,7 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
 .dock-bodies { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .panel-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
 .panel-body[hidden] { display: none; }
-.panel-body.shell, .panel-body.file { overflow: hidden; }
+.panel-body.shell, .panel-body.file, .panel-body.dir { overflow: hidden; }
 .panel-body > .card { margin: var(--s3); }
 .dock.modal { inset: 0; z-index: 25; display: grid; place-items: center; background: transparent; }
 .dock-backdrop { position: absolute; inset: 0; background: rgba(10, 16, 24, 0.45); }
@@ -546,6 +560,35 @@ body.dock-bottom:has(#composer) .new-messages, body.dock-bottom:has(#composer) .
   position: sticky; left: 0; z-index: 1; background: var(--code-bg); }
 .fv-text { padding: 0 16px 0 12px; }
 .fv-text code, .fv-text code.hljs, .dl code.hljs { display: inline; background: none; padding: 0; font-size: inherit; overflow: visible; }
+.fv-preview { background: var(--surface); }
+.fv-preview > .md { padding: var(--s4) var(--s5); }
+.fv-modes { flex: none; }
+.fv-modes button { padding: 3px 10px; border: 0; background: none; color: var(--muted); font: inherit; cursor: pointer; }
+.fv-modes button + button { border-left: 1px solid var(--border); }
+.fv-modes button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.changed-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.changed-notice > span { flex: 1; }
+
+.dir-crumbs { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; gap: 1px; font-size: var(--t-sm); }
+.crumb { border: 0; background: none; padding: 1px 3px; border-radius: 4px; color: var(--ref); font: inherit; cursor: pointer; }
+.crumb:hover { background: var(--accent-soft); }
+.dir-filter { width: 140px; }
+.dir-hidden { display: flex; align-items: center; gap: 4px; color: var(--muted); cursor: pointer; }
+.dir-scroll { flex: 1; min-height: 0; overflow: auto; }
+.dir-list { display: grid; padding: var(--s1) 0; }
+.dir-list:focus { outline: none; }
+.dir-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; gap: var(--s3); align-items: center; padding: 3px var(--s3);
+  border: 0; background: none; color: var(--fg); font: inherit; font-size: var(--t-sm); text-align: left; cursor: pointer; }
+.dir-row:hover { background: var(--surface-2); }
+.dir-row:focus-visible, .dir-row.selected:focus { background: var(--accent-soft); outline: none; }
+.dir-row.ignored { opacity: 0.55; }
+.dir-row.dir .dir-name { font-weight: 600; }
+.dir-icon { color: var(--accent); text-align: center; }
+.dir-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dir-size { text-align: right; min-width: 64px; }
+.dir-time { font-variant-numeric: tabular-nums; }
+.pad.small { font-size: var(--t-xs); }
+
 .fv-mark { position: absolute; left: 0; right: 0; background: rgba(255, 196, 0, 0.22); border-left: 3px solid #e0a800; pointer-events: none; }
 
 .term { flex: 1; min-height: 0; padding: 6px 0 0 8px; background: var(--term-bg); color-scheme: light; }

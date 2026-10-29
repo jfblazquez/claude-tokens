@@ -1,3 +1,4 @@
+import base64
 import http.client
 import json
 import os
@@ -18,6 +19,7 @@ from ctokens.web import server as web_server
 from ctokens.web.server import Config, Handler
 
 PANE, SOCKET, TTY = "%7", "/tmp/tmux-1000/default", "/dev/pts/7"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 24
 
 
 def fake_process(proc, pid, start=100, pgrp=None, tpgid=None, env=None, tty=TTY):
@@ -111,6 +113,49 @@ class SendTest(LiveTestCase):
         buffer = commands[1][5]
         self.assertEqual(commands[2], ["tmux", "-S", SOCKET, "paste-buffer", "-p", "-d", "-b", buffer, "-t", PANE])
         self.assertEqual(commands[3], ["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "Enter"])
+
+    def images(self):
+        folder = Path(self.tmp.name) / "images"
+        mock.patch.object(live, "images_dir", return_value=folder).start()
+        return folder
+
+    def test_images_are_pasted_on_their_own(self):
+        self.images()
+        first = live.save_image("image/png", PNG)
+        live.send(self.sessions, CONV_A, "look [Image #1] and [Image #9]\nthen [Image #1]", {"1": first})
+        pasted = [c.kwargs["input"] for c in self.run.call_args_list if "load-buffer" in c.args[0]]
+        self.assertEqual(pasted, ["look ", first, " and [Image #9]\nthen ", first])
+        self.assertEqual(len([c for c in self.run.call_args_list if "paste-buffer" in c.args[0]]), 4)
+        commands = [c.args[0] for c in self.run.call_args_list]
+        enter = commands.index(["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "Enter"])
+        self.assertGreater(enter, max(i for i, c in enumerate(commands) if "paste-buffer" in c))
+
+    def test_images_that_are_gone_or_elsewhere(self):
+        folder = self.images()
+        path = live.save_image("image/png", PNG)
+        os.unlink(path)
+        for images in ({"1": path}, {"1": "/etc/passwd"}, {"1": str(folder.parent / "x.png")}):
+            with self.subTest(images=images), self.assertRaises(live.SendError):
+                live.send(self.sessions, CONV_A, "see [Image #1]", images)
+        for bad in (["x"], {"1": 2}, {str(i): "x" for i in range(live.MAX_IMAGES + 1)}):
+            with self.subTest(bad=bad), self.assertRaises(live.SendError):
+                live.send(self.sessions, CONV_A, "see", bad)
+        self.assertFalse([call for call in self.run.call_args_list if "paste-buffer" in call.args[0]])
+
+    def test_save_image(self):
+        folder = self.images()
+        path = Path(live.save_image("image/png", PNG))
+        self.assertEqual((path.parent, path.suffix, path.read_bytes()), (folder, ".png", PNG))
+        self.assertEqual((folder.stat().st_mode & 0o777, path.stat().st_mode & 0o777), (0o700, 0o600))
+        old = folder / "old.png"
+        old.write_bytes(PNG)
+        os.utime(old, (time.time() - live.IMAGE_KEEP - 60,) * 2)
+        live.save_image("image/jpeg", b"\xff\xd8\xff\xe0rest")
+        self.assertFalse(old.exists())
+        for kind, data in (("image/svg+xml", b"<svg/>"), ("image/png", b"GIF89a..."), ("image/png", b""),
+                           ("image/png", PNG + b"\0" * live.MAX_IMAGE_BYTES)):
+            with self.subTest(kind=kind, size=len(data)), self.assertRaises(live.SendError):
+                live.save_image(kind, data)
 
     def test_states_that_would_take_the_text(self):
         for extra, problem in (({"status": "waiting", "waitingFor": "permission prompt"}, "waiting (permission prompt)"),
@@ -368,8 +413,28 @@ class LiveApiTest(LiveApiCase):
         with mock.patch("ctokens.web.server.send", return_value={"pid": 41}) as send:
             status, data = self.post(CONV_A, {"text": "hello"}, origin=f"http://127.0.0.1:{self.port}")
         self.assertEqual((status, data), (200, {"sent": True, "live": {"pid": 41}}))
-        self.assertEqual(send.call_args.args[1:], (CONV_A, "hello"))
+        self.assertEqual(send.call_args.args[1:], (CONV_A, "hello", None))
         self.assertEqual(send.call_args.args[0], self.projects.parent / "sessions")
+
+    def test_image(self):
+        folder = Path(self.tmp.name) / "images"
+        with mock.patch.object(live, "images_dir", return_value=folder):
+            status, data = self.post(CONV_A, {"type": "image/png", "data": base64.b64encode(PNG).decode()}, action="image")
+            self.assertEqual((status, Path(data["path"]).parent, Path(data["path"]).read_bytes()), (200, folder, PNG))
+            self.assertEqual(self.post(CONV_A, {"type": "image/png", "data": "not base64!"}, action="image")[0], 400)
+            self.assertEqual(self.post(CONV_A, {"type": "text/html", "data": "PGI+"}, action="image")[0], 409)
+            self.assertEqual(self.post(CONV_A, {"type": "image/png", "data": ""}, key=None, action="image")[0], 403)
+        with mock.patch("ctokens.web.server.send", return_value={"pid": 41}) as send:
+            self.post(CONV_A, {"text": "see [Image #1]", "images": {"1": "/x.png"}})
+        self.assertEqual(send.call_args.args[1:], (CONV_A, "see [Image #1]", {"1": "/x.png"}))
+
+    def test_go_offline(self):
+        with mock.patch("ctokens.web.server.go_offline", return_value={"stopped": True, "closed_window": False}) as stop:
+            self.assertEqual(self.post(CONV_A, {}, key=None, action="go-offline")[0], 403)
+            status, data = self.post(CONV_A, {}, action="go-offline")
+        self.assertEqual((status, data), (200, {"stopped": True, "closed_window": False}))
+        self.assertEqual(stop.call_args.args[1:], (CONV_A,))
+        self.assertEqual(stop.call_count, 1)
 
     def test_send_refusals(self):
         cases = (({"key": None}, {"text": "hi"}, 403, "send key missing"),
@@ -546,6 +611,7 @@ class LaunchTest(LiveTestCase):
         self.assertEqual(self.calls[1], ["tmux", "send-keys", "-t", "%90", "-l",
                                          f"cd '{self.folder}' && claude --resume {CONV_B}"])
         self.assertEqual(self.calls[2], ["tmux", "send-keys", "-t", "%90", "Enter"])
+        self.assertEqual(self.calls[3], ["tmux", "set-option", "-w", "-t", "%90", "@ctokens", "1"])
 
     def test_new_session_finds_the_session_of_its_pane_and_starts_a_server_if_needed(self):
         self.fail_new_window = True
@@ -565,6 +631,50 @@ class LaunchTest(LiveTestCase):
     def test_not_registered_in_time(self):
         with mock.patch.object(live, "START_TIMEOUT", 0):
             self.assertIsNone(live.go_live(self.sessions, CONV_A, str(self.folder)))
+
+
+class GoOfflineTest(LiveTestCase):
+    def setUp(self):
+        super().setUp()
+        fake_process(self.proc, 41)
+        record(self.sessions, 41, CONV_A)
+        self.own = ""
+        self.run = mock.patch.object(live.subprocess, "run", side_effect=self.tmux).start()
+        mock.patch.object(live.time, "sleep").start()
+        self.kill = mock.patch.object(live.os, "kill", side_effect=lambda pid, sig: (self.sessions / f"{pid}.json").unlink()).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tmux(self, command, **kwargs):
+        if "show-options" in command:
+            return subprocess.CompletedProcess(command, 0, self.own, "")
+        return tmux_ok(command)
+
+    def commands(self, name):
+        return [c.args[0] for c in self.run.call_args_list if name in c.args[0]]
+
+    def test_stops_the_process_and_keeps_a_pane_of_the_user(self):
+        self.assertEqual(live.go_offline(self.sessions, CONV_A), {"stopped": True, "closed_window": False})
+        self.assertEqual(self.kill.call_args.args, (41, live.signal.SIGTERM))
+        self.assertEqual(self.commands("kill-pane"), [])
+
+    def test_closes_the_window_it_opened(self):
+        self.own = "1\n"
+        self.assertEqual(live.go_offline(self.sessions, CONV_A), {"stopped": True, "closed_window": True})
+        self.assertEqual(self.commands("kill-pane"), [["tmux", "-S", SOCKET, "kill-pane", "-t", PANE]])
+
+    def test_refusals(self):
+        self.kill.side_effect = None
+        with mock.patch.object(live, "STOP_TIMEOUT", -1), self.assertRaisesRegex(live.SendError, "has not stopped"):
+            live.go_offline(self.sessions, CONV_A)
+        with self.assertRaisesRegex(live.SendError, "not running"):
+            live.go_offline(self.sessions, CONV_B)
+        record(self.sessions, 41, CONV_A, entrypoint="sdk-cli")
+        fake_process(self.proc, 42, env={})
+        record(self.sessions, 42, CONV_B)
+        with self.assertRaises(live.SendError):
+            live.go_offline(self.sessions, CONV_B)
+        self.assertEqual([c.args[0] for c in self.kill.call_args_list], [41])
+        self.assertEqual(self.commands("kill-pane"), [])
 
 
 class GrowingTranscriptTest(unittest.TestCase):

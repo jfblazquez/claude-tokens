@@ -20,10 +20,10 @@ from urllib.parse import parse_qs
 from ..catalog import (CONVERSATION_ID, active_time, clean_title, conversation_rows, conversation_text, find_conversation,
                        iso_utc, last_activity, last_recap, project_path_of, save_title, session_title)
 from ..content import bash_commands, conversation_messages, full_text, last_response, touched_files
-from ..live import (SendError, activity, answer, channel, go_live, live_sessions, new_session, public, read_record, rename,
-                    send, send_problem, sessions_dir)
+from ..live import (MAX_IMAGE_BYTES, SendError, activity, answer, channel, go_live, go_offline, live_sessions, new_session,
+                    public, read_record, rename, save_image, send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
-from ..repo import FileIndex, RepoError, find_commits, find_files, read_file, repo_root, show_commit
+from ..repo import FileIndex, RepoError, find_commits, find_files, list_dir, read_file, repo_root, show_commit, stat_paths
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache, TranscriptCache
 from .favorites import Favorites, favorites_path
@@ -49,10 +49,12 @@ STREAM_HEADERS = (("Content-Type", "text/event-stream; charset=utf-8"), ("Connec
 MAX_DISCARDED_BODY = 1 << 20
 MAX_RECAP_IDS = 100
 MAX_SEND_BODY = 1 << 20
+# An image comes in base64, a third larger than its bytes.
+MAX_IMAGE_BODY = MAX_IMAGE_BYTES * 4 // 3 + 4096
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live|full))?")
-ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|new-session|rename|favorite|resolve|shell)")
+ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|go-offline|new-session|rename|favorite|resolve|stat|shell|image)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
-REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file)")
+REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file|dir)")
 SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close|state)")
 SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SHELL_REAP_EVERY = 30.0
@@ -188,9 +190,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
-        if not 0 < length <= MAX_SEND_BODY:
+        limit = MAX_IMAGE_BODY if name == "image" else MAX_SEND_BODY
+        if not 0 < length <= limit:
             self.close_connection = True
-            return json_response(413 if length > MAX_SEND_BODY else 400, {"error": "bad request body"})
+            return json_response(413 if length > limit else 400, {"error": "bad request body"})
         body = self.rfile.read(length)
         origin = self.headers.get("Origin")
         if origin is not None and origin.lower() != f"http://{self.headers.get('Host', '').lower()}":
@@ -230,9 +233,18 @@ class Handler(BaseHTTPRequestHandler):
                 if shell is None:
                     return json_response(404, {"error": "shell not found"})
                 cwd = shell.current_cwd()
+            # A Markdown file names others from its own folder.
+            elif data.get("cwd") is not None:
+                if not isinstance(data["cwd"], str) or not os.path.isabs(data["cwd"]) or not os.path.isdir(data["cwd"]):
+                    return json_response(400, {"error": "cwd must be an absolute folder"})
+                cwd = data["cwd"]
             root = repo_root(cwd)
             return json_response(200, {"cwd": cwd, "root": root and str(root), "commits": find_commits(cwd, commits),
                                        "files": find_files(cwd, files, self.server.file_index)})
+        if name == "stat":
+            if not isinstance(data.get("paths"), list):
+                return json_response(400, {"error": "expected {\"paths\": [...]}"})
+            return json_response(200, {"stats": stat_paths(data["paths"])})
         try:
             if name == "shell":
                 folder = data.get("cwd") or cwd
@@ -242,12 +254,20 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(200, {"shell": shell.public()})
             if name == "rename":
                 return self.rename(sessions, conversation_id, path, data.get("title"))
+            if name == "image":
+                try:
+                    image = base64.b64decode(data.get("data") or "", validate=True)
+                except (TypeError, ValueError):
+                    return json_response(400, {"error": "expected {\"type\": \"image/png\", \"data\": base64}"})
+                return json_response(200, {"path": save_image(data.get("type"), image)})
             if name == "send":
                 if not isinstance(data.get("text"), str):
                     return json_response(400, {"error": "expected {\"text\": \"...\"}"})
-                return json_response(200, {"sent": True, "live": send(sessions, conversation_id, data["text"])})
+                return json_response(200, {"sent": True, "live": send(sessions, conversation_id, data["text"], data.get("images"))})
             if name == "answer":
                 return json_response(200, {"live": answer(sessions, conversation_id, data.get("steps"))})
+            if name == "go-offline":
+                return json_response(200, go_offline(sessions, conversation_id))
             if name == "go-live":
                 return json_response(200, {"started": True, "live": go_live(sessions, conversation_id, cwd)})
             session_id, info = new_session(sessions, cwd)
@@ -263,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
             self.server.shells.close(token)
             return json_response(200, {"closed": True})
         if name == "state":
-            return json_response(200, {"shell": shell.public()})
+            return json_response(200, {"shell": {**shell.public(), "current_cwd": shell.current_cwd()}})
         if name == "resize":
             shell.resize(clamp(data.get("cols"), 80), clamp(data.get("rows"), 24))
             return json_response(200, {"shell": shell.public()})
@@ -276,7 +296,7 @@ class Handler(BaseHTTPRequestHandler):
         return json_response(200, {"written": True})
 
     def repo(self, conversation_id, view, params):
-        """A commit or a file of the conversation's folder; reading any file the user can read needs the key."""
+        """A commit, a file or a folder of the conversation's; reading any file the user can read needs the key."""
         state = self.key_state()
         if state != "ok":
             return json_response(403, {"error": KEY_ERRORS[state], "key": state})
@@ -293,6 +313,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if view == "commit":
                 return json_response(200, show_commit(cwd, params.get("sha", [""])[0]))
+            if view == "dir":
+                return json_response(200, list_dir(cwd, params.get("path", [""])[0]))
             return json_response(200, read_file(cwd, params.get("path", [""])[0]))
         except RepoError as error:
             return json_response(404, {"error": str(error)})

@@ -5,8 +5,11 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
+import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +22,19 @@ MAX_MESSAGE_CHARS = 100_000
 TMUX_TIMEOUT = 5
 # Claude Code may still be handling the paste when the Enter arrives right behind it.
 ENTER_DELAY = 0.3
+# An image path pasted on its own becomes an [Image #N] attachment in the prompt, once Claude Code has read the file.
+IMAGE_MARK = re.compile(r"\[Image #(\d+)\]")
+IMAGE_TYPES = {"image/png": (".png", (b"\x89PNG\r\n\x1a\n",)), "image/jpeg": (".jpg", (b"\xff\xd8\xff",)),
+               "image/gif": (".gif", (b"GIF87a", b"GIF89a")), "image/webp": (".webp", (b"RIFF",))}
+MAX_IMAGE_BYTES = 10 << 20
+MAX_IMAGES = 20
+# Long enough for a message sent a while after its images were pasted, or for the session to read them again.
+IMAGE_KEEP = 24 * 3600
+PASTE_DELAY = 0.3
+# Claude Code saves as it goes and removes its session record on SIGTERM; this is how long that may take.
+STOP_TIMEOUT = 5
+# The tmux window option that marks the windows this tool opened, which go away with their session.
+OWN_WINDOW = "@ctokens"
 # A new claude registers its session within a few seconds; past this the UI keeps looking for it on its own.
 START_TIMEOUT = 30
 START_POLL = 0.5
@@ -286,13 +302,66 @@ def send_problem(info):
     return None
 
 
-def send(directory, session_id, text):
-    """Type text into the prompt of a running session and press Enter, as if typed in its terminal."""
+def images_dir():
+    return Path(tempfile.gettempdir()) / f"ctokens-images-{os.getuid()}"
+
+
+def save_image(kind, data):
+    """An image pasted into the page, as a file only this user can read, for a message to attach; the path."""
+    if kind not in IMAGE_TYPES:
+        raise SendError("Only PNG, JPEG, GIF and WebP images can be attached.")
+    suffix, magics = IMAGE_TYPES[kind]
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        raise SendError(f"An image can take up to {MAX_IMAGE_BYTES >> 20} MB.")
+    if not data.startswith(magics):
+        raise SendError("The file is not the image it says it is.")
+    folder = images_dir()
+    folder.mkdir(mode=0o700, exist_ok=True)
+    if folder.is_symlink() or folder.stat().st_uid != os.getuid():
+        raise SendError(f"{folder} is not this user's own folder.")
+    now = time.time()
+    for old in folder.iterdir():
+        try:
+            if now - old.stat().st_mtime > IMAGE_KEEP:
+                old.unlink()
+        except OSError:
+            pass
+    path = folder / f"{uuid.uuid4().hex}{suffix}"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return str(path)
+
+
+def message_parts(text, images):
+    """The text cut at its [Image #N] marks, each mark that names a saved image replaced by the image's path."""
+    if not images:
+        return [text]
+    folder = images_dir()
+    parts, at = [], 0
+    for m in IMAGE_MARK.finditer(text):
+        path = images.get(m.group(1))
+        if path is None:
+            continue
+        if Path(path).parent != folder or not Path(path).is_file():
+            raise SendError(f"Image #{m.group(1)} is gone; paste it again.")
+        parts += [text[at:m.start()], {"image": path}]
+        at = m.end()
+    parts.append(text[at:])
+    return [p for p in parts if p != ""]
+
+
+def send(directory, session_id, text, images=None):
+    """Type text into the prompt of a running session and press Enter, as if typed in its terminal. images:
+    {"N": path} for the [Image #N] marks of the text, each pasted as a path that Claude Code attaches."""
     if not text.strip():
         raise SendError("The message is empty.")
     if len(text) > MAX_MESSAGE_CHARS:
         raise SendError(f"The message is longer than {MAX_MESSAGE_CHARS:,} characters.")
-    return type_in(directory, session_id, text)
+    if images is not None and (not isinstance(images, dict) or len(images) > MAX_IMAGES
+                               or not all(isinstance(k, str) and isinstance(v, str) for k, v in images.items())):
+        raise SendError(f"Expected up to {MAX_IMAGES} images as {{\"N\": path}}.")
+    return type_in(directory, session_id, message_parts(text, images))
 
 
 def rename(directory, session_id, title):
@@ -300,15 +369,19 @@ def rename(directory, session_id, title):
     return type_in(directory, session_id, f"/rename {title}")
 
 
-def type_in(directory, session_id, text):
+def type_in(directory, session_id, parts):
+    """parts: text, or a list of texts and {"image": path}, each image pasted on its own so Claude Code attaches it."""
     info = live_sessions(directory).get(session_id)
     if info is None:
         raise SendError("The conversation is not running in any Claude Code process.")
     socket, pane = target(info)
-    # A bracketed paste keeps line breaks in the prompt instead of sending each line on its own.
-    buffer = f"ctokens-{os.getpid()}-{time.monotonic_ns()}"
-    tmux(socket, "load-buffer", "-b", buffer, "-", text=text)
-    tmux(socket, "paste-buffer", "-p", "-d", "-b", buffer, "-t", pane)
+    for i, part in enumerate([parts] if isinstance(parts, str) else parts):
+        if i:
+            time.sleep(PASTE_DELAY)
+        # A bracketed paste keeps line breaks in the prompt instead of sending each line on its own.
+        buffer = f"ctokens-{os.getpid()}-{time.monotonic_ns()}"
+        tmux(socket, "load-buffer", "-b", buffer, "-", text=part["image"] if isinstance(part, dict) else part)
+        tmux(socket, "paste-buffer", "-p", "-d", "-b", buffer, "-t", pane)
     time.sleep(ENTER_DELAY)
     tmux(socket, "send-keys", "-t", pane, "Enter")
     return public(info)
@@ -360,6 +433,7 @@ def launch(cwd, command, name):
     # Typed into an interactive shell rather than run by tmux, so the user's aliases and functions for claude apply.
     tmux(None, "send-keys", "-t", pane, "-l", command)
     tmux(None, "send-keys", "-t", pane, "Enter")
+    tmux(None, "set-option", "-w", "-t", pane, OWN_WINDOW, "1")
     return pane
 
 
@@ -382,6 +456,36 @@ def go_live(directory, session_id, cwd):
         raise SendError("The conversation is already running in a Claude Code process.")
     launch(cwd, f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(session_id)}", f"claude-{session_id[:8]}")
     return wait_for(directory, lambda found, info: found == session_id)[1]
+
+
+def go_offline(directory, session_id):
+    """Stop the Claude Code process of a conversation running in tmux, as closing its terminal would; the window goes too
+    when this tool opened it, while a pane of the user's keeps its shell. {"stopped": True, "closed_window": bool}."""
+    info = live_sessions(directory).get(session_id)
+    if info is None:
+        raise SendError("The conversation is not running in any Claude Code process.")
+    socket, pane = channel(info)
+    try:
+        own = tmux(socket, "show-options", "-w", "-q", "-v", "-t", pane, OWN_WINDOW).strip() == "1"
+    except SendError:
+        own = False
+    try:
+        os.kill(info["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        raise SendError(f"Could not stop process {info['pid']}: {error.strerror or error}") from None
+    deadline = time.monotonic() + STOP_TIMEOUT
+    while session_id in live_sessions(directory):
+        if time.monotonic() > deadline:
+            raise SendError(f"Process {info['pid']} has not stopped within {STOP_TIMEOUT} s.")
+        time.sleep(START_POLL / 5)
+    if own:
+        try:
+            tmux(socket, "kill-pane", "-t", pane)
+        except SendError:
+            own = False
+    return {"stopped": True, "closed_window": own}
 
 
 def new_session(directory, cwd):
