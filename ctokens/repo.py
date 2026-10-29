@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -18,6 +19,13 @@ MAX_DIFF_BYTES = 4 << 20
 MAX_NAME_CHARS = 1024
 MAX_DIR_ENTRIES = 5000
 MAX_STATS = 200
+LOG_PAGE = 100
+MAX_LOG_SKIP = 100_000
+MAX_INCOMING = 100
+MAX_UNPUSHED = 20_000
+MAX_QUERY_CHARS = 1000
+MAX_SEARCH_MATCHES = 5000
+MAX_SEARCH_LINE = 1000
 # Untracked files come and go while a session works; the index file only changes with git add and checkouts.
 INDEX_TTL = 10.0
 
@@ -248,3 +256,127 @@ def numstat_files(text):
             i += 3
         files.append(entry)
     return files
+
+
+LOG_FORMAT = "--format=%H%x1f%P%x1f%an%x1f%aI%x1f%D%x1f%s%x1e"
+
+
+def log_records(out):
+    commits = []
+    for record in (out or b"").decode("utf-8", "replace").split("\x1e"):
+        fields = record.strip("\n").split("\x1f")
+        if len(fields) == 6:
+            commits.append({"sha": fields[0], "parents": fields[1].split(), "author": fields[2], "date": fields[3],
+                            "refs": fields[4], "subject": fields[5]})
+    return commits
+
+
+def list_commits(cwd, skip=0):
+    """A page of the history of HEAD, newest first, each commit marked pushed when a remote branch has it, with the
+    commits of the upstream branch that HEAD lacks and how far apart the two are."""
+    root = repo_root(cwd)
+    if root is None:
+        raise RepoError("not in a git repository")
+    skip = max(0, min(int(skip), MAX_LOG_SKIP))
+    branch = (git(root, "symbolic-ref", "-q", "--short", "HEAD") or b"").decode("utf-8", "replace").strip() or None
+    out = git(root, "log", LOG_FORMAT, f"--skip={skip}", f"--max-count={LOG_PAGE + 1}", "HEAD", "--")
+    if out is None:
+        return {"root": str(root), "branch": branch, "upstream": None, "commits": [], "incoming": [], "more": False,
+                "remotes": False, "ahead": 0, "behind": 0, "fetched": None}
+    commits = log_records(out)
+    more = len(commits) > LOG_PAGE
+    commits = commits[:LOG_PAGE]
+    remotes = bool((git(root, "for-each-ref", "--count=1", "refs/remotes") or b"").strip())
+    unpushed = set()
+    if remotes:
+        listed = git(root, "rev-list", f"--max-count={MAX_UNPUSHED}", "HEAD", "--not", "--remotes")
+        unpushed = set((listed or b"").decode().split())
+    for c in commits:
+        c["pushed"] = c["sha"] not in unpushed if remotes else None
+    upstream = (git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}") or b"").decode("utf-8", "replace").strip()
+    ahead = behind = 0
+    incoming = []
+    if upstream:
+        counts = (git(root, "rev-list", "--left-right", "--count", "HEAD...@{upstream}") or b"0 0").split()
+        ahead, behind = int(counts[0]), int(counts[1])
+        if behind:
+            incoming = log_records(git(root, "log", LOG_FORMAT, f"--max-count={MAX_INCOMING}", "HEAD..@{upstream}", "--"))
+    fetch_head = (git(root, "rev-parse", "--git-path", "FETCH_HEAD") or b"").decode("utf-8", "replace").strip()
+    try:
+        fetched = os.stat(root / fetch_head).st_mtime if fetch_head else None
+    except OSError:
+        fetched = None
+    return {"root": str(root), "branch": branch, "upstream": upstream or None, "ahead": ahead, "behind": behind,
+            "remotes": remotes, "fetched": fetched, "commits": commits, "incoming": incoming, "more": more, "skip": skip}
+
+
+def pathspecs(patterns, exclude):
+    """Comma-separated globs as in an editor's search: a bare name matches anywhere, ./x from the folder searched, and
+    a folder takes in what it holds."""
+    specs = []
+    for raw in (patterns or "").split(","):
+        pattern = raw.strip()
+        if not pattern:
+            continue
+        if pattern.startswith("./"):
+            pattern = pattern[2:]
+        elif not pattern.startswith(("/", "**")):
+            pattern = "**/" + pattern
+        pattern = pattern.lstrip("/").rstrip("/") or "**"
+        magic = ":(exclude,glob)" if exclude else ":(glob)"
+        specs.append(magic + pattern)
+        if not pattern.endswith("**"):
+            specs.append(f"{magic}{pattern}/**")
+    return specs
+
+
+def search(cwd, query, case=False, word=False, regex=False, include="", exclude=""):
+    """Lines of the files under cwd that hold the query, grouped by file: git's tracked and untracked files in a
+    repository, the ones .gitignore does not hide elsewhere. Binary files are left out."""
+    if not isinstance(query, str) or not query or len(query) > MAX_QUERY_CHARS or "\n" in query:
+        raise RepoError("expected a line of text to search for")
+    if not cwd or not Path(cwd).is_dir():
+        raise RepoError("not a folder")
+    folder = Path(cwd)
+    root = repo_root(folder)
+    args = ["git", "-C", str(folder), "grep", "-n", "-I", "-z", "--no-color", "-E" if regex else "-F"]
+    args += ["--untracked"] if root is not None else ["--no-index", "--exclude-standard"]
+    if not case:
+        args.append("-i")
+    if word:
+        args.append("-w")
+    args += ["-e", query, "--", *pathspecs(include, False), *pathspecs(exclude, True)]
+    files, count, truncated = {}, 0, False
+    with tempfile.TemporaryFile() as errors:
+        try:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors,
+                                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"})
+        except OSError as error:
+            raise RepoError(f"cannot run git: {error}") from None
+        timer = threading.Timer(GIT_TIMEOUT, proc.kill)
+        timer.start()
+        try:
+            for raw in proc.stdout:
+                parts = raw.rstrip(b"\n").split(b"\0", 2)
+                if len(parts) != 3 or not parts[1].isdigit():
+                    continue
+                if count >= MAX_SEARCH_MATCHES:
+                    truncated = True
+                    proc.kill()
+                    break
+                rel = parts[0].decode("utf-8", "replace")
+                files.setdefault(rel, []).append({"line": int(parts[1]),
+                                                  "text": parts[2][:MAX_SEARCH_LINE * 4].decode("utf-8", "replace")[:MAX_SEARCH_LINE]})
+                count += 1
+        finally:
+            proc.stdout.close()
+            code = proc.wait()
+            timed_out = not timer.is_alive() and not truncated and code < 0
+            timer.cancel()
+        errors.seek(0)
+        message = errors.read().decode("utf-8", "replace").strip()
+    if code not in (0, 1) and not truncated and not timed_out:
+        raise RepoError(message.splitlines()[-1].removeprefix("fatal: ") if message else "the search failed")
+    return {"folder": str(folder), "root": str(root) if root else None, "matches": count, "truncated": truncated,
+            "timed_out": timed_out, "files": [{"path": str(folder / rel), "display": rel, "matches": found}
+                                              for rel, found in files.items()]}

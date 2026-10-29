@@ -80,6 +80,7 @@ const ICON_PATHS = {
   chevron: ["m6 9 6 6 6-6"],
   failed: ["M18 6 6 18", "m6 6 12 12"],
   folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+  search: ["M11 3a8 8 0 1 0 0 16a8 8 0 1 0 0-16z", "m21 21-4.3-4.3"],
   star: ["m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"],
 };
 
@@ -160,28 +161,37 @@ function copyable(el, value) {
 const asWrite = (content) => (typeof content === "function" ? content : () => writeText(content));
 
 // content: the text to copy, or a write() function for anything else; formats: [label, content] pairs offered on
-// right-click. Without a label the button shows only the clipboard icon, so the title doubles as its accessible name.
-function copyButton(content, title, label = null, formats = null) {
+// right-click, with paste, the text a right-click can also type into a shell on screen. Without a label the button
+// shows only the clipboard icon, so the title doubles as its accessible name.
+function copyButton(content, title, label = null, formats = null, paste = typeof content === "string" ? content : null) {
   const idle = () => label || icon("clipboard");
-  const button = h("button", { class: label ? "btn copy-btn" : "btn copy-btn icon-btn", type: "button", title,
-    "aria-label": label ? null : title }, idle());
+  const button = h("button", { class: label ? "btn copy-btn" : "btn copy-btn icon-btn", type: "button",
+    title: paste && !formats ? `${title} · right-click to paste into a shell on screen` : title, "aria-label": label ? null : title }, idle());
   const copy = (c) => copyWith(asWrite(c), button, (ok) => {
     if (ok == null) button.replaceChildren(idle());
     else button.replaceChildren(label ? (ok ? "Copied" : "Copy failed") : icon(ok ? "check" : "failed"));
   });
   button.addEventListener("click", () => copy(content));
-  if (formats) {
+  if (formats || paste) {
     button.setAttribute("aria-haspopup", "menu");
     button.addEventListener("contextmenu", (e) => {
+      const shells = paste ? pasteEntries(paste) : [];
+      if (!formats && !shells.length) return;
       e.preventDefault();
-      openCopyMenu(button, formats, copy);
+      openCopyMenu(button, formats || [["Copy", content]], copy, shells);
     });
   }
   return button;
 }
 
+const pasteFormat = (formats) => {
+  const found = formats.find(([label, content]) => typeof content === "string" && (label === "Plain text" || label === "Markdown"));
+  return found ? found[1] : null;
+};
+
 // A click copies the first format.
-const copyMenuButton = (title, formats) => copyButton(formats[0][1], `${title} · right-click for other formats`, null, formats);
+const copyMenuButton = (title, formats, paste = pasteFormat(formats)) => copyButton(formats[0][1],
+  `${title} · right-click for other formats${paste ? " or to paste into a shell" : ""}`, null, formats, paste);
 
 let copyMenu = null;
 
@@ -194,17 +204,25 @@ function closeCopyMenu(refocus) {
   if (refocus) button.focus();
 }
 
-function openCopyMenu(button, formats, copy) {
+// shells: [label, act, tip, off] entries that paste into a shell on screen, under the formats.
+function openCopyMenu(button, formats, copy, shells = []) {
   closeCopyMenu(false);
-  const items = formats.map(([label, content], i) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item",
+  const copies = formats.map(([label, content], i) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item",
     onclick: () => { closeCopyMenu(true); copy(content); } }, label, i ? null : h("span", { class: "muted" }, "click")));
-  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": "Copy as" }, h("div", { class: "copy-menu-head" }, "Copy as"), items);
+  const pastes = shells.map(([label, act, tip, off]) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item", title: tip,
+    disabled: off, onclick: () => { closeCopyMenu(false); act(); } }, label));
+  const items = [...copies, ...pastes].filter((b) => !b.disabled);
+  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": "Copy as" }, h("div", { class: "copy-menu-head" }, "Copy as"), copies,
+    pastes.length ? [h("div", { class: "copy-menu-head" }, "Paste"), pastes] : null);
   document.body.append(menu);
   const r = button.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${r.bottom + 4 + menu.offsetHeight > innerHeight ? Math.max(8, r.top - 4 - menu.offsetHeight) : r.bottom + 4}px`;
   const outside = (e) => { if (!menu.contains(e.target)) closeCopyMenu(false); };
-  const away = () => closeCopyMenu(false);
+  // Only a scroll that moves the button: a shell printing on screen scrolls too.
+  const away = (e) => {
+    if (e.type !== "scroll" || e.target === document || (e.target.contains && e.target.contains(button))) closeCopyMenu(false);
+  };
   const keys = (e) => {
     const i = items.indexOf(document.activeElement);
     if (e.key === "Escape" || e.key === "Tab") closeCopyMenu(e.key === "Escape");
@@ -723,6 +741,8 @@ function projectMenu(e, id, project) {
   pointMenu(e.clientX, e.clientY, lastFolder(project), [
     ["▦ Browse the folder", () => openDir(id, project), keyed(`Browse ${project}`)],
     ["❯ Shell here", () => openShell(id, project), keyed(`An interactive shell in ${project}`)],
+    ["☰ Commits", () => openCommits(id, project), keyed(`The commits of ${project}'s repository, and which are pushed`)],
+    [h("span", {}, icon("search"), " Search the files"), () => openSearch(id, project), keyed(`Search the files of ${project}`)],
     ["New session here", () => startSession(id, "new-session"), keyed(START_ACTIONS["new-session"].title)],
     ["Only this project's conversations", () => filterProject(project)],
     ["Totals of this project", () => projectTotals(project)],
@@ -1448,11 +1468,12 @@ function convHead(route) {
   const title = (row && row.title) || convTasks.get(route.id) || (row && row.new ? "New session" : "Untitled conversation");
   const resume = row ? `cd ${shellQuote(row.project)} && claude --resume ${shellQuote(route.id)}` : null;
   const live = liveOf(route.id);
+  const folder = row ? row.project : live ? live.cwd : null;
   const meta = [live ? h("span", {}, liveBadge(live, true, route.view === "messages" ? null : route.id, route.id), ` PID ${live.pid}`) : null,
     h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
       resume && !live ? copyButton(resume, resume, "Copy resume") : null),
     h("span", { class: "conv-actions-head" }, live ? null : startButton(route.id, "go-live"), startButton(route.id, "new-session"),
-      row || live ? [dirButton(route.id, row ? row.project : live.cwd), shellButton(route.id, row ? row.project : live.cwd)] : null,
+      folder ? [dirButton, shellButton, commitsButton, searchButton].map((button) => button(route.id, folder)) : null,
       startError(route.id))];
   if (row) {
     meta.push(h("span", { title: "Right-click for more", oncontextmenu: (e) => projectMenu(e, route.id, row.project) },
@@ -1845,7 +1866,7 @@ function imageBlock(b) {
   if (!b.data || !IMAGE_TYPES.has(b.media_type)) return h("span", { class: "chip" }, `${caption} · not in the log`);
   const img = h("img", { src: `data:${b.media_type};base64,${b.data}`, alt: "Image from the conversation", loading: "lazy",
     title: "Click to toggle full size", onclick: () => img.classList.toggle("full") });
-  return h("figure", { class: "img-block" }, img, h("figcaption", {}, caption, copyMenuButton("Copy the image", imageFormats(b, img))));
+  return h("figure", { class: "img-block" }, img, h("figcaption", {}, caption, copyMenuButton("Copy the image", imageFormats(b, img), null)));
 }
 
 function pngOf(b, img) {

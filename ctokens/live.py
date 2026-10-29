@@ -31,6 +31,12 @@ MAX_IMAGES = 20
 # Long enough for a message sent a while after its images were pasted, or for the session to read them again.
 IMAGE_KEEP = 24 * 3600
 PASTE_DELAY = 0.3
+# Claude Code wraps a paste of 20 characters or more in <pasted_content> tags, and takes over 800 characters read at
+# once for a paste too, so a message is typed in smaller batches.
+TYPE_BATCH = 400
+TYPE_DELAY = 0.03
+# A file name after @ keeps the completion menu open, and the Enter would pick from it instead of sending.
+OPEN_MENTION = re.compile(r"(?:^|\s)@\S*$")
 # Claude Code saves as it goes and removes its session record on SIGTERM; this is how long that may take.
 STOP_TIMEOUT = 5
 # The tmux window option that marks the windows this tool opened, which go away with their session.
@@ -378,13 +384,36 @@ def type_in(directory, session_id, parts):
     for i, part in enumerate([parts] if isinstance(parts, str) else parts):
         if i:
             time.sleep(PASTE_DELAY)
-        # A bracketed paste keeps line breaks in the prompt instead of sending each line on its own.
-        buffer = f"ctokens-{os.getpid()}-{time.monotonic_ns()}"
-        tmux(socket, "load-buffer", "-b", buffer, "-", text=part["image"] if isinstance(part, dict) else part)
-        tmux(socket, "paste-buffer", "-p", "-d", "-b", buffer, "-t", pane)
+        if isinstance(part, dict):
+            buffer = f"ctokens-{os.getpid()}-{time.monotonic_ns()}"
+            tmux(socket, "load-buffer", "-b", buffer, "-", text=part["image"])
+            tmux(socket, "paste-buffer", "-p", "-d", "-b", buffer, "-t", pane)
+        else:
+            type_text(socket, pane, part)
     time.sleep(ENTER_DELAY)
     tmux(socket, "send-keys", "-t", pane, "Enter")
     return public(info)
+
+
+def type_text(socket, pane, text):
+    """Typed as keys so the message reads as the user's own words, with Ctrl+J for its line breaks, as Enter would send.
+    A Tab would complete a name instead of being typed, so it goes in as spaces."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+    if OPEN_MENTION.search(text):
+        text += " "
+    keys, size = [], 0
+    for i, line in enumerate(text.split("\n")):
+        pieces = [None] if i else []
+        pieces += [line[at:at + TYPE_BATCH] for at in range(0, len(line), TYPE_BATCH)]
+        for piece in pieces:
+            if keys and size + len(piece or " ") > TYPE_BATCH:
+                tmux(socket, *keys[:-1])
+                time.sleep(TYPE_DELAY)
+                keys, size = [], 0
+            keys += ["send-keys", "-t", pane, *(["C-j"] if piece is None else ["-l", "--", piece]), ";"]
+            size += len(piece or " ")
+    if keys:
+        tmux(socket, *keys[:-1])
 
 
 def dialog_step(step):

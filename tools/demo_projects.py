@@ -3,7 +3,8 @@
 Usage: python3 tools/demo_projects.py OUTPUT_DIR   (writes OUTPUT_DIR/projects; same seed, same files)
 
 The api-gateway project is also a real git repository at OUTPUT_DIR/home/dev/projects/api-gateway, so its links to
-commits and files open, and OUTPUT_DIR/home holds a .bashrc with a neutral prompt for the shell panel.
+commits and files open, with a remote in OUTPUT_DIR/home/dev/remotes that has all its commits but the last, and
+OUTPUT_DIR/home holds a .bashrc with a neutral prompt for the shell panel.
 """
 import json
 import os
@@ -216,6 +217,13 @@ def build_repo(repo):
         git("add", "-A")
         git("commit", "-q", "-m", message)
         shas.append(git("rev-parse", "--short=7", "HEAD"))
+    # A remote with all but the last commit, so the history has commits pushed and one still to push.
+    remote = repo.parent.parent / "remotes" / "api-gateway.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True, env=env, stdout=subprocess.PIPE)
+    git("remote", "add", "origin", str(remote))
+    git("push", "-q", "origin", "HEAD~1:refs/heads/main")
+    git("fetch", "-q", "origin")
+    git("branch", "-q", "--set-upstream-to=origin/main", "main")
     return shas
 
 

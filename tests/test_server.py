@@ -364,6 +364,16 @@ class ApiErrorsTest(ServerTestCase):
             with self.subTest(view=view):
                 self.assertEqual(self.get_json(f"/api/conversations/{AMBIGUOUS}{view}"), (409, expected))
 
+    def test_client_gone_before_the_answer_is_quiet(self):
+        for error, logged in ((BrokenPipeError(32, "Broken pipe"), False), (ConnectionResetError(104, "reset"), False),
+                              (RuntimeError("boom"), True)):
+            with self.subTest(error=type(error).__name__):
+                stderr = io.StringIO()
+                with mock.patch.object(Handler, "respond", side_effect=error), contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(http.client.HTTPException):
+                        self.request("/api/conversations")
+                self.assertEqual("Traceback" in stderr.getvalue(), logged, stderr.getvalue())
+
     def test_unexpected_exception(self):
         stderr = io.StringIO()
         with mock.patch("ctokens.web.server.conversation_rows", side_effect=RuntimeError("secret detail")), \

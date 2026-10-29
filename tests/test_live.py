@@ -102,17 +102,24 @@ class SendTest(LiveTestCase):
     def info(self):
         return live.live_sessions(self.sessions)[CONV_A]
 
-    def test_pastes_then_presses_enter(self):
+    def test_types_then_presses_enter(self):
         sent = live.send(self.sessions, CONV_A, "first line\nsecond line")
         self.assertEqual(sent["pid"], 41)
         commands = [call.args[0] for call in self.run.call_args_list if "capture-pane" not in call.args[0]]
         self.assertEqual(commands[0], ["tmux", "-S", SOCKET, "display-message", "-p", "-t", PANE, "#{pane_tty}"])
-        self.assertEqual(commands[1][:4], ["tmux", "-S", SOCKET, "load-buffer"])
-        self.assertEqual([c for c in self.run.call_args_list if "load-buffer" in c.args[0]][0].kwargs["input"],
-                         "first line\nsecond line")
-        buffer = commands[1][5]
-        self.assertEqual(commands[2], ["tmux", "-S", SOCKET, "paste-buffer", "-p", "-d", "-b", buffer, "-t", PANE])
-        self.assertEqual(commands[3], ["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "Enter"])
+        self.assertEqual(commands[1], ["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "-l", "--", "first line", ";",
+                                       "send-keys", "-t", PANE, "C-j", ";", "send-keys", "-t", PANE, "-l", "--", "second line"])
+        self.assertEqual(commands[2], ["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "Enter"])
+        self.assertFalse([c for c in commands if "paste-buffer" in c])
+
+    def test_typing_in_batches_claude_code_does_not_take_for_a_paste(self):
+        text = "\r\n".join(["a\tb", "x" * 1000, "", "see @file"])
+        live.send(self.sessions, CONV_A, text)
+        batches = [c.args[0][3:] for c in self.run.call_args_list if "send-keys" in c.args[0] and c.args[0][-1] != "Enter"]
+        typed = "".join("\n" if a == "C-j" else a for b in batches for i, a in enumerate(b) if a == "C-j" or b[i - 1] == "--")
+        self.assertEqual(typed, "a    b\n" + "x" * 1000 + "\n\nsee @file ")
+        for batch in batches:
+            self.assertLessEqual(sum(len(a) for i, a in enumerate(batch) if i and batch[i - 1] == "--"), live.TYPE_BATCH)
 
     def images(self):
         folder = Path(self.tmp.name) / "images"
@@ -123,12 +130,13 @@ class SendTest(LiveTestCase):
         self.images()
         first = live.save_image("image/png", PNG)
         live.send(self.sessions, CONV_A, "look [Image #1] and [Image #9]\nthen [Image #1]", {"1": first})
+        commands = [c.args[0] for c in self.run.call_args_list if "capture-pane" not in c.args[0]][1:]
         pasted = [c.kwargs["input"] for c in self.run.call_args_list if "load-buffer" in c.args[0]]
-        self.assertEqual(pasted, ["look ", first, " and [Image #9]\nthen ", first])
-        self.assertEqual(len([c for c in self.run.call_args_list if "paste-buffer" in c.args[0]]), 4)
-        commands = [c.args[0] for c in self.run.call_args_list]
-        enter = commands.index(["tmux", "-S", SOCKET, "send-keys", "-t", PANE, "Enter"])
-        self.assertGreater(enter, max(i for i, c in enumerate(commands) if "paste-buffer" in c))
+        self.assertEqual(pasted, [first, first])
+        self.assertEqual([c[3] if c[3] == "paste-buffer" else c[3:] for c in commands if c[3] in ("send-keys", "paste-buffer")], [
+            ["send-keys", "-t", PANE, "-l", "--", "look "], "paste-buffer",
+            ["send-keys", "-t", PANE, "-l", "--", " and [Image #9]", ";", "send-keys", "-t", PANE, "C-j", ";",
+             "send-keys", "-t", PANE, "-l", "--", "then "], "paste-buffer", ["send-keys", "-t", PANE, "Enter"]])
 
     def test_images_that_are_gone_or_elsewhere(self):
         folder = self.images()
@@ -221,8 +229,7 @@ class SendTest(LiveTestCase):
 
     def test_rename_types_the_rename_command(self):
         live.rename(self.sessions, CONV_A, "New name")
-        load = next(call for call in self.run.call_args_list if "load-buffer" in call.args[0])
-        self.assertEqual(load.kwargs["input"], "/rename New name")
+        self.assertIn(["send-keys", "-t", PANE, "-l", "--", "/rename New name"], [c.args[0][3:] for c in self.run.call_args_list])
 
     def test_tmux_failure(self):
         self.run.side_effect = lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "no server running")

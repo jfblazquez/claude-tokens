@@ -93,12 +93,14 @@ function setDockMode(mode) {
   for (const item of dock.items) if (item.onShow) requestAnimationFrame(() => item.onShow());
 }
 
-const KIND_ICONS = { commit: "⎇", file: "▤", dir: "▦", shell: "❯", pick: "≡" };
+const KIND_ICONS = { commit: "⎇", commits: "☰", file: "▤", dir: "▦", shell: "❯", pick: "≡" };
+// Fonts seldom have a magnifying glass, so search draws its own.
+const kindIcon = (kind) => (kind === "search" ? icon("search") : KIND_ICONS[kind]);
 
 function panelTab(item) {
   return item.tabEl = middleCloses(h("div", { class: `dock-tab${item.changed ? " changed" : ""}`, role: "tab",
     "aria-selected": item === dock.active ? "true" : "false", title: item.tip || item.title, onclick: () => focusPanel(item) },
-  h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), h("span", { class: "dock-title" }, item.title),
+  h("span", { class: "dock-kind", "aria-hidden": "true" }, kindIcon(item.kind)), h("span", { class: "dock-title" }, item.title),
   h("button", { class: "dock-x", type: "button", title: "Close (middle click on the tab)", "aria-label": `Close ${item.title}`,
     onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×")), item);
 }
@@ -133,7 +135,7 @@ function openPanelMenu(button) {
     "aria-checked": opts.role ? String(!!opts.on) : null, title: opts.tip || null,
     onclick: () => { closeCopyMenu(false); act(); } }, label);
   const items = [
-    ...dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), " ",
+    ...dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, kindIcon(item.kind)), " ",
       h("span", { class: "dock-title" }, item.title)], () => focusPanel(item), { on: item === dock.active, tip: item.tip || item.title })),
     ...DOCK_MODES.map(([mode, label]) => entry(label, () => setDockMode(mode), { role: "menuitemradio", on: mode === dock.mode })),
     entry("Close all panels", closeAll),
@@ -263,11 +265,11 @@ function drawFloating() {
     }
     if (item.min) {
       tray.push(item.tabEl = middleCloses(h("button", { class: `tray-item${item.changed ? " changed" : ""}`, type: "button", title: item.title,
-        onclick: () => focusPanel(item) }, KIND_ICONS[item.kind], " ", h("span", {}, item.title)), item));
+        onclick: () => focusPanel(item) }, kindIcon(item.kind), " ", h("span", {}, item.title)), item));
       return;
     }
     item.body.hidden = false;
-    const title = item.tabEl = h("div", { class: `win-title${item.changed ? " changed" : ""}` }, h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]),
+    const title = item.tabEl = h("div", { class: `win-title${item.changed ? " changed" : ""}` }, h("span", { class: "dock-kind", "aria-hidden": "true" }, kindIcon(item.kind)),
       h("span", { class: "dock-title", title: item.tip || item.title }, item.tip || item.title), panelMenu(null),
       h("button", { class: "dock-x", type: "button", title: "Minimize", "aria-label": "Minimize",
         onclick: (e) => { e.stopPropagation(); item.min = true; drawDock(); } }, "–"),
@@ -556,7 +558,7 @@ function fileView(conv, item, data, keep) {
   });
   // After the browser has settled the selection; the mouseup of a double-click belongs to the double-click.
   box.addEventListener("mouseup", (e) => {
-    if (e.button === 0 && e.detail < 2) setTimeout(() => selectionMenu(e.clientX, e.clientY, code, data, lang, tell), 0);
+    if (e.button === 0 && e.detail < 2) setTimeout(() => selectionMenu(e.clientX, e.clientY, conv, code, data, lang, tell), 0);
   });
   const notes = [data.binary ? "Binary file: not shown." : null,
     data.truncated ? `Only the first ${fmtBytes(data.text.length)} of ${fmtBytes(data.size)} are shown.` : null].filter(Boolean);
@@ -705,8 +707,11 @@ function dirView(item) {
   const up = h("button", { class: "btn small", type: "button", title: "Parent folder (Backspace)", "aria-label": "Parent folder",
     onclick: () => goUp() }, "↑");
   const shellHere = h("button", { class: "btn", type: "button", onclick: () => openShell(conv, item.path) }, "❯ Shell here");
+  const searchHere = h("button", { class: "btn", type: "button", title: "Search the files of this folder",
+    onclick: () => openSearch(conv, item.path) }, icon("search"), " Search");
   const scroll = h("div", { class: "dir-scroll" }, list);
-  item.body.replaceChildren(h("div", { class: "panel-bar" }, up, crumbs, h("span", { class: "spacer" }), filter, hidden, shellHere),
+  item.body.replaceChildren(h("div", { class: "panel-bar" }, up, crumbs, h("span", { class: "spacer" }), filter, hidden, searchHere,
+    shellHere),
     scroll, note);
   item.body.addEventListener("keydown", (e) => {
     if (e.target === filter) return;
@@ -840,7 +845,7 @@ function dirView(item) {
 
 // The lines a selection in a file spans, and what can be done with them: copied, with the path and lines as a header,
 // or put into the message to the session.
-function selectionMenu(x, y, code, data, lang, tell) {
+function selectionMenu(x, y, conv, code, data, lang, tell) {
   const selection = getSelection();
   if (selection.isCollapsed || !selection.rangeCount) return;
   const range = selection.getRangeAt(0), chosen = selection.toString();
@@ -863,15 +868,66 @@ function selectionMenu(x, y, code, data, lang, tell) {
     [`Copy with ${baseName(ref)}`, () => copy(`${ref}\n${chosen}`)],
     ["Ask Claude", ask, composerReady() ? "Put it into the message box, where its cursor is, without sending it"
       : "Needs the Conversation tab of a live session open"],
+    ...findEntry(conv, chosen, data.root || dirOf(data.path)),
+    ...pasteEntries(chosen),
   ]);
+}
+
+// A selection in a conversation: copied, quoted into the message box, looked for in the files or typed into a shell.
+const SELECTION_SKIP = "input, textarea, select, button, .composer, .xterm, #conv-head, .copy-menu";
+
+function conversationSelection(e) {
+  const main = $("main");
+  if (e.button !== 0 || !app.route || !app.route.id || !main.contains(e.target) || e.target.closest(SELECTION_SKIP)) return;
+  setTimeout(() => {
+    const selection = getSelection();
+    if (selection.isCollapsed || !selection.rangeCount) return;
+    const range = selection.getRangeAt(0), chosen = selection.toString();
+    const common = range.commonAncestorContainer;
+    const el = common.nodeType === 1 ? common : common.parentElement;
+    if (!chosen.trim() || !main.contains(el) || el.closest(SELECTION_SKIP)) return;
+    const conv = app.route.id;
+    const quote = () => {
+      if (!insertIntoComposer(chosen.replace(/\n+$/, "").split("\n").map((line) => `> ${line}`.trimEnd()).join("\n"), true)) {
+        flash("No message box: open the Conversation tab of a live session");
+      }
+    };
+    pointMenu(e.clientX, e.clientY, "Selection", [
+      ["Copy", () => copyWith(() => writeText(chosen), flasher, (ok) => { if (ok != null) flash(ok ? "Copied" : "Copy failed"); })],
+      ["Ask Claude", quote, composerReady() ? "Quote it in the message box, where its cursor is, without sending it"
+        : "Needs the Conversation tab of a live session open"],
+      ...findEntry(conv, chosen, null),
+      ...pasteEntries(chosen),
+    ]);
+  }, 0);
+}
+
+// Its first line, searched for in the files of a folder: the conversation's when there is none.
+function findEntry(conv, text, cwd) {
+  const query = text.split("\n").map((line) => line.trim()).find(Boolean) || "";
+  if (!query || query.length > 1000) return [];
+  return [[h("span", {}, icon("search"), " Find in files"), () => openSearch(conv, cwd, query),
+    `Look for “${query.length > 60 ? `${query.slice(0, 60)}…` : query}” in the files of ${cwd || "the conversation's folder"}`]];
+}
+
+// A short message in a corner of the page, for what has no panel to say it in.
+const flasher = { el: null, timer: null };
+
+function flash(message) {
+  if (!flasher.el) flasher.el = h("div", { class: "fv-note flash", "aria-live": "polite" });
+  if (!flasher.el.isConnected) document.body.append(flasher.el);
+  flasher.el.textContent = message;
+  clearTimeout(flasher.timer);
+  flasher.timer = setTimeout(() => { flasher.el.textContent = ""; }, 4000);
 }
 
 // A menu at a point of the page, closed like the copy menus: outside, Escape, scrolling.
 function pointMenu(x, y, title, entries) {
   closeCopyMenu(false);
-  const items = entries.map(([label, act, tip]) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item", title: tip || null,
-    onclick: () => { closeCopyMenu(false); act(); } }, label));
-  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": title }, h("div", { class: "copy-menu-head" }, title), items);
+  const buttons = entries.map(([label, act, tip, off]) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item",
+    title: tip || null, disabled: !!off, onclick: () => { closeCopyMenu(false); act(); } }, label));
+  const items = buttons.filter((b) => !b.disabled);
+  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": title }, h("div", { class: "copy-menu-head" }, title), buttons);
   document.body.append(menu);
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${y + 12 + menu.offsetHeight > innerHeight ? Math.max(8, y - 12 - menu.offsetHeight) : y + 12}px`;
@@ -992,6 +1048,275 @@ function commitView(conv, item, data) {
       h("button", { class: "btn small", type: "button", onclick: () => { for (const b of fileBoxes.values()) b.open = false; } }, "Collapse all")),
     data.truncated ? h("div", { class: "notice" }, "The patch is too long; only its beginning is shown.") : null),
   h("div", { class: "commit-files" }, files));
+}
+
+// ---------- commit history ----------
+// As editors put it: "3 hours ago", with the date itself in the title.
+function ago(when) {
+  const seconds = Math.max(0, (Date.now() - when) / 1000);
+  for (const [unit, size] of [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]]) {
+    if (seconds >= size) {
+      const n = Math.floor(seconds / size);
+      return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+    }
+  }
+  return "just now";
+}
+
+// One panel per folder, for the repository it is in; cwd null is the conversation's folder.
+function openCommits(conv, cwd = null) {
+  const problem = keyProblem();
+  if (problem) return alert(problem);
+  openPanel(`commits:${cwd || conv}`, "Commits", "commits", conv, (item) => {
+    item.body.append(skeleton(10));
+    item.view = commitsView(item, cwd);
+    // Pushes and commits made meanwhile show up when the panel comes back into view.
+    item.onShow = () => { if (Date.now() - item.view.loaded > 5000) item.view.load(); };
+  });
+}
+
+function refChips(refs) {
+  return refs ? refs.split(", ").map((ref) => {
+    const head = ref.startsWith("HEAD -> ");
+    const name = head ? ref.slice(8) : ref.replace(/^tag: /, "");
+    return h("span", { class: `chip${head ? " main" : ref.startsWith("tag: ") ? " tag" : ""}`, title: head ? "The branch checked out" : ref }, name);
+  }) : [];
+}
+
+function commitsView(item, cwd) {
+  const conv = item.conv;
+  const state = { data: null, commits: [], loading: false };
+  const status = h("div", { class: "log-status" });
+  const list = h("div", { class: "log-list", role: "list" });
+  const more = h("button", { class: "btn small", type: "button", hidden: true, onclick: () => load(state.commits.length) }, "Load more");
+  const refresh = h("button", { class: "btn small", type: "button", title: "Read the history again", onclick: () => load() }, "Refresh");
+  const shellHere = h("button", { class: "btn small", type: "button", title: "A shell in the repository, to push or pull",
+    onclick: () => openShell(conv, (state.data && state.data.root) || cwd) }, "❯ Shell");
+  const view = { loaded: 0, load };
+
+  function row(c, mark) {
+    const when = Date.parse(c.date);
+    const marks = { out: ["↑", "Not pushed: no remote branch has it yet"], in: ["↓", "On the upstream branch, not here yet: pull it"],
+      pushed: ["·", "Pushed"], none: ["", ""] };
+    const [sign, tip] = marks[mark];
+    return h("button", { class: `log-row ${mark}`, type: "button", role: "listitem",
+      title: `${c.sha}\n${c.subject}\n${c.author} · ${new Date(when).toISOString().replace("T", " ").slice(0, 16)} UTC${tip ? `\n${tip}` : ""}`,
+      onclick: () => openCommit(conv, c.sha, null, state.data.root) },
+    h("span", { class: "log-mark", "aria-label": tip || null }, sign),
+    h("span", { class: "log-subject" }, c.parents.length > 1 ? h("span", { class: "muted" }, "⑂ ") : null, c.subject, refChips(c.refs)),
+    h("span", { class: "log-meta muted" }, `${c.author} · ${ago(when)}`),
+    h("span", { class: "log-sha mono muted" }, c.sha.slice(0, 7)));
+  }
+
+  function summary(data) {
+    if (!data.remotes) return "No remote: nothing here is pushed anywhere.";
+    if (!data.upstream) {
+      const out = state.commits.filter((c) => c.pushed === false).length;
+      return `${data.branch ? "No upstream branch" : "Detached HEAD"}${out ? ` · ${out}${data.more && out === state.commits.length ? "+" : ""} not on any remote` : ""}`;
+    }
+    if (!data.ahead && !data.behind) return `Up to date with ${data.upstream}`;
+    return [data.ahead ? `↑ ${data.ahead} to push` : null, data.behind ? `↓ ${data.behind} to pull` : null].filter(Boolean).join(" · ")
+      + ` · ${data.upstream}`;
+  }
+
+  function draw() {
+    const data = state.data;
+    item.title = `${data.branch || "HEAD"} · commits`;
+    item.tip = `Commits of ${data.root}`;
+    drawDock();
+    status.replaceChildren(h("b", { class: "mono" }, `⎇ ${data.branch || "detached HEAD"}`), h("span", {}, summary(data)),
+      data.fetched ? h("span", { class: "muted", title: new Date(data.fetched * 1000).toISOString() }, `fetched ${ago(data.fetched * 1000)}`) : null);
+    const mark = (c) => (c.pushed === false ? "out" : c.pushed ? "pushed" : "none");
+    list.replaceChildren(...(data.incoming.length ? [h("div", { class: "log-group" }, `Incoming from ${data.upstream}`),
+      ...data.incoming.map((c) => row(c, "in")), h("div", { class: "log-group" }, "Commits")] : []),
+    ...state.commits.map((c) => row(c, mark(c))),
+    ...(state.commits.length ? [] : [h("div", { class: "muted pad" }, "No commits yet.")]));
+    more.hidden = !data.more;
+  }
+
+  async function load(skip = 0) {
+    if (state.loading) return;
+    state.loading = true;
+    const params = new URLSearchParams();
+    if (skip) params.set("skip", skip);
+    if (cwd) params.set("cwd", cwd);
+    try {
+      const data = await api(`${convApi(conv, "/commits")}?${params}`, { headers: sendHeaders() });
+      state.commits = skip ? state.commits.concat(data.commits) : data.commits;
+      state.data = data;
+      view.loaded = Date.now();
+      if (!item.body.contains(list)) {
+        item.body.replaceChildren(h("div", { class: "panel-bar" }, status, h("span", { class: "spacer" }), refresh, shellHere),
+          h("div", { class: "dir-scroll" }, list, h("div", { class: "pad" }, more)));
+      }
+      draw();
+    } catch (err) {
+      if (!state.data) panelError(item, err);
+      else flash(err.message);
+    } finally {
+      state.loading = false;
+    }
+  }
+  load();
+  return view;
+}
+
+// ---------- search in files ----------
+const SEARCH_KEY = "ctokens.search";
+const SEARCH_OPEN_FILES = 100;
+
+// One panel per folder; a query from a selection runs in the panel already open.
+function openSearch(conv, cwd = null, query = null) {
+  const problem = keyProblem();
+  if (problem) return alert(problem);
+  const item = openPanel(`search:${cwd || conv}`, "Search", "search", conv, (it) => {
+    it.view = searchView(it, cwd);
+    it.onShow = () => it.view.focus();
+  });
+  if (query) item.view.run(query);
+}
+
+// The pattern as the browser reads it, to mark the matches; git's extended regular expressions mostly agree.
+function searchPattern(query, opts) {
+  let source = opts.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (opts.word) source = `(?<![\\w])(?:${source})(?![\\w])`;
+  try {
+    return new RegExp(source, opts.case ? "g" : "gi");
+  } catch (_) {
+    return null;
+  }
+}
+
+// The line from a little before its first match, with every match marked.
+function searchLine(text, pattern) {
+  const ranges = [];
+  if (pattern) {
+    pattern.lastIndex = 0;
+    for (let m = pattern.exec(text); m && ranges.length < 50; m = pattern.exec(text)) {
+      if (!m[0]) {
+        pattern.lastIndex++;
+        continue;
+      }
+      ranges.push([m.index, m.index + m[0].length]);
+    }
+  }
+  const lead = text.length - text.trimStart().length;
+  const from = ranges.length && ranges[0][0] - lead > 60 ? ranges[0][0] - 30 : lead;
+  const parts = from > lead ? ["…"] : [];
+  let at = from;
+  for (const [a, b] of ranges) {
+    if (b <= at) continue;
+    parts.push(text.slice(at, Math.max(at, a)), h("mark", {}, text.slice(Math.max(at, a), b)));
+    at = b;
+  }
+  parts.push(text.slice(at));
+  return parts;
+}
+
+function searchView(item, cwd) {
+  const conv = item.conv;
+  let saved = {};
+  try {
+    saved = JSON.parse(stored(SEARCH_KEY, "{}")) || {};
+  } catch (_) { /* defaults */ }
+  const opts = { case: !!saved.case, word: !!saved.word, regex: !!saved.regex };
+  const keep = () => store(SEARCH_KEY, JSON.stringify({ ...opts, include: include.value, exclude: exclude.value }));
+  const onEnter = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      run();
+    }
+  };
+  const input = h("input", { class: "search-q", type: "search", placeholder: "Search", "aria-label": "Search in files", spellcheck: "false",
+    autocomplete: "off", onkeydown: onEnter });
+  const toggle = (name, label, tip) => {
+    const b = h("button", { class: "search-opt", type: "button", title: tip, "aria-label": tip, "aria-pressed": String(opts[name]),
+      onclick: () => {
+        opts[name] = !opts[name];
+        b.setAttribute("aria-pressed", String(opts[name]));
+        keep();
+        if (input.value) run();
+      } }, label);
+    return b;
+  };
+  const glob = (placeholder, label, value) => h("input", { class: "search-glob", type: "text", placeholder, "aria-label": label, value: value || "",
+    spellcheck: "false", autocomplete: "off", onkeydown: onEnter, onchange: keep });
+  const include = glob("e.g. *.py, src/", "Files to include", saved.include);
+  const exclude = glob("e.g. tests/, *.min.js", "Files to exclude", saved.exclude);
+  const filters = h("details", { class: "search-filters", open: !!(saved.include || saved.exclude) },
+    h("summary", { title: "Comma-separated globs: *.py anywhere, ./build/ from the folder searched" }, "Files to include and exclude"),
+    h("label", {}, "Include", include), h("label", {}, "Exclude", exclude));
+  const where = h("div", { class: "muted search-where mono" }, cwd || "");
+  const summary = h("div", { class: "search-summary", "aria-live": "polite" });
+  const results = h("div", { class: "search-results" });
+  const collapse = h("button", { class: "btn small", type: "button", hidden: true,
+    onclick: () => { for (const d of results.querySelectorAll("details")) d.open = false; } }, "Collapse all");
+  item.body.replaceChildren(h("div", { class: "search-form" },
+    h("div", { class: "search-row" }, input, toggle("case", "Aa", "Match case"), toggle("word", "ab", "Match whole word"),
+      toggle("regex", ".*", "Use a regular expression")), filters, where),
+  h("div", { class: "search-bar" }, summary, collapse), h("div", { class: "dir-scroll" }, results));
+  let seq = 0;
+
+  async function run(query = input.value) {
+    input.value = query;
+    const n = ++seq;
+    if (!query) {
+      results.replaceChildren();
+      summary.textContent = "";
+      collapse.hidden = true;
+      return;
+    }
+    const asked = { ...opts };
+    const params = new URLSearchParams({ q: query, include: include.value, exclude: exclude.value });
+    for (const name of ["case", "word", "regex"]) if (asked[name]) params.set(name, "1");
+    if (cwd) params.set("cwd", cwd);
+    summary.textContent = "Searching…";
+    let data;
+    try {
+      data = await api(`${convApi(conv, "/search")}?${params}`, { headers: sendHeaders() });
+    } catch (err) {
+      if (n === seq) {
+        summary.textContent = err.message;
+        results.replaceChildren();
+      }
+      return;
+    }
+    if (n !== seq) return;
+    item.title = query.length > 24 ? `${query.slice(0, 24)}…` : query;
+    item.tip = `${query} in ${data.folder}`;
+    drawDock();
+    where.textContent = data.folder;
+    draw(data, searchPattern(query, asked));
+  }
+
+  function draw(data, pattern) {
+    const files = data.files.length;
+    summary.replaceChildren();
+    append(summary, [data.matches ? `${exact(data.matches)} result${data.matches === 1 ? "" : "s"} in ${exact(files)} file${files === 1 ? "" : "s"}`
+      : "No results.",
+    data.truncated ? h("div", { class: "notice" }, `Only the first ${exact(data.matches)} results: narrow the search to see the rest.`) : null,
+    data.timed_out ? h("div", { class: "notice" }, "The search took too long and stopped; what it found is below.") : null]);
+    collapse.hidden = !files;
+    results.replaceChildren(...data.files.map((f, i) => {
+      const slash = f.display.lastIndexOf("/");
+      const rows = f.matches.map((m) => h("button", { class: "search-hit", type: "button", title: `${f.display}:${m.line}`,
+        onclick: () => openFile(conv, { path: f.path, display: f.display }, { line: m.line }) },
+      h("span", { class: "ln" }, m.line), h("span", { class: "search-text mono" }, searchLine(m.text, pattern))));
+      return h("details", { class: "search-file", open: i < SEARCH_OPEN_FILES },
+        h("summary", { title: f.path }, h("b", {}, f.display.slice(slash + 1)),
+          slash > 0 ? h("span", { class: "muted mono" }, f.display.slice(0, slash)) : null, h("span", { class: "chip" }, f.matches.length)),
+        rows);
+    }));
+  }
+
+  return {
+    run,
+    focus: () => {
+      if (item.body.contains(document.activeElement)) return;
+      input.focus();
+      input.select();
+    },
+  };
 }
 
 // ---------- shells ----------
@@ -1136,6 +1461,14 @@ function openShell(conv, cwd) {
     });
     term.attachCustomKeyEventHandler((e) => !(e.type === "keydown" && e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
       && e.key.toLowerCase() === "v"));
+    // As a paste: the shell holds even several lines at its prompt, and the Enter that runs them is left to the user.
+    item.shellName = `Shell ${n}`;
+    item.pasteProblem = (text) => (!sh.id || sh.ended ? "The shell has ended"
+      : pasteable(text).includes("\n") && !term.modes.bracketedPasteMode ? "What runs in it now would take each line as Enter" : null);
+    item.paste = (text) => {
+      term.paste(pasteable(text));
+      term.focus();
+    };
     const styled = { term, fit };
     terminals.add(styled);
     item.onShow = () => {
@@ -1251,6 +1584,18 @@ function shellLinks(term, conv, sh) {
   };
 }
 
+const pasteable = (text) => text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+
+// The shells on screen, as [label, act, tip, off] menu entries that type the text at their prompt.
+function pasteEntries(text) {
+  if (!pasteable(text)) return [];
+  return dock.items.filter((i) => i.kind === "shell" && i.paste && shownPanel(i)).map((item) => {
+    const problem = item.pasteProblem(text);
+    return [`❯ Paste into ${item.shellName}`, () => item.paste(text), problem || "Typed at its prompt without Enter, which is yours to press",
+      !!problem];
+  });
+}
+
 function shellButton(conv, cwd) {
   return h("button", { class: "btn", type: "button", title: `Open an interactive shell in ${cwd}`,
     onclick: () => openShell(conv, cwd) }, "❯ Shell");
@@ -1258,6 +1603,15 @@ function shellButton(conv, cwd) {
 
 function dirButton(conv, cwd) {
   return h("button", { class: "btn", type: "button", title: `Browse ${cwd}`, onclick: () => openDir(conv, cwd) }, "▦ Browse");
+}
+
+function commitsButton(conv, cwd) {
+  return h("button", { class: "btn", type: "button", title: `Commits of the repository of ${cwd}, and which are pushed`,
+    onclick: () => openCommits(conv, cwd) }, "☰ Commits");
+}
+
+function searchButton(conv, cwd) {
+  return h("button", { class: "btn", type: "button", title: `Search the files of ${cwd}`, onclick: () => openSearch(conv, cwd) }, icon("search"), " Search");
 }
 
 // ---------- chooser for a name that matches several files ----------
@@ -1493,6 +1847,7 @@ function startPanels() {
   linker.observer.observe(main, { childList: true, subtree: true });
   linker.queue.add(main);
   document.addEventListener("click", followRef);
+  document.addEventListener("mouseup", conversationSelection);
   document.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.classList && e.target.classList.contains("ref")) followRef(e); });
 }
 

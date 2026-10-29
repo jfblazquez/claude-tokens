@@ -362,16 +362,19 @@ session or a reused pid is not shown as live.
 
 The **Conversation** tab of a live conversation has a box at the bottom to send
 it a message: it is typed into the session's tmux pane and followed by Enter,
-exactly as if you wrote it in that terminal (line breaks go in as a paste, so
-they stay in one prompt). While the session is busy the message is queued for
-its next turn, as when you type during a turn.
+exactly as if you wrote it in that terminal. It is typed, not pasted, so it
+reaches Claude as your own words rather than wrapped in `<pasted_content>` tags:
+line breaks go in as Ctrl+J, which keeps them in one prompt, a tab as four
+spaces, and the text in batches small enough that Claude Code does not take them
+for a paste. While the session is busy the message is queued for its next turn,
+as when you type during a turn.
 
 Images go in as in Claude Code: paste one with Ctrl+V (a screenshot, an image
 copied from a page) or drop an image file on the box, and `[Image #1]` goes in
 where the cursor is, with a thumbnail above the box (× removes the image and its
 mark). The server keeps the image as a file in `$TMPDIR/ctokens-images-<uid>/`,
-readable only by you and removed after a day; on sending, the text is pasted in
-pieces and each image's path on its own, which Claude Code turns into an
+readable only by you and removed after a day; on sending, the text is typed in
+pieces and each image's path pasted on its own, which Claude Code turns into an
 `[Image #N]` attachment in that place, as when a file is dropped on its terminal.
 PNG, JPEG, GIF and WebP, up to 10 MB each.
 
@@ -491,7 +494,7 @@ Renaming needs the send key. A live session that cannot take a message (outside
 tmux, not an interactive terminal, or waiting on a dialog) is not renamed, since
 its process keeps the name in memory and would write the old one back.
 
-### Commits, files and shells
+### Commits, files, search and shells
 
 Inside a conversation, the commit hashes and file names its messages, tool calls,
 results and Bash commands mention become links once the server has checked them
@@ -533,6 +536,27 @@ highlighting splits into several pieces still links whole.
   at most 8 run at once. All the shells of a page share one connection, and a
   hidden tab closes its streams and catches up when shown again, since a browser
   opens at most six connections to a host, shared by all its tabs.
+- **☰ Commits**, in the conversation header, lists the history of the branch
+  checked out in the conversation's repository, newest first, as an editor's
+  commit view does: subject, branch and tag names, author, how long ago and the
+  short hash. A commit that no remote branch has yet is marked **↑**, a pushed one
+  **·**; above them, under **Incoming**, **↓** marks the commits of the upstream
+  branch not here yet. The top says where the branch stands (*Up to date with
+  origin/main*, *↑ 1 to push · ↓ 2 to pull*, or that it has no upstream) and when
+  the repository last fetched; it never fetches by itself, so a pull or a push of
+  yours shows on **Refresh**, or when the panel comes back into view. A click on a
+  commit opens it; **Load more** brings the next hundred, and **❯ Shell** opens a
+  shell in the repository to push or pull.
+- **Search** (a magnifying glass), in the conversation header and in a folder, looks for text in its
+  files, as an editor's *Find in files*: Enter searches, **Aa** matches case,
+  **ab** whole words and **.\*** takes a regular expression (git's extended
+  ones). Under **Files to include and exclude** go comma-separated globs:
+  `*.py` matches anywhere, `./build/` from the folder searched, and a folder takes
+  in what it holds. Results come grouped by file with their line numbers and the
+  matches marked; a click opens the file at that line. It runs `git grep` over
+  the tracked files and the untracked ones git does not ignore (outside a
+  repository, the files `.gitignore` does not hide), leaves binary files out and
+  stops at 5000 results, saying so. The options and globs are remembered.
 
 They open in a **side panel**, one tab each, that you can widen by dragging its
 edge. Tabs shrink to fit; those that still do not fit scroll with the mouse
@@ -553,8 +577,17 @@ In a file, a double-click on a line copies `path:line`, and a double-click in th
 message box of a live conversation then pastes it where the cursor is, without
 sending it. Selecting text opens a menu: **Copy**, **Copy with path:lines** (that
 header on its own line, then the text) and **Ask Claude**, which puts the header
-and the text, fenced, into the message box where its cursor is. In a shell, as
-in a terminal, a right-click on a selection copies it and Ctrl+V pastes. A URL, a
+and the text, fenced, into the message box where its cursor is. Selecting text in
+a conversation opens the same menu, where **Ask Claude** quotes it (`> ` before
+each line). Both add **Find in files**, which searches the first line of the
+selection (in the file's repository, or the conversation's folder), and, for
+each shell on screen, **❯ Paste into Shell N**. The right-click menu of a copy
+button (a message, a code block, a command) has the same entries for its text.
+Pasting types the text at the shell's prompt as a terminal paste, without the
+Enter: you read it and run it. Several lines stay at the prompt too, since the
+shell takes them as a paste; when what runs there would take each line as Enter,
+the entry says so and is off. In a shell, as in a terminal, a right-click on a
+selection copies it and Ctrl+V pastes. A URL, a
 commit or a path the terminal wrapped onto the next row still links whole, from
 either row.
 
@@ -576,6 +609,10 @@ with a nonce that changes on every load.
 | ![Side panel with a commit's message, parents and diff, next to the conversation that mentions it](docs/images/panel-commit.png) | ![Side panel with a file opened at the line the conversation names, the line marked](docs/images/panel-file.png) |
 | **Several files match** | **Shell** |
 | ![Numbered list of the two files a name matches, opened by pressing its number](docs/images/panel-pick.png) | ![Interactive shell in the conversation's folder, in the side panel](docs/images/panel-shell.png) |
+| **Commits** | **Search** |
+| ![Commit list of the repository, the last commit marked as not pushed yet](docs/images/panel-commits.png) | ![Search in the project's files, results grouped by file with the matches marked](docs/images/panel-search.png) |
+| **Selection** | |
+| ![Menu on text selected in a conversation: copy, ask Claude, find in files, paste into the shell](docs/images/panel-selection.png) | |
 
 The screenshots show invented demo data, not real conversations.
 
@@ -597,11 +634,14 @@ or stop a session. All of them
 need an `Origin`, when sent, that matches the `Host`, and all but starring also
 need the send key in an `X-Send-Key` header, since any user of the machine can
 reach `127.0.0.1` and a message runs whatever the session is allowed to run. So
-do the `GET`s of a commit or a file, which read outside the projects folder. It writes to the projects folder only to
+do the `GET`s of a commit, the commit list, a search, a file or a folder, which read outside the projects folder. It writes to the projects folder only to
 rename a conversation that no process runs.
 `--serve` accepts `--port`, `--projects-dir`, `--pricing`,
 `--cold-summary-output` and `--context-window`; the project filter is chosen in
-the UI. A port that is already in use is an error.
+the UI. A port that is already in use is an error. A request the browser gives
+up before its answer is sent (a reload, a closed tab) ends quietly, as does a
+kept-alive connection it does not use again; any other error prints its
+traceback.
 
 When the tool runs on a remote machine, open an SSH tunnel and browse
 `http://localhost:8765` on your own machine (any local port works):
@@ -652,7 +692,7 @@ counterpart:
 | `GET /api/conversations/<id>/messages?source=&from=N` | the messages from index `N` on, with `from` and `total` and without `sources`; only the lines added to the log since the last request are read |
 | `GET /api/conversations/<id>/events?source=` | server-sent events while the conversation is open: `log` (the log grew), `live` (`{"live", "send_problem"}` when the session changes) and `activity` (`{"text"}`, the terminal's status line while it works) |
 | `GET /api/conversations/<id>/live` | `{"live": {...} or null, "key": "ok"\|"missing"\|"wrong"\|"disabled", "send_problem": why it cannot take a message now, or null}` |
-| `POST /api/conversations/<id>/send` | body `{"text": "...", "images"?: {"N": path}}` with `X-Send-Key`; each `[Image #N]` of the text whose `N` is in `images` is pasted as that path; `{"sent": true, "live": {...}}`, or 409 with the reason |
+| `POST /api/conversations/<id>/send` | body `{"text": "...", "images"?: {"N": path}}` with `X-Send-Key`; the text is typed into the session's terminal and each `[Image #N]` whose `N` is in `images` is pasted as that path; `{"sent": true, "live": {...}}`, or 409 with the reason |
 | `POST /api/conversations/<id>/image` | body `{"type": "image/png", "data": base64}` (PNG, JPEG, GIF or WebP, up to 10 MB) with `X-Send-Key`; `{"path"}` of the file it was saved to, or 409 |
 | `POST /api/conversations/<id>/go-offline` | body `{}` with `X-Send-Key`; stops the conversation's Claude Code process running in tmux; `{"stopped": true, "closed_window": bool}`, or 409 |
 | `POST /api/conversations/<id>/go-live` | body `{}` with `X-Send-Key`; `{"started": true, "live": {...} or null}` (null when it has not registered within 30 s), or 409 |
@@ -663,6 +703,8 @@ counterpart:
 | `POST /api/conversations/<id>/stat` | body `{"paths": [...]}` (absolute, up to 200) with `X-Send-Key`; `{"stats": {"<path>": {type, size, mtime, stamp} or null}}`, null when it is gone; `stamp` changes when a file is written or a folder's entries change |
 | `GET /api/conversations/<id>/commit?sha=&cwd=` | with `X-Send-Key`, from the repository of `cwd` (an absolute folder) when given, else the conversation's: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
 | `GET /api/conversations/<id>/file?path=` | with `X-Send-Key`: `{path, display, root, size, mtime, stamp, binary, truncated, text}`, the first 2 MB; `path` absolute or from the folder |
+| `GET /api/conversations/<id>/commits?skip=&cwd=` | with `X-Send-Key`, from the repository of `cwd` when given, else the conversation's: `{root, branch, upstream, ahead, behind, remotes, fetched, commits: [{sha, parents, author, date, refs, subject, pushed}], incoming: [...], more, skip}`, 100 commits of `HEAD` from `skip`; `pushed` is whether a remote branch has the commit (null with no remote), `incoming` the upstream's commits `HEAD` lacks (up to 100), `fetched` when the repository last fetched, 404 outside a repository |
+| `GET /api/conversations/<id>/search?q=&case=1&word=1&regex=1&include=&exclude=&cwd=` | with `X-Send-Key`, in the folder `cwd` when given, else the conversation's: `{folder, root, matches, truncated, timed_out, files: [{path, display, matches: [{line, text}]}]}`; `q` one line, up to 1000 characters, a fixed string unless `regex`; `include` and `exclude` comma-separated globs; up to 5000 matches, each line up to 1000 characters; 404 with git's message for a bad expression |
 | `GET /api/conversations/<id>/dir?path=` | with `X-Send-Key`: `{path, display, root, parent, stamp, truncated, entries: [{name, type, link, size, mtime, ignored}]}`, folders first and up to 5000; `path` absolute or from the folder, which it is by default; `ignored` when git ignores the entry |
 | `POST /api/conversations/<id>/shell` | body `{"cols", "rows", "cwd"?}` with `X-Send-Key`; `{"shell": {"id", "cwd", "pid", ...}}`, or 409 |
 | `GET /api/shells/stream?from=<shell id>:<offset>,...` | server-sent events with the output of up to 8 shells on one connection: `data` (`{"id", "at", "data": base64}`, `at` the byte offset reached), `exit` (`{"id", "code"}`, null when the shell is gone) and `end` once none is left; each event's `id` lists the offsets, so a reconnect resumes; the last 1 MB of each shell is kept |
@@ -685,7 +727,9 @@ The panels are also checked in a browser, with Playwright (`npm i --no-save
 playwright && npx playwright install chromium-headless-shell`): links in the
 conversation and in a shell (wrapped lines too), the folder browser, the Markdown
 preview, Ctrl+G, reloading what changed on disk, images in the message box (against a
-session faked in the page), the right-click menus and Go offline. The script builds the demo
+session faked in the page), the right-click menus and Go offline, the commit list and
+what it marks as pushed, the search with its options and globs, and the selection menus
+and copy buttons pasting into a shell without Enter. The script builds the demo
 folder below in a temporary directory, adds a conversation of its own and starts
 a server on it, so it needs nothing else:
 
@@ -695,7 +739,8 @@ node tests/e2e/panels.js
 
 The README screenshots come from a synthetic projects folder, so they never show
 real conversations. Its api-gateway project is a small git repository with fixed
-commits, so the panels have something to open, and the server runs with a demo
+commits and a local remote that has all of them but the last, so the panels have
+something to open and the commit list something to push, and the server runs with a demo
 `HOME` whose `.bashrc` gives the shell a neutral prompt. Regenerating them needs
 Playwright (`npm i --no-save playwright && npx playwright install chromium-headless-shell`):
 

@@ -247,8 +247,8 @@ check("offers what a project's folder allows on right-click, and asks before goi
   await page.waitForSelector("#conv-head .live");
   await page.click(`#conv-head span:has(> b.mono)`, { button: "right" });
   const entries = await page.locator(".copy-menu .copy-menu-item").allTextContents();
-  assert.deepEqual(entries, ["▦ Browse the folder", "❯ Shell here", "New session here", "Only this project's conversations",
-    "Totals of this project", "Copy the path", "Copy a cd command"]);
+  assert.deepEqual(entries, ["▦ Browse the folder", "❯ Shell here", "☰ Commits", " Search the files", "New session here",
+    "Only this project's conversations", "Totals of this project", "Copy the path", "Copy a cd command"]);
   await page.click(".copy-menu-item:has-text('Browse the folder')");
   await page.waitForSelector(".dock-tab[aria-selected='true']:has-text('api-gateway/')");
   // A card in the list has the same menu on its project.
@@ -272,6 +272,132 @@ check("offers what a project's folder allows on right-click, and asks before goi
   assert.equal(state.offline, 1);
   assert.ok(await page.locator("#conv-head:has-text('tmux window closed')").count());
   assert.equal(await page.locator("#composer").count(), 0);
+});
+
+check("lists the commits, marking the one not pushed yet", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click("#conv-head button:has-text('Commits')");
+  await page.waitForSelector(".log-row");
+  assert.match(await page.locator(".log-status").textContent(), /⎇ main.*↑ 1 to push · origin\/main.*fetched/);
+  const rows = await page.locator(".log-row").evaluateAll((els) => els.map((e) => [e.className, e.querySelector(".log-subject").textContent]));
+  assert.deepEqual(rows, [["log-row out", "Return Retry-After on 429main"], ["log-row pushed", "Add token bucket rate limiting per API keyorigin/main"],
+    ["log-row pushed", "Initial API gateway"]]);
+  await page.click(".log-row.out");
+  await page.waitForSelector(".commit-subject:has-text('Return Retry-After on 429')");
+});
+
+check("searches the files, with case, whole word and globs", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click("#conv-head button:has-text('Search')");
+  await page.fill(".search-q", "Rate_Limit");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".search-file");
+  const files = () => page.locator(".search-file > summary").evaluateAll((els) => els.map((e) => e.title.split("/api-gateway/")[1]));
+  assert.deepEqual((await files()).sort(), ["src/middleware/__init__.py", "src/middleware/rate_limit.py", "src/router.py"]);
+  assert.equal(await page.locator(".search-hit mark").first().textContent(), "rate_limit");
+  await page.click(".search-opt[title='Match case']");
+  await page.waitForSelector(".search-summary:has-text('No results')");
+  await page.click(".search-opt[title='Match case']");
+  await page.click(".search-filters summary");
+  await page.fill(".search-glob[aria-label='Files to exclude']", "middleware/");
+  await page.press(".search-glob[aria-label='Files to exclude']", "Enter");
+  await page.waitForFunction(() => document.querySelectorAll(".search-file").length === 1);
+  assert.deepEqual(await files(), ["src/router.py"]);
+  await page.click(".search-hit");
+  await page.waitForSelector(".dock-tab[aria-selected='true']:has-text('router.py')");
+  await page.waitForSelector(".panel-body.file:not([hidden]) .fv-mark:not([hidden])");
+  await page.evaluate(() => localStorage.removeItem("ctokens.search"));
+});
+
+// Selects the text of the first element matching selector, as a drag would, and lets go of the mouse over it.
+async function selectText(page, selector, text) {
+  await page.evaluate(([sel, wanted]) => {
+    const el = document.querySelector(sel);
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const at = node.textContent.indexOf(wanted);
+      if (at < 0) continue;
+      const range = document.createRange();
+      range.setStart(node, at);
+      range.setEnd(node, at + wanted.length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      const r = range.getBoundingClientRect();
+      node.parentElement.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, detail: 1, clientX: r.right, clientY: r.bottom }));
+      return;
+    }
+    throw new Error(`no text ${wanted}`);
+  }, [selector, text]);
+}
+
+async function openShellPanel(page) {
+  await page.click("#conv-head button:has-text('Shell')");
+  await page.waitForFunction(() => document.querySelector(".xterm-rows") && document.querySelector(".xterm-rows").innerText.includes("$"));
+}
+
+// What the shell's screen shows, without the spaces of its empty cells.
+const screenText = (page) => page.evaluate(() => document.querySelector(".xterm-rows").innerText.replace(/\u00a0/g, " "));
+
+check("a selection in the conversation is quoted, searched for or pasted into a shell without Enter", async ({ page, repo }) => {
+  await fakeLive(page, repo);
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.waitForSelector("#composer-text");
+  await openShellPanel(page);
+  await selectText(page, ".msg-body .md p", "the helper is");
+  await page.waitForSelector(".copy-menu");
+  assert.deepEqual(await page.locator(".copy-menu .copy-menu-item").allTextContents(),
+    ["Copy", "Ask Claude", " Find in files", "❯ Paste into Shell 1"]);
+  await page.click(".copy-menu-item:has-text('Ask Claude')");
+  assert.equal(await page.inputValue("#composer-text"), "> the helper is");
+  await selectText(page, ".msg-body .md p", "Docs at");
+  await page.click(".copy-menu-item:has-text('Paste into Shell 1')");
+  await page.waitForFunction(() => document.querySelector(".xterm-rows").innerText.includes("Docs at"));
+  await page.waitForTimeout(400);
+  const screen = await screenText(page);
+  assert.match(screen, /\$ Docs at\s*$/, "typed at the prompt");
+  assert.ok(!screen.includes("command not found"), "not run");
+  await selectText(page, ".msg-body .md p", "middleware");
+  await page.click(".copy-menu-item:has-text('Find in files')");
+  await page.waitForSelector(".dock-tab[aria-selected='true'] .dock-title:text-is('middleware')");
+  assert.equal(await page.inputValue(".search-q"), "middleware");
+  await page.waitForSelector(".search-file > summary[title$='/src/router.py']");
+});
+
+check("a copy button and a selection in a file paste into the shell on screen", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click("#conv-head button:has-text('Browse')");
+  await page.waitForSelector(".dir-row[data-name='ab.py']");
+  // Not while the shell is out of view.
+  await page.click(".msg-body .copy-wrap:has(pre) > .copy-btn", { button: "right" });
+  assert.equal(await page.locator(".copy-menu-item:has-text('Paste into')").count(), 0);
+  await page.keyboard.press("Escape");
+  await openShellPanel(page);
+  await page.click(".msg-body .copy-wrap:has(pre) > .copy-btn", { button: "right" });
+  assert.deepEqual(await page.locator(".copy-menu-head").allTextContents(), ["Copy as", "Paste"]);
+  // The shell printing scrolls its own screen, which leaves the menu where it is.
+  await page.evaluate(() => document.querySelector(".xterm-viewport").dispatchEvent(new Event("scroll")));
+  assert.equal(await page.locator(".copy-menu").count(), 1);
+  await page.click(".copy-menu-item:has-text('Paste into Shell 1')");
+  await page.waitForFunction(() => document.querySelector(".xterm-rows").innerText.includes("rate_limit.py:15"));
+  await page.keyboard.press("Control+c");
+  // Side by side, the file and the shell are both on screen.
+  await page.click(".dock-menu-btn");
+  await page.click(".copy-menu-item:has-text('Floating')");
+  // The shell's window may cover the folder's.
+  await page.locator(".dir-row[data-name='ab.py']").dispatchEvent("click");
+  await page.waitForSelector(".fv-text");
+  await selectText(page, ".fv-text", "print");
+  await page.click(".copy-menu-item:has-text('Paste into Shell 1')");
+  await page.waitForTimeout(400);
+  assert.match(await screenText(page), /\$ print\s*$/);
+  // Over the overlay too.
+  await page.click(".dock-menu-btn");
+  await page.click(".copy-menu-item:has-text('Overlay')");
+  await page.click(".dock-tab:has-text('ab.py')");
+  await selectText(page, ".panel-body.file:not([hidden]) .fv-text", "print");
+  const box = await page.locator(".copy-menu").boundingBox();
+  assert.ok(await page.evaluate(([x, y]) => !!document.elementFromPoint(x, y).closest(".copy-menu"), [box.x + box.width / 2, box.y + box.height / 2]));
+  await page.evaluate(() => localStorage.removeItem("ctokens.dock.mode"));
 });
 
 // The row of the terminal whose text starts with prefix, and the one after it.
