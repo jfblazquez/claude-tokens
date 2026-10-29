@@ -1463,9 +1463,14 @@ function redrawConvHead(id) {
   document.title = `${VIEWS[route.view].title(route, app.data)} · claude-tokens`;
 }
 
+function convName(route) {
+  const row = convRows.get(route.id);
+  return (row && row.title) || convTasks.get(route.id) || (row && row.new ? "New session" : "Untitled conversation");
+}
+
 function convHead(route) {
   const row = convRows.get(route.id), counts = convCounts.get(route.id) || {};
-  const title = (row && row.title) || convTasks.get(route.id) || (row && row.new ? "New session" : "Untitled conversation");
+  const title = convName(route);
   const resume = row ? `cd ${shellQuote(row.project)} && claude --resume ${shellQuote(route.id)}` : null;
   const live = liveOf(route.id);
   const folder = row ? row.project : live ? live.cwd : null;
@@ -1486,12 +1491,37 @@ function convHead(route) {
     h("div", { class: "meta" }, meta));
 }
 
+// Once the header has scrolled away, a row under the app bar keeps the name and the buttons of the conversation at hand.
+function drawConvBar() {
+  const bar = $("bar-conv"), route = app.route;
+  if (!route || !route.id) {
+    bar.replaceChildren();
+    bar.hidden = true;
+    return;
+  }
+  const row = convRows.get(route.id), live = liveOf(route.id), title = convName(route);
+  const folder = row ? row.project : live ? live.cwd : null;
+  bar.replaceChildren(h("div", { class: "bar-conv-in" }, starButton(route.id),
+    h("button", { class: "bar-conv-name", type: "button", title: `${title}\nBack to the top`, onclick: () => window.scrollTo(0, 0) }, title),
+    live ? liveBadge(live, false, null, route.id) : null, h("span", { class: "spacer" }),
+    startButton(route.id, "new-session"),
+    folder ? [dirButton, shellButton, commitsButton, searchButton].map((button) => button(route.id, folder)) : null));
+  syncConvBar();
+}
+
+function syncConvBar() {
+  const bar = $("bar-conv"), head = $("conv-head");
+  const hidden = !head || !bar.firstChild || head.getBoundingClientRect().bottom > bar.parentElement.getBoundingClientRect().bottom;
+  if (bar.hidden !== hidden) bar.hidden = hidden;
+}
+
 // The tabs live in the app bar, so they stay on screen however far the page scrolls;
 // inside a conversation a back button takes the place of the main nav.
 const SHORT_TABS = { response: "Response", bash: "Bash" };
 
 function drawConvNav() {
   const nav = $("conv-nav"), route = app.route;
+  drawConvBar();
   nav.hidden = !route || !route.id;
   $("nav-back").hidden = nav.hidden;
   $("nav-main").hidden = !nav.hidden;
@@ -3306,6 +3336,8 @@ function boot() {
       onclick: () => scroll(0) }, "↑"));
   window.addEventListener("scroll", updateToTop, { passive: true });
   window.addEventListener("resize", updateToTop);
+  window.addEventListener("scroll", syncConvBar, { passive: true });
+  window.addEventListener("resize", syncConvBar);
   // New messages make the page longer without any scrolling.
   new ResizeObserver(updateToTop).observe($("main"));
   const auto = $("auto");
