@@ -335,6 +335,34 @@ check("a commit's view opens the list of commits at that commit", async ({ page 
   assert.equal(await page.locator(".dock-tab").count(), 2);
 });
 
+// The demo's longest conversation, by its title.
+async function demoConversation(page, title) {
+  await page.goto(`${page.base}/#/`);
+  return page.evaluate(async (t) => (await (await fetch("/api/conversations")).json()).conversations.find((c) => c.title === t).id, title);
+}
+
+check("the header folds into the app bar while the page scrolls", async ({ page }) => {
+  const id = await demoConversation(page, "Add rate limiting to the public API");
+  await page.goto(`${page.base}/#/c/${id}/messages`);
+  await page.waitForSelector(".msgs");
+  // It opens at the last message, with the header out of sight.
+  await page.waitForSelector("#bar-conv:not([hidden])");
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForSelector("#bar-conv[hidden]", { state: "attached" });
+  await page.evaluate(() => window.scrollTo(0, 1200));
+  await page.waitForSelector("#bar-conv:not([hidden])");
+  assert.equal(await page.locator(".bar-conv-name").textContent(), "Add rate limiting to the public API");
+  assert.deepEqual(await page.locator("#bar-conv .btn").evaluateAll((els) => els.map((e) => e.textContent.trim())),
+    ["", "New session", "▦ Browse", "❯ Shell", "☰ Commits", "Search"]);
+  // Laid over the page: the conversation does not move when it shows.
+  assert.equal(await page.evaluate(() => window.scrollY), 1200);
+  await page.click("#bar-conv button:has-text('Search')");
+  await page.waitForSelector(".panel-body.search:not([hidden]) .search-q");
+  await page.click(".bar-conv-name");
+  await page.waitForSelector("#bar-conv[hidden]", { state: "attached" });
+});
+
 // Selects the text of the first element matching selector, as a drag would, and lets go of the mouse over it.
 async function selectText(page, selector, text) {
   await page.evaluate(([sel, wanted]) => {

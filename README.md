@@ -286,7 +286,11 @@ immediate. They are kept until you go back to the list; **Refresh** reloads the
 current tab and the others reload the next time you open them.
 
 Inside a conversation the top bar holds its tabs and a **← Conversations**
-button, so they stay on screen however far you scroll. The **Conversation** tab
+button, so they stay on screen however far you scroll. Once the conversation's
+header scrolls out of view, a row under the top bar keeps it at hand: the star,
+the name (a click goes back to the top), the live state and the **New session**,
+**Browse**, **Shell**, **Commits** and **Search** buttons. It lies over the page,
+so showing it does not move what you are reading. The **Conversation** tab
 keeps the message you were reading when you switch to another tab and back. A
 round **↑** button at the bottom right of every page goes back to the top, and
 a **↓** one under it goes to the bottom; each shows while that end is more than a
@@ -739,8 +743,8 @@ conversation and in a shell (wrapped lines too), the folder browser, the Markdow
 preview, Ctrl+G, reloading what changed on disk, images in the message box (against a
 session faked in the page), the right-click menus and Go offline, the commit list and
 what it marks as pushed and a commit's way back to it, the search with its options and
-globs (also as you type), and the selection menus and copy buttons pasting into a
-shell without Enter. The script builds the demo
+globs (also as you type), the selection menus and copy buttons pasting into a shell
+without Enter, and the header row under the top bar. The script builds the demo
 folder below in a temporary directory, adds a conversation of its own and starts
 a server on it, so it needs nothing else:
 
