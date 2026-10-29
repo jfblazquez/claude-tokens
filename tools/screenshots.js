@@ -41,6 +41,35 @@ const SHOTS = [
       await page.keyboard.type("git log --oneline --decorate && ls src src/middleware\n");
       await page.waitForFunction(() => /\$\s*$/.test(document.querySelector(".xterm-rows").innerText.trim()), null, { timeout: 10000 });
     } },
+  { name: "panel-commits", hash: `#/c/${conv}/messages`,
+    act: (page) => openPanel(page, "#conv-head button:has-text('Commits')", ".log-row") },
+  { name: "panel-search", hash: `#/c/${conv}/messages`,
+    act: async (page) => {
+      await openPanel(page, "#conv-head button:has-text('Search')", ".search-q");
+      await page.fill(".search-q", "rate_limit");
+      await page.keyboard.press("Enter");
+      await page.waitForSelector(".search-file");
+    } },
+  { name: "panel-selection", hash: `#/c/${conv}/messages`,
+    act: async (page) => {
+      await openPanel(page, "#conv-head button:has-text('Shell')", ".xterm-screen");
+      await page.waitForFunction(() => document.querySelector(".xterm-rows").innerText.includes("$"), null, { timeout: 10000 });
+      // A few words of the first long paragraph of an answer, selected as a drag would leave them.
+      await page.evaluate(() => {
+        const node = [...document.querySelectorAll(".msg-body .md p")].flatMap((p) => [...p.childNodes])
+          .find((n) => n.nodeType === 3 && n.textContent.trim().split(/\s+/).length > 6);
+        const words = node.textContent.match(/^\s*\S+\s+\S+\s+\S+/)[0];
+        const range = document.createRange();
+        range.setStart(node, words.length - words.trimStart().length);
+        range.setEnd(node, words.length);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+        node.parentElement.scrollIntoView({ block: "center" });
+        const r = range.getBoundingClientRect();
+        node.parentElement.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, detail: 1, clientX: r.right, clientY: r.bottom }));
+      });
+      await page.waitForSelector(".copy-menu");
+    } },
 ];
 
 const swap = (text, from, to) => text.split(from).join(to).split(encodeURIComponent(from)).join(encodeURIComponent(to));
@@ -55,7 +84,7 @@ const swap = (text, from, to) => text.split(from).join(to).split(encodeURICompon
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     // Event streams never end, so fetching them here would never return; the demo has no live session or path in them.
-    if (/\/(events|output)(\?|$)/.test(request.url())) return route.continue();
+    if (/\/(events|output|stream)(\?|$)/.test(request.url())) return route.continue();
     const body = request.postData();
     const response = await route.fetch({ url: swap(request.url(), SHOWN_HOME + "dev/", REAL_HOME + "dev/"),
       postData: body == null ? undefined : swap(body, SHOWN_HOME + "dev/", REAL_HOME + "dev/") });

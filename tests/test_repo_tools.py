@@ -13,8 +13,8 @@ from unittest import mock
 from fixtures import user
 
 from ctokens.pricing import load_prices
-from ctokens.repo import (FileIndex, RepoError, find_commits, find_files, list_dir, numstat_files, read_file, show_commit,
-                          stat_paths)
+from ctokens.repo import (FileIndex, RepoError, find_commits, find_files, list_commits, list_dir, numstat_files, pathspecs,
+                          read_file, search, show_commit, stat_paths)
 from ctokens.web.server import Config, Handler, Server
 from ctokens.web.shells import Shells
 
@@ -180,6 +180,89 @@ def read_until(shell, needle, timeout=10):
     return seen
 
 
+class HistoryTest(unittest.TestCase):
+    """A clone two commits behind its remote, with one commit of its own, and a folder outside any repository."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.origin, cls.first, cls.second = make_repo(cls.tmp.name)
+        cls.clone = Path(cls.tmp.name) / "clone"
+        git(cls.tmp.name, "clone", "-q", str(cls.origin), str(cls.clone))
+        git(cls.origin, "commit", "-q", "--allow-empty", "-m", "Upstream only")
+        git(cls.clone, "fetch", "-q")
+        (cls.clone / "src" / "server.py").write_text("def serve():\n    return 3  # TODO: Serve more\n")
+        git(cls.clone, "commit", "-q", "-am", "Local only")
+        cls.local = git(cls.clone, "rev-parse", "HEAD")
+        cls.plain = Path(cls.tmp.name) / "plain"
+        (cls.plain / "ignored").mkdir(parents=True)
+        (cls.plain / ".gitignore").write_text("ignored/\n")
+        (cls.plain / "a.txt").write_text("one todo\nnothing\n")
+        (cls.plain / "ignored" / "b.txt").write_text("todo\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_pushed_and_incoming(self):
+        log = list_commits(self.clone / "src")
+        self.assertEqual((log["branch"], log["upstream"], log["ahead"], log["behind"], log["more"]), ("main", "origin/main", 1, 1, False))
+        self.assertEqual([(c["subject"], c["pushed"]) for c in log["commits"]],
+                         [("Local only", False), ("Second commit", True), ("First commit", True)])
+        self.assertEqual([c["subject"] for c in log["incoming"]], ["Upstream only"])
+        self.assertEqual(log["commits"][1]["parents"], [self.first])
+        self.assertIn("origin/main", log["incoming"][0]["refs"])
+        self.assertIsNotNone(log["fetched"])
+
+    def test_pages_and_repository_without_remote(self):
+        with mock.patch("ctokens.repo.LOG_PAGE", 1):
+            log = list_commits(self.origin, 1)
+        self.assertEqual(([c["subject"] for c in log["commits"]], log["more"]), (["Second commit"], True))
+        self.assertEqual((log["upstream"], log["remotes"], log["commits"][0]["pushed"]), (None, False, None))
+        with self.assertRaises(RepoError):
+            list_commits(self.plain)
+
+    def test_search_in_a_repository(self):
+        found = search(self.clone, "todo")
+        self.assertEqual([(f["display"], f["matches"]) for f in found["files"]],
+                         [("src/server.py", [{"line": 2, "text": "    return 3  # TODO: Serve more"}])])
+        self.assertEqual(found["files"][0]["path"], str(self.clone / "src" / "server.py"))
+        self.assertEqual(search(self.clone, "todo", case=True)["matches"], 0)
+        self.assertEqual(search(self.clone / "src", "serve", word=True)["matches"], 2)
+        self.assertEqual(search(self.clone / "src", "serve")["files"][0]["display"], "server.py")
+        self.assertEqual(search(self.clone, r"return [0-9]", regex=True)["matches"], 1)
+        self.assertEqual(search(self.clone, "return [0-9]")["matches"], 0)
+        # Untracked files count, binary ones do not.
+        self.assertEqual([f["display"] for f in search(self.origin, "new")["files"]], ["untracked.txt"])
+        self.assertEqual(search(self.origin, "data")["matches"], 0)
+
+    def test_include_and_exclude(self):
+        def names(**kw):
+            return [f["display"] for query in ("web", "serve") for f in search(self.origin, query, **kw)["files"]]
+
+        self.assertEqual(names(), ["src/web/server.py", "src/server.py"])
+        self.assertEqual(names(include="web"), ["src/web/server.py"])
+        self.assertEqual(names(exclude="web/"), ["src/server.py"])
+        self.assertEqual(names(include="./src/server.py, nothing"), ["src/server.py"])
+        self.assertEqual(names(include="*.md"), [])
+        self.assertEqual(pathspecs("*.py, ./build/,", True), [":(exclude,glob)**/*.py", ":(exclude,glob)**/*.py/**",
+                                                               ":(exclude,glob)build", ":(exclude,glob)build/**"])
+
+    def test_search_outside_a_repository_and_limits(self):
+        found = search(self.plain, "TODO")
+        self.assertEqual((found["root"], [(f["display"], f["matches"][0]["line"]) for f in found["files"]]), (None, [("a.txt", 1)]))
+        with mock.patch("ctokens.repo.MAX_SEARCH_MATCHES", 1):
+            found = search(self.origin, "e")
+        self.assertEqual((found["matches"], found["truncated"]), (1, True))
+        for query in ("", "a\nb", "x" * 1001):
+            with self.subTest(query=query), self.assertRaises(RepoError):
+                search(self.origin, query)
+        with self.assertRaisesRegex(RepoError, "Unmatched"):
+            search(self.origin, "a(", regex=True)
+        with self.assertRaises(RepoError):
+            search(self.plain / "nope", "x")
+
+
 class ShellsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -316,10 +399,23 @@ class RepoApiTest(unittest.TestCase):
                                    ("GET", f"/api/conversations/{CONV}/commit?sha={self.first}", None),
                                    ("GET", f"/api/conversations/{CONV}/file?path=src/server.py", None),
                                    ("GET", f"/api/conversations/{CONV}/dir?path=src", None),
+                                   ("GET", f"/api/conversations/{CONV}/commits", None),
+                                   ("GET", f"/api/conversations/{CONV}/search?q=serve", None),
                                    ("POST", f"/api/conversations/{CONV}/stat", {"paths": []})):
             for key in (None, "wrong"):
                 with self.subTest(path=path, key=key):
                     self.assertEqual(self.request(method, path, body, key=key)[0], 403)
+
+    def test_commits_and_search(self):
+        status, data = self.request("GET", f"/api/conversations/{CONV}/commits")
+        self.assertEqual((status, [c["sha"] for c in data["commits"]]), (200, [self.second, self.first]))
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/commits?skip=1")[1]["commits"][0]["sha"], self.first)
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/commits?cwd={self.tmp.name}")[0], 404)
+        status, data = self.request("GET", f"/api/conversations/{CONV}/search?q=SERVE&case=1&include=*.py")
+        self.assertEqual((status, data["matches"]), (200, 0))
+        status, data = self.request("GET", f"/api/conversations/{CONV}/search?q=serve&word=1&cwd={self.repo / 'src'}")
+        self.assertEqual((status, [f["display"] for f in data["files"]]), (200, ["server.py"]))
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/search?q=")[0], 404)
 
     def test_commit_and_file(self):
         status, data = self.request("GET", f"/api/conversations/{CONV}/commit?sha={self.second[:9]}")

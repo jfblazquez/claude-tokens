@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 import traceback
@@ -23,7 +24,8 @@ from ..content import bash_commands, conversation_messages, full_text, last_resp
 from ..live import (MAX_IMAGE_BYTES, SendError, activity, answer, channel, go_live, go_offline, live_sessions, new_session,
                     public, read_record, rename, save_image, send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
-from ..repo import FileIndex, RepoError, find_commits, find_files, list_dir, read_file, repo_root, show_commit, stat_paths
+from ..repo import (FileIndex, RepoError, find_commits, find_files, list_commits, list_dir, read_file, repo_root, search,
+                   show_commit, stat_paths)
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache, TranscriptCache
 from .favorites import Favorites, favorites_path
@@ -54,7 +56,7 @@ MAX_IMAGE_BODY = MAX_IMAGE_BYTES * 4 // 3 + 4096
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live|full))?")
 ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|go-offline|new-session|rename|favorite|resolve|stat|shell|image)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
-REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|file|dir)")
+REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|commits|search|file|dir)")
 SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close|state)")
 SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SHELL_REAP_EVERY = 30.0
@@ -296,7 +298,8 @@ class Handler(BaseHTTPRequestHandler):
         return json_response(200, {"written": True})
 
     def repo(self, conversation_id, view, params):
-        """A commit, a file or a folder of the conversation's; reading any file the user can read needs the key."""
+        """A commit, the history, a search, a file or a folder of the conversation's; reading any file the user can read
+        needs the key."""
         state = self.key_state()
         if state != "ok":
             return json_response(403, {"error": KEY_ERRORS[state], "key": state})
@@ -315,6 +318,13 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(200, show_commit(cwd, params.get("sha", [""])[0]))
             if view == "dir":
                 return json_response(200, list_dir(cwd, params.get("path", [""])[0]))
+            if view == "commits":
+                skip = params.get("skip", ["0"])[0]
+                return json_response(200, list_commits(cwd, int(skip) if skip.isdigit() else 0))
+            if view == "search":
+                flags = [params.get(name, [""])[0] == "1" for name in ("case", "word", "regex")]
+                return json_response(200, search(cwd, params.get("q", [""])[0], *flags, params.get("include", [""])[0],
+                                                 params.get("exclude", [""])[0]))
             return json_response(200, read_file(cwd, params.get("path", [""])[0]))
         except RepoError as error:
             return json_response(404, {"error": str(error)})
@@ -738,6 +748,12 @@ class Server(ThreadingHTTPServer):
         self.stopping = threading.Event()
         super().__init__((HOST, port), Handler)
         threading.Thread(target=self.reap_shells, daemon=True, name="shell-reaper").start()
+
+    def handle_error(self, request, client_address):
+        # The browser left before the answer was sent (a reload, a closed tab, a fetch it gave up): nothing to report.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
 
     def reap_shells(self):
         while not self.stopping.wait(SHELL_REAP_EVERY):
