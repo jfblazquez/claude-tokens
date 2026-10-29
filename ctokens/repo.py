@@ -16,6 +16,8 @@ MAX_MATCHES = 50
 MAX_FILE_BYTES = 2 << 20
 MAX_DIFF_BYTES = 4 << 20
 MAX_NAME_CHARS = 1024
+MAX_DIR_ENTRIES = 5000
+MAX_STATS = 200
 # Untracked files come and go while a session works; the index file only changes with git add and checkouts.
 INDEX_TTL = 10.0
 
@@ -137,7 +139,7 @@ def read_file(cwd, path):
             raise RepoError("relative path without a folder")
         target = Path(cwd) / target
     try:
-        size = target.stat().st_size
+        info = target.stat()
         if not target.is_file():
             raise RepoError("not a file")
         with target.open("rb") as f:
@@ -146,8 +148,72 @@ def read_file(cwd, path):
         raise RepoError(f"cannot read the file: {error.strerror or error}") from None
     root = repo_root(target.parent)
     binary = b"\0" in data[:8192]
-    return {"path": str(target), "display": display(target, root), "root": str(root) if root else None, "size": size,
-            "binary": binary, "truncated": size > len(data), "text": "" if binary else data.decode("utf-8", "replace")}
+    return {"path": str(target), "display": display(target, root), "root": str(root) if root else None, "size": info.st_size,
+            "mtime": info.st_mtime, "stamp": stamp(info), "binary": binary, "truncated": info.st_size > len(data),
+            "text": "" if binary else data.decode("utf-8", "replace")}
+
+
+def stamp(info):
+    """What changes when a file is written or a folder gains, loses or renames an entry."""
+    return f"{info.st_mtime_ns}:{info.st_size}:{info.st_ino}"
+
+
+def absolute(cwd, path):
+    if not isinstance(path, str) or len(path) > MAX_NAME_CHARS:
+        raise RepoError("expected a path")
+    target = Path(os.path.expanduser(path or "."))
+    if not target.is_absolute():
+        if not cwd:
+            raise RepoError("relative path without a folder")
+        target = Path(cwd) / target
+    return Path(os.path.normpath(target))
+
+
+def stat_paths(paths):
+    """{path: {type, size, mtime, stamp} or None when it is gone} for the absolute paths that open panels show."""
+    stats = {}
+    for path in [p for p in paths if isinstance(p, str) and os.path.isabs(p) and len(p) <= MAX_NAME_CHARS][:MAX_STATS]:
+        try:
+            info = os.stat(path)
+        except OSError:
+            stats[path] = None
+            continue
+        stats[path] = {"type": "dir" if os.path.isdir(path) else "file", "size": info.st_size, "mtime": info.st_mtime,
+                       "stamp": stamp(info)}
+    return stats
+
+
+def list_dir(cwd, path):
+    """A folder's entries, folders first, with the ones git ignores marked; the folder of the conversation by default."""
+    target = absolute(cwd, path)
+    try:
+        info = target.stat()
+        if not target.is_dir():
+            raise RepoError("not a folder")
+        names = sorted(os.listdir(target), key=lambda n: (n.lower(), n))
+    except OSError as error:
+        raise RepoError(f"cannot read the folder: {error.strerror or error}") from None
+    entries = []
+    for name in names[:MAX_DIR_ENTRIES]:
+        full = target / name
+        try:
+            link = full.is_symlink()
+            st = full.stat() if not link or full.exists() else full.lstat()
+        except OSError:
+            continue
+        kind = "dir" if full.is_dir() else "file" if full.is_file() else "other"
+        entries.append({"name": name, "type": kind, "link": link, "size": st.st_size if kind == "file" else None,
+                        "mtime": st.st_mtime})
+    entries.sort(key=lambda e: e["type"] != "dir")
+    root = repo_root(target)
+    if root is not None and entries:
+        ignored = git(target, "check-ignore", "--stdin", "-z", text="".join(f"{e['name']}\0" for e in entries))
+        hidden = set((ignored or b"").decode("utf-8", "replace").split("\0"))
+        for e in entries:
+            e["ignored"] = e["name"] in hidden or e["name"] == ".git"
+    return {"path": str(target), "display": display(target, root), "root": str(root) if root else None,
+            "parent": str(target.parent) if target.parent != target else None, "stamp": stamp(info), "entries": entries,
+            "truncated": len(names) > MAX_DIR_ENTRIES}
 
 
 def show_commit(cwd, sha):

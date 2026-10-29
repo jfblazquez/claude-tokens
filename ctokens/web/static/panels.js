@@ -93,11 +93,11 @@ function setDockMode(mode) {
   for (const item of dock.items) if (item.onShow) requestAnimationFrame(() => item.onShow());
 }
 
-const KIND_ICONS = { commit: "⎇", file: "▤", shell: "❯", pick: "≡" };
+const KIND_ICONS = { commit: "⎇", file: "▤", dir: "▦", shell: "❯", pick: "≡" };
 
 function panelTab(item) {
-  return middleCloses(h("div", { class: "dock-tab", role: "tab", "aria-selected": item === dock.active ? "true" : "false",
-    title: item.tip || item.title, onclick: () => focusPanel(item) },
+  return item.tabEl = middleCloses(h("div", { class: `dock-tab${item.changed ? " changed" : ""}`, role: "tab",
+    "aria-selected": item === dock.active ? "true" : "false", title: item.tip || item.title, onclick: () => focusPanel(item) },
   h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]), h("span", { class: "dock-title" }, item.title),
   h("button", { class: "dock-x", type: "button", title: "Close (middle click on the tab)", "aria-label": `Close ${item.title}`,
     onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×")), item);
@@ -105,7 +105,7 @@ function panelTab(item) {
 
 // Tabs that do not fit stay reachable from here, next to the layout and closing them all.
 function panelMenu(tabs) {
-  const button = h("button", { class: "dock-menu-btn", type: "button", title: "Open panels and layout", "aria-haspopup": "menu" }, "⌄");
+  const button = h("button", { class: "dock-menu-btn", type: "button", title: "Open panels and layout", "aria-haspopup": "menu" }, icon("chevron"));
   button.addEventListener("click", (e) => {
     e.stopPropagation();
     if (copyMenu && copyMenu.button === button) return closeCopyMenu(true);
@@ -118,7 +118,7 @@ function panelMenu(tabs) {
         const r = t.getBoundingClientRect();
         return r.right > box.right + 1 || r.left < box.left - 1;
       }).length;
-      button.textContent = hidden ? `+${hidden} ⌄` : "⌄";
+      button.replaceChildren(...(hidden ? [`+${hidden}`] : []), icon("chevron"));
       button.title = hidden ? `${hidden} more panel${hidden === 1 ? "" : "s"}, the layout and closing them all` : "Open panels and layout";
     };
     tabs.addEventListener("scroll", count, { passive: true });
@@ -262,12 +262,12 @@ function drawFloating() {
       item.rect = { x: Math.max(8, innerWidth - w - 24 - (n % 6) * 28), y: barHeight() + 16 + (n % 6) * 28, w, h: hgt };
     }
     if (item.min) {
-      tray.push(middleCloses(h("button", { class: "tray-item", type: "button", title: item.title, onclick: () => focusPanel(item) },
-        KIND_ICONS[item.kind], " ", h("span", {}, item.title)), item));
+      tray.push(item.tabEl = middleCloses(h("button", { class: `tray-item${item.changed ? " changed" : ""}`, type: "button", title: item.title,
+        onclick: () => focusPanel(item) }, KIND_ICONS[item.kind], " ", h("span", {}, item.title)), item));
       return;
     }
     item.body.hidden = false;
-    const title = h("div", { class: "win-title" }, h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]),
+    const title = item.tabEl = h("div", { class: `win-title${item.changed ? " changed" : ""}` }, h("span", { class: "dock-kind", "aria-hidden": "true" }, KIND_ICONS[item.kind]),
       h("span", { class: "dock-title", title: item.tip || item.title }, item.tip || item.title), panelMenu(null),
       h("button", { class: "dock-x", type: "button", title: "Minimize", "aria-label": "Minimize",
         onclick: (e) => { e.stopPropagation(); item.min = true; drawDock(); } }, "–"),
@@ -315,6 +315,15 @@ function drawFloating() {
   if (tray.length) dock.el.append(h("div", { class: "dock-tray" }, tray));
 }
 
+// Ctrl+G with nothing focused goes to a line of the file panel in view, as it does with the focus in that panel.
+function gotoActiveFile(e) {
+  if (!isGotoKey(e) || e.defaultPrevented || (e.target !== document.body && e.target !== document.documentElement)) return;
+  const item = dock.active;
+  if (!item || item.kind !== "file" || !item.view || !shownPanel(item)) return;
+  e.preventDefault();
+  item.view.askLine();
+}
+
 function escapeClosesPanel(e) {
   if (e.key !== "Escape" || !dock.items.length || pick.el || e.target.closest(".xterm")) return;
   if (dock.mode === "modal" || (dock.el && dock.el.contains(e.target))) {
@@ -337,21 +346,142 @@ function panelError(item, err) {
 const dirOf = (path) => path.replace(/\/[^/]*$/, "") || "/";
 const baseName = (path) => path.split("/").pop();
 
+// ---------- open panels follow their file or folder on disk ----------
+const RELOAD_KEY = "ctokens.panels.reload";
+const WATCH_MS = 2000;
+const reloadMode = () => (stored(RELOAD_KEY, "auto") === "ask" ? "ask" : "auto");
+const watcher = { busy: false };
+
+// item.watch: { path, stamp (as loaded), seen (last stamp on disk), due, gone, reload() }
+function watch(item, path, stamp, reload) {
+  item.watch = { path, stamp, seen: stamp, due: false, gone: false, reload };
+  markChanged(item, false);
+}
+
+function markChanged(item, on) {
+  item.changed = on;
+  if (item.tabEl) item.tabEl.classList.toggle("changed", on);
+  if (!on && item.banner) item.banner.remove();
+  if (!on) item.banner = null;
+}
+
+const shownPanel = (item) => item.body.isConnected && item.body.getClientRects().length > 0;
+
+// Reloading would drop what the reader is doing in the panel: a selection, or typing in its fields.
+function busyPanel(item) {
+  const selection = getSelection();
+  if (!selection.isCollapsed && selection.anchorNode && item.body.contains(selection.anchorNode)) return true;
+  return item.body.contains(document.activeElement) && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+}
+
+function changeBanner(item, text, actions) {
+  if (item.banner) item.banner.remove();
+  item.banner = h("div", { class: "notice changed-notice", role: "status" }, h("span", {}, text), actions);
+  const bar = item.body.querySelector(".panel-bar");
+  if (bar) bar.after(item.banner);
+  else item.body.prepend(item.banner);
+}
+
+// What a change seen on disk does: reloads the panel, or asks first when the settings say so.
+function settle(item) {
+  const w = item.watch;
+  if (!w || !w.due) return;
+  const what = item.kind === "dir" ? "folder" : "file";
+  if (w.gone) {
+    w.due = false;
+    markChanged(item, true);
+    changeBanner(item, `This ${what} is no longer on disk.`, []);
+    return;
+  }
+  if (reloadMode() === "ask") {
+    w.due = false;
+    markChanged(item, true);
+    const reload = () => { markChanged(item, false); w.reload(); };
+    changeBanner(item, `This ${what} changed on disk.`, [
+      h("button", { class: "btn small", type: "button", onclick: reload }, "Reload"),
+      h("button", { class: "btn small", type: "button", title: "Reload open panels by themselves from now on (⚙ settings)",
+        onclick: () => { store(RELOAD_KEY, "auto"); reload(); } }, "Always reload")]);
+    return;
+  }
+  if (!shownPanel(item) || busyPanel(item)) return;
+  w.due = false;
+  w.reload();
+}
+
+async function checkPanels() {
+  const items = dock.items.filter((i) => i.watch);
+  if (watcher.busy || document.hidden || !items.length || !sendKey) return;
+  watcher.busy = true;
+  try {
+    for (const conv of new Set(items.map((i) => i.conv))) {
+      const mine = items.filter((i) => i.conv === conv);
+      const { stats } = await postJson(convApi(conv, "/stat"), { paths: [...new Set(mine.map((i) => i.watch.path))] });
+      for (const item of mine) {
+        const w = item.watch;
+        if (!w || !(w.path in stats)) continue;
+        const now = stats[w.path], seen = now ? now.stamp : null;
+        if (seen !== w.seen) {
+          w.seen = seen;
+          w.gone = seen === null;
+          w.due = seen !== w.stamp;
+          if (!w.due) markChanged(item, false);
+        }
+      }
+    }
+  } catch (_) { /* tried again on the next tick */ } finally {
+    watcher.busy = false;
+  }
+  for (const item of items) if (dock.items.includes(item)) settle(item);
+}
+
 // ---------- file viewer ----------
 const LINE_PX = 20;
 const HIGHLIGHT_MAX = 400_000;
+const MARKDOWN_RE = /\.(md|markdown|mdown|mkd|mdx)$/i;
 
 function openFile(conv, match, at = {}) {
   const item = openPanel(`file:${match.path}`, `${baseName(match.display)}`, "file", conv, (it) => {
     it.tip = match.display;
+    it.path = match.path;
     it.body.append(skeleton(8));
-    it.ready = api(`${convApi(conv, "/file")}?path=${encodeURIComponent(match.path)}`, { headers: sendHeaders() })
-      .then((data) => { it.view = fileView(conv, it, data); }, (err) => panelError(it, err));
+    it.ready = loadFile(it);
+    it.onShow = () => {
+      if (it.view && it === dock.active) it.view.focus();
+      settle(it);
+    };
+    it.body.addEventListener("keydown", (e) => {
+      if (isGotoKey(e) && it.view) {
+        e.preventDefault();
+        it.view.askLine();
+      }
+    });
   });
-  item.ready.then(() => { if (item.view) item.view.go(at.line, at.end); });
+  item.ready.then(() => {
+    if (!item.view) return;
+    item.view.go(at.line, at.end);
+    // As in an editor, keys go to the file just opened: Ctrl+G, the arrows, Page Down.
+    if (item === dock.active) item.view.focus();
+  });
 }
 
-function fileView(conv, item, data) {
+const isGotoKey = (e) => e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === "g";
+
+// keep: what the reader had in view, so a file that changed on disk comes back where it was.
+function loadFile(item, keep = null) {
+  return api(`${convApi(item.conv, "/file")}?path=${encodeURIComponent(item.path)}`, { headers: sendHeaders() })
+    .then((data) => {
+      watch(item, data.path, data.stamp, () => loadFile(item, item.view ? item.view.state() : null));
+      item.view = fileView(item.conv, item, data, keep);
+    }, (err) => panelError(item, err));
+}
+
+// "42", "42:7" or "40-50", as the links take them.
+function parseLines(text) {
+  const m = String(text).trim().match(/^(\d+)(?:(?::\d+)|-(\d+))?$/);
+  return m ? { line: Number(m[1]), end: m[2] ? Number(m[2]) : null } : null;
+}
+
+function fileView(conv, item, data, keep) {
   const lines = data.text.split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   const lang = highlighting() ? languageOfPath(hljs, data.path) : null;
@@ -368,22 +498,52 @@ function fileView(conv, item, data) {
     clearTimeout(note.timer);
     note.timer = setTimeout(() => { note.textContent = ""; }, 5000);
   };
-  const goto = h("input", { class: "fv-goto", type: "number", min: 1, max: lines.length, placeholder: "Line", "aria-label": "Go to line",
-    onkeydown: (e) => { if (e.key === "Enter") go(Number(goto.value)); } });
+  const goto = h("input", { class: "fv-goto", type: "text", inputmode: "numeric", placeholder: "Line", "aria-label": "Go to line",
+    title: "Go to line (Ctrl+G): 42, or 40-50 to mark a range",
+    onkeydown: (e) => {
+      if (e.key === "Enter") {
+        const at = parseLines(goto.value);
+        if (at) go(at.line, at.end);
+        scroller.focus({ preventScroll: true });
+      } else if (e.key === "Escape") {
+        e.stopPropagation();
+        scroller.focus({ preventScroll: true });
+      }
+    } });
+  let marked = null;
   gutter.addEventListener("click", (e) => go(Math.floor((e.offsetY - 8) / LINE_PX) + 1));
   const show = (line, end) => {
+    marked = [line, end];
     mark.hidden = false;
     mark.style.top = `${8 + (line - 1) * LINE_PX}px`;
     mark.style.height = `${(end - line + 1) * LINE_PX}px`;
   };
-  const go = (line, end) => {
+  const markdown = !data.binary && MARKDOWN_RE.test(data.path);
+  let mode = markdown ? (keep && keep.mode) || "preview" : "source", preview = null;
+  const previewScroll = h("div", { class: "fv-scroll fv-preview", tabindex: "0" });
+  const modes = markdown ? h("div", { class: "seg fv-modes", role: "group", "aria-label": "Show" },
+    [["preview", "Preview"], ["source", "Source"]].map(([m, label]) => h("button", { type: "button", "data-mode": m,
+      onclick: () => { setMode(m); current().focus({ preventScroll: true }); } }, label))) : null;
+  const current = () => (mode === "preview" ? previewScroll : scroller);
+  function setMode(m) {
+    mode = m;
+    if (mode === "preview" && !preview) {
+      preview = markdownPreview(conv, data, previewScroll);
+      previewScroll.append(preview);
+    }
+    previewScroll.hidden = mode !== "preview";
+    scroller.hidden = mode === "preview";
+    if (modes) for (const b of modes.children) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  }
+  function go(line, end) {
     if (!line || line < 1) return;
+    if (mode === "preview") setMode("source");
     line = Math.min(line, lines.length || 1);
     end = Math.max(line, Math.min(end || line, lines.length || 1));
     show(line, end);
     scroller.scrollTop = Math.max(0, 8 + (line - 1) * LINE_PX - scroller.clientHeight / 3);
-    goto.value = line;
-  };
+    goto.value = end > line ? `${line}-${end}` : line;
+  }
   text.addEventListener("dblclick", (e) => {
     const line = Math.min(lines.length || 1, Math.max(1, Math.floor((e.clientY - box.getBoundingClientRect().top - 8) / LINE_PX) + 1));
     getSelection().removeAllRanges();
@@ -400,14 +560,282 @@ function fileView(conv, item, data) {
   });
   const notes = [data.binary ? "Binary file: not shown." : null,
     data.truncated ? `Only the first ${fmtBytes(data.text.length)} of ${fmtBytes(data.size)} are shown.` : null].filter(Boolean);
+  const hadFocus = item.body.contains(document.activeElement);
   item.body.replaceChildren();
   append(item.body, [h("div", { class: "panel-bar" },
     copyable(h("span", { class: "mono path" }, breakable(data.display)), data.path),
     h("span", { class: "muted" }, `${fmt(lines.length)} lines · ${fmtBytes(data.size)}${lang && lang !== "plaintext" ? ` · ${languageName(lang)}` : ""}`),
-    h("span", { class: "spacer" }), goto,
+    h("span", { class: "spacer" }), modes, goto,
+    h("button", { class: "btn", type: "button", title: `Browse ${dirOf(data.path)}`, onclick: () => openDir(conv, dirOf(data.path), data.path) }, "▦ Folder"),
     h("button", { class: "btn", type: "button", title: `Open a shell in ${dirOf(data.path)}`, onclick: () => openShell(conv, dirOf(data.path)) }, "❯ Shell here")),
-  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : scroller, note]);
-  return { go };
+  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : [scroller, markdown ? previewScroll : null], note]);
+  setMode(mode);
+  if (keep) {
+    if (keep.marked) show(...keep.marked);
+    goto.value = keep.goto;
+    scroller.scrollTop = keep.top;
+    scroller.scrollLeft = keep.left;
+    previewScroll.scrollTop = keep.previewTop;
+    tell("Reloaded: the file changed on disk");
+  }
+  if (hadFocus) current().focus({ preventScroll: true });
+  return {
+    go,
+    focus: () => { if (!item.body.contains(document.activeElement)) current().focus({ preventScroll: true }); },
+    // Ctrl+G: the line box, with the source in view.
+    askLine: () => {
+      if (mode === "preview") setMode("source");
+      goto.focus();
+      goto.select();
+    },
+    state: () => ({ mode, marked, goto: goto.value, top: scroller.scrollTop, left: scroller.scrollLeft, previewTop: previewScroll.scrollTop }),
+  };
+}
+
+// GitHub's anchors: lower case, punctuation dropped, spaces as dashes, a count after repeats.
+function headingAnchors(box) {
+  const used = new Map();
+  for (const heading of box.querySelectorAll("h1, h2, h3, h4, h5, h6")) {
+    const slug = heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
+    const n = used.get(slug) || 0;
+    used.set(slug, n + 1);
+    heading.dataset.anchor = n ? `${slug}-${n}` : slug;
+  }
+}
+
+// A Markdown file read as it is meant to be: its links to other files and folders open them here, from its own folder.
+function markdownPreview(conv, data, scroller) {
+  const box = renderMarkdown(data.text, "md fv-md");
+  headingAnchors(box);
+  box.addEventListener("click", (e) => {
+    const a = e.target.closest("a[href]");
+    if (!a || /^[a-z][\w+.-]*:/i.test(a.getAttribute("href"))) return;
+    e.preventDefault();
+    const [where, hash = ""] = a.getAttribute("href").split("#");
+    if (!where) {
+      const target = box.querySelector(`[data-anchor="${CSS.escape(decodeURIComponent(hash).toLowerCase())}"]`);
+      if (target) scroller.scrollTop += target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 8;
+      return;
+    }
+    let path = decodeURIComponent(where.split("?")[0]);
+    // As on GitHub, a leading slash starts from the repository.
+    path = path.startsWith("/") && data.root ? `${data.root}${path}` : path.startsWith("/") ? path : `${dirOf(data.path)}/${path}`;
+    const lines = hash.match(/^L(\d+)(?:-L(\d+))?$/);
+    openPath(conv, normalPath(path), lines ? { line: Number(lines[1]), end: lines[2] ? Number(lines[2]) : null } : {});
+  });
+  requestAnimationFrame(() => linkify([box], { conv, cwd: dirOf(data.path) }));
+  return box;
+}
+
+function normalPath(path) {
+  const parts = [];
+  for (const part of path.split("/")) {
+    if (part === "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+
+// A link that may name a folder or a file.
+async function openPath(conv, path, at = {}) {
+  let stat = null;
+  try {
+    stat = (await postJson(convApi(conv, "/stat"), { paths: [path] })).stats[path];
+  } catch (_) { /* the panel says what went wrong */ }
+  if (stat && stat.type === "dir") openDir(conv, path);
+  else openFile(conv, { path, display: path }, at);
+}
+
+// ---------- folder browser ----------
+const HIDDEN_KEY = "ctokens.dir.hidden";
+
+// One panel per folder; going into another folder or up moves the panel there. from: the entry to select first.
+function openDir(conv, path, from = null) {
+  const problem = keyProblem();
+  if (problem) return alert(problem);
+  const open = dock.items.find((i) => i.kind === "dir" && i.path === path);
+  if (open) {
+    focusPanel(open);
+    if (from) open.view.select(from);
+    return;
+  }
+  const item = openPanel(`dir:${++dirCount}`, `${baseName(path) || path}/`, "dir", conv, (it) => {
+    it.tip = path;
+    it.path = path;
+    it.body.append(skeleton(8));
+    it.view = dirView(it);
+    it.onShow = () => {
+      if (it === dock.active) it.view.focus();
+      settle(it);
+    };
+  });
+  item.view.go(path, from);
+}
+
+let dirCount = 0;
+
+function dirView(item) {
+  const conv = item.conv;
+  const state = { data: null, filter: "", hidden: stored(HIDDEN_KEY, "") === "1", selected: null };
+  const list = h("div", { class: "dir-list", role: "listbox", "aria-label": "Folder entries", tabindex: "-1" });
+  const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
+  const filter = h("input", { class: "fv-goto dir-filter", type: "search", placeholder: "Filter", "aria-label": "Filter the entries",
+    spellcheck: "false", autocomplete: "off",
+    oninput: () => { state.filter = filter.value; draw(); },
+    onkeydown: (e) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        move(0);
+      } else if (e.key === "Enter") {
+        const first = list.querySelector(".dir-row");
+        if (first) first.click();
+      } else if (e.key === "Escape" && filter.value) {
+        e.stopPropagation();
+        filter.value = state.filter = "";
+        draw();
+      }
+    } });
+  const hidden = h("label", { class: "dir-hidden", title: "Show the entries whose name starts with a dot" },
+    h("input", { type: "checkbox", checked: state.hidden, onchange: (e) => {
+      state.hidden = e.target.checked;
+      store(HIDDEN_KEY, state.hidden ? "1" : "");
+      draw();
+    } }), "Hidden");
+  const crumbs = h("nav", { class: "dir-crumbs mono", "aria-label": "Folder path" });
+  const up = h("button", { class: "btn small", type: "button", title: "Parent folder (Backspace)", "aria-label": "Parent folder",
+    onclick: () => goUp() }, "↑");
+  const shellHere = h("button", { class: "btn", type: "button", onclick: () => openShell(conv, item.path) }, "❯ Shell here");
+  const scroll = h("div", { class: "dir-scroll" }, list);
+  item.body.replaceChildren(h("div", { class: "panel-bar" }, up, crumbs, h("span", { class: "spacer" }), filter, hidden, shellHere),
+    scroll, note);
+  item.body.addEventListener("keydown", (e) => {
+    if (e.target === filter) return;
+    if (e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) {
+      e.preventDefault();
+      goUp();
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const rows = [...list.querySelectorAll(".dir-row")];
+      move(rows.indexOf(document.activeElement) + (e.key === "ArrowDown" ? 1 : -1));
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && e.key !== " ") {
+      filter.focus();
+    }
+  });
+
+  function move(i) {
+    const rows = [...list.querySelectorAll(".dir-row")];
+    const row = rows[Math.max(0, Math.min(rows.length - 1, i))];
+    if (row) row.focus();
+  }
+
+  function goUp() {
+    if (state.data && state.data.parent) go(state.data.parent, state.data.path);
+  }
+
+  function crumbsOf(data) {
+    const parts = data.path.split("/").filter(Boolean);
+    const shown = data.root && data.path.startsWith(data.root) ? data.root.split("/").filter(Boolean).length - 1 : 0;
+    const links = [];
+    if (shown > 0) links.push(h("span", { class: "muted" }, "…/"));
+    else links.push(h("button", { class: "crumb", type: "button", onclick: () => go("/") }, "/"));
+    parts.forEach((part, i) => {
+      if (i < shown) return;
+      const to = `/${parts.slice(0, i + 1).join("/")}`;
+      links.push(i === parts.length - 1 ? h("b", {}, part) : h("button", { class: "crumb", type: "button", onclick: () => go(to) }, part),
+        i === parts.length - 1 ? null : h("span", { class: "muted" }, "/"));
+    });
+    return links;
+  }
+
+  function row(entry) {
+    const full = `${state.data.path === "/" ? "" : state.data.path}/${entry.name}`;
+    const open = (e) => {
+      if (entry.type === "dir") return e && (e.ctrlKey || e.metaKey || e.button === 1) ? openDir(conv, full) : go(full);
+      openFile(conv, { path: full, display: state.data.root && full.startsWith(`${state.data.root}/`) ? full.slice(state.data.root.length + 1) : full });
+    };
+    const el = h("button", { class: `dir-row ${entry.type}${entry.ignored ? " ignored" : ""}`, type: "button", role: "option",
+      "data-name": entry.name, title: `${full}${entry.link ? " (link)" : ""}${entry.ignored ? " · ignored by git" : ""}`,
+      onclick: open, onfocus: () => { state.selected = entry.name; } },
+    h("span", { class: "dir-icon", "aria-hidden": "true" }, entry.type === "dir" ? "▸" : entry.type === "file" ? "·" : "?"),
+    h("span", { class: "dir-name mono" }, entry.name, entry.type === "dir" ? "/" : "", entry.link ? h("span", { class: "muted" }, " →") : null),
+    h("span", { class: "dir-size muted" }, entry.size == null ? "" : fmtBytes(entry.size)),
+    h("span", { class: "dir-time muted" }, entry.mtime ? new Date(entry.mtime * 1000).toISOString().replace("T", " ").slice(0, 16) : ""));
+    el.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+    el.addEventListener("auxclick", (e) => { if (e.button === 1 && entry.type === "dir") { e.preventDefault(); open(e); } });
+    return el;
+  }
+
+  function draw() {
+    const data = state.data;
+    if (!data) return;
+    const needle = state.filter.trim().toLowerCase();
+    const entries = data.entries.filter((e) => (state.hidden || !e.name.startsWith(".") || needle.startsWith("."))
+      && (!needle || e.name.toLowerCase().includes(needle)));
+    const left = data.entries.length - entries.length;
+    list.replaceChildren();
+    append(list, [entries.map(row),
+      entries.length ? null : h("div", { class: "muted pad" }, data.entries.length ? "Nothing matches." : "Empty folder."),
+      left && !needle ? h("div", { class: "muted pad small" }, `${left} hidden entr${left === 1 ? "y" : "ies"}`) : null,
+      data.truncated ? h("div", { class: "notice" }, `Only the first ${fmt(data.entries.length)} entries are shown.`) : null]);
+    const chosen = state.selected && [...list.children].find((r) => r.dataset.name === state.selected);
+    if (chosen) chosen.classList.add("selected");
+  }
+
+  async function go(path, from = null, keep = false) {
+    let data;
+    try {
+      data = await api(`${convApi(conv, "/dir")}?path=${encodeURIComponent(path)}`, { headers: sendHeaders() });
+    } catch (err) {
+      if (!state.data) return panelError(item, err);
+      note.textContent = err.message;
+      return;
+    }
+    const top = scroll.scrollTop, focused = item.body.contains(document.activeElement);
+    const same = state.data && state.data.path === data.path;
+    state.data = data;
+    item.path = data.path;
+    item.tip = data.path;
+    item.title = `${baseName(data.path) || "/"}/`;
+    if (item.tabEl) {
+      item.tabEl.title = item.tip;
+      const label = item.tabEl.querySelector(".dock-title");
+      if (label) label.textContent = dock.mode === "float" ? item.tip : item.title;
+    }
+    watch(item, data.path, data.stamp, () => go(data.path, null, true));
+    if (!same) {
+      state.selected = from ? baseName(from) : null;
+      if (!keep) filter.value = state.filter = "";
+    }
+    crumbs.replaceChildren();
+    append(crumbs, crumbsOf(data));
+    up.disabled = !data.parent;
+    shellHere.title = `Open a shell in ${data.path}`;
+    draw();
+    if (keep && same) scroll.scrollTop = top;
+    else {
+      const chosen = list.querySelector(".dir-row.selected");
+      scroll.scrollTop = 0;
+      if (chosen) chosen.scrollIntoView({ block: "center" });
+    }
+    if (keep) note.textContent = "";
+    if (focused || !keep) focusList();
+  }
+
+  function focusList() {
+    if (item !== dock.active && dock.mode !== "float") return;
+    const target = list.querySelector(".dir-row.selected") || list.querySelector(".dir-row") || list;
+    target.focus({ preventScroll: true });
+  }
+
+  return {
+    go,
+    select: (path) => {
+      state.selected = baseName(path);
+      draw();
+      focusList();
+    },
+    focus: () => { if (!item.body.contains(document.activeElement)) focusList(); },
+  };
 }
 
 // The lines a selection in a file spans, and what can be done with them: copied, with the path and lines as a header,
@@ -651,7 +1079,16 @@ function openShell(conv, cwd) {
     const screen = h("div", { class: "term" });
     const status = h("span", { class: "muted" }, "Starting…");
     const note = h("span", { class: "muted fv-note", "aria-live": "polite" });
-    item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status), screen, note);
+    // Where the shell is now, after any cd.
+    const browse = async () => {
+      let folder = cwd;
+      try {
+        if (sh.id) folder = (await postJson(`/api/shells/${sh.id}/state`, {})).shell.current_cwd || cwd;
+      } catch (_) { /* the folder it started in */ }
+      openDir(conv, folder);
+    };
+    item.body.append(h("div", { class: "panel-bar" }, h("span", { class: "mono path" }, breakable(cwd)), status, h("span", { class: "spacer" }),
+      h("button", { class: "btn small", type: "button", title: "Browse the folder the shell is in now", onclick: browse }, "▦ Folder")), screen, note);
     const term = new Terminal({ ...terminalOptions(), cursorBlink: true, scrollback: 5000, allowProposedApi: false });
     const sh = { id: null, queue: "", sending: false, cols: 80, rows: 24, ended: false };
     let opened = false;
@@ -744,6 +1181,8 @@ function openShell(conv, cwd) {
 
 // ---------- links in a terminal ----------
 const URL_RE = /\bhttps?:\/\/[^\s"'<>`]+/g;
+// A logical line longer than this many rows is not followed further.
+const WRAP_ROWS = 50;
 
 // The text of a buffer line with, for each character, the 1-based column it starts at: wide characters take two.
 function bufferLineText(line) {
@@ -759,30 +1198,44 @@ function bufferLineText(line) {
   return { text, cols };
 }
 
+// The rows the terminal wrapped y (0-based) into, as one text, with where each character is: a URL or a path cut by the
+// right edge still links whole.
+function logicalLine(buffer, y) {
+  let top = y;
+  while (top > 0 && y - top < WRAP_ROWS && buffer.getLine(top) && buffer.getLine(top).isWrapped) top--;
+  let text = "";
+  const cells = [];
+  for (let row = top; row - top < 2 * WRAP_ROWS; row++) {
+    const line = buffer.getLine(row);
+    if (!line || (row > top && !line.isWrapped)) break;
+    const part = bufferLineText(line);
+    for (const x of part.cols) cells.push({ x, y: row + 1 });
+    text += part.text;
+  }
+  return { text, cells };
+}
+
 // URLs open in a new tab; commits and files open their panel, as on the conversation, from where the shell is now.
 function shellLinks(term, conv, sh) {
   return {
     provideLinks(y, callback) {
-      const line = term.buffer.active.getLine(y - 1);
-      if (!line || !sh.id) return callback(undefined);
-      const { text, cols } = bufferLineText(line);
-      const urls = [...text.matchAll(URL_RE)].map((m) => {
-        const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
-        return { kind: "url", start: m.index, end: m.index + url.length, token: url };
-      });
-      const found = candidates(text).filter((c) => !urls.some((u) => c.start < u.end && u.start < c.end));
-      if (!urls.length && !found.length) return callback(undefined);
-      const range = (c) => ({ start: { x: cols[c.start], y }, end: { x: cols[c.end - 1], y } });
-      const links = urls.map((u) => ({ range: range(u), text: u.token,
-        activate: () => window.open(u.token, "_blank", "noopener,noreferrer") }));
-      const key = `shell:${sh.id}`;
-      resolveRefs(conv, found.filter((c) => c.kind === "commit").map((c) => c.token),
-        found.filter((c) => c.kind === "file").map((c) => c.token), sh.id)
+      if (!sh.id) return callback(undefined);
+      const { text, cells } = logicalLine(term.buffer.active, y - 1);
+      const range = (c) => ({ start: cells[c.start], end: cells[c.end - 1] });
+      const found = candidates(text).filter((c) => range(c).start.y <= y && y <= range(c).end.y);
+      if (!found.length) return callback(undefined);
+      const links = found.filter((c) => c.kind === "url").map((c) => ({ range: range(c), text: c.token,
+        activate: () => window.open(c.token, "_blank", "noopener,noreferrer") }));
+      const refs = found.filter((c) => c.kind !== "url");
+      if (!refs.length) return callback(links);
+      const scope = { shell: sh.id };
+      resolveRefs(conv, refs.filter((c) => c.kind === "commit").map((c) => c.token),
+        refs.filter((c) => c.kind === "file").map((c) => c.token), scope)
         .catch(() => null)
         .then(() => {
-          const refs = refsOf(key);
-          for (const c of found) {
-            const info = c.kind === "commit" ? refs.commits.get(c.token) : refs.files.get(c.token);
+          const known = refsOf(refKey(conv, scope));
+          for (const c of refs) {
+            const info = c.kind === "commit" ? known.commits.get(c.token) : known.files.get(c.token);
             if (!info || (Array.isArray(info) && !info.length)) continue;
             const at = { line: c.line, end: c.end2 };
             links.push({ range: range(c), text: text.slice(c.start, c.end), activate: (e) => {
@@ -801,6 +1254,10 @@ function shellLinks(term, conv, sh) {
 function shellButton(conv, cwd) {
   return h("button", { class: "btn", type: "button", title: `Open an interactive shell in ${cwd}`,
     onclick: () => openShell(conv, cwd) }, "❯ Shell");
+}
+
+function dirButton(conv, cwd) {
+  return h("button", { class: "btn", type: "button", title: `Browse ${cwd}`, onclick: () => openDir(conv, cwd) }, "▦ Browse");
 }
 
 // ---------- chooser for a name that matches several files ----------
@@ -864,23 +1321,30 @@ function choose(conv, matches, at, anchor) {
   items[0].focus();
 }
 
-// ---------- links on commit hashes and file names ----------
+// ---------- links on URLs, commit hashes and file names ----------
 const COMMIT_RE = /(?<![\w/.\-])[0-9a-f]{7,40}(?![\w/\-])/g;
 const FILE_RE = /(?<![\w@./~\-])((?:~|\.{1,2})?\/?(?:[\w@+.\-]+\/)*(?:[\w@+\-][\w@+.\-]*\.[A-Za-z][\w\-]{0,11}|Makefile|Dockerfile|Jenkinsfile|README|LICENSE))(?:(?::|#L)(\d+)(?:([:\-])(\d+))?)?(?![\w/])/g;
-const LINK_SKIP = "a, button, input, textarea, select, summary, kbd, .ref, #conv-head, .composer, .xterm, .msg-head, .dock, .pick";
+const LINK_SKIP = "a, button, input, textarea, select, summary, kbd, .ref, #conv-head, .composer, .xterm, .msg-head, .pick";
 const RESOLVE_BATCH = 400;
 
-// conversation id -> { commits: Map(token -> info|null), files: Map(token -> matches|null) }
+// conversation id, "shell:<id>" or "cwd:<folder>" -> { commits: Map(token -> info|null), files: Map(token -> matches|null) }
 const refCache = new Map();
 const linker = { observer: null, queue: new Set(), timer: null, off: false };
 
-function refsOf(conv) {
-  if (!refCache.has(conv)) refCache.set(conv, { commits: new Map(), files: new Map() });
-  return refCache.get(conv);
+function refsOf(key) {
+  if (!refCache.has(key)) refCache.set(key, { commits: new Map(), files: new Map() });
+  return refCache.get(key);
 }
+
+// scope: { shell } to look names up from where that shell is now, { cwd } from a folder, {} from the conversation's.
+const refKey = (conv, scope = {}) => (scope.shell ? `shell:${scope.shell}` : scope.cwd ? `cwd:${scope.cwd}` : conv);
 
 function candidates(text) {
   const found = [];
+  for (const m of text.matchAll(URL_RE)) {
+    const url = m[0].replace(/[.,;:!?)\]}'"]+$/, "");
+    found.push({ kind: "url", start: m.index, end: m.index + url.length, token: url });
+  }
   for (const m of text.matchAll(COMMIT_RE)) {
     if (/\d/.test(m[0]) && /[a-f]/.test(m[0])) found.push({ kind: "commit", start: m.index, end: m.index + m[0].length, token: m[0] });
   }
@@ -889,84 +1353,112 @@ function candidates(text) {
     found.push({ kind: "file", start: m.index, end: m.index + m[0].length, token: m[1],
       line: m[2] ? Number(m[2]) : null, end2: m[3] === "-" && m[4] ? Number(m[4]) : null });
   }
-  return found.sort((a, b) => a.start - b.start || b.end - a.end)
-    .filter((c, i, all) => !all.slice(0, i).some((o) => c.start < o.end && o.start < c.end));
+  let reach = 0;
+  return found.sort((a, b) => a.start - b.start || b.end - a.end).filter((c) => c.start >= reach && (reach = c.end));
 }
 
-function textNodes(root) {
-  const nodes = [];
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => (n.data.length < 7 || !n.parentElement || n.parentElement.closest(LINK_SKIP)
-      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
-  });
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-  return nodes;
+// Runs of text to look for names in: the text nodes of one code element go together, since highlighting splits a path
+// or a URL across its spans; anything that is not linked breaks a run.
+function textRuns(root) {
+  const runs = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let last = null;
+  while (walker.nextNode()) {
+    const node = walker.currentNode, parent = node.parentElement;
+    if (!parent || parent.closest(LINK_SKIP)) {
+      last = null;
+      continue;
+    }
+    const code = parent.closest("code");
+    if (code && last && last.code === code) {
+      last.nodes.push(node);
+      last.text += node.data;
+    } else runs.push(last = { code, nodes: [node], text: node.data });
+  }
+  return runs.filter((r) => r.text.length >= 3);
 }
 
-// shell: resolve against where that shell is now instead of the conversation's folder; its names are cached apart.
-async function resolveRefs(conv, commits, files, shell = null) {
-  const refs = refsOf(shell ? `shell:${shell}` : conv);
+async function resolveRefs(conv, commits, files, scope = {}) {
+  const refs = refsOf(refKey(conv, scope));
   commits = [...new Set(commits)].filter((c) => !refs.commits.has(c));
   files = [...new Set(files)].filter((f) => !refs.files.has(f));
   for (let i = 0; i < Math.max(commits.length, files.length); i += RESOLVE_BATCH) {
     const c = commits.slice(i, i + RESOLVE_BATCH), f = files.slice(i, i + RESOLVE_BATCH);
     for (const x of c) refs.commits.set(x, null);
     for (const x of f) refs.files.set(x, null);
-    const data = await postJson(convApi(conv, "/resolve"), { commits: c, files: f, ...(shell ? { shell } : {}) });
+    const data = await postJson(convApi(conv, "/resolve"), { commits: c, files: f, ...scope });
     for (const [k, v] of Object.entries(data.commits)) refs.commits.set(k, { ...v, cwd: data.cwd });
     for (const [k, v] of Object.entries(data.files)) refs.files.set(k, v);
   }
 }
 
-function refSpan(c, text, refs) {
+// What wraps each piece of a found name, or null when it names nothing here.
+function refMaker(c, refs, key) {
+  if (c.kind === "url") {
+    return () => h("a", { class: "ref ref-url", href: c.token, target: "_blank", rel: "noopener noreferrer", title: c.token });
+  }
   if (c.kind === "commit") {
     const info = refs.commits.get(c.token);
     if (!info) return null;
-    return h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": info.sha, "data-cwd": info.cwd,
-      title: [info.sha.slice(0, 12), info.subject, info.author && `${info.author}, ${info.date}`].filter(Boolean).join(" · ") }, text);
+    return () => h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": info.sha, "data-cwd": info.cwd,
+      title: [info.sha.slice(0, 12), info.subject, info.author && `${info.author}, ${info.date}`].filter(Boolean).join(" · ") });
   }
   const matches = refs.files.get(c.token);
   if (!matches) return null;
-  return h("span", { class: `ref ref-file${matches.length > 1 ? " many" : ""}`, role: "link", tabindex: "0", "data-file": c.token,
-    "data-line": c.line, "data-end": c.end2,
+  return () => h("span", { class: `ref ref-file${matches.length > 1 ? " many" : ""}`, role: "link", tabindex: "0", "data-file": c.token,
+    "data-line": c.line, "data-end": c.end2, "data-refs": key,
     title: matches.length > 1 ? `${matches.length} files match: ${matches.slice(0, 8).map((m) => m.display).join(", ")}${matches.length > 8 ? "…" : ""}`
-      : `Open ${matches[0].display}${c.line ? ` at line ${c.line}` : ""}` }, text);
+      : `Open ${matches[0].display}${c.line ? ` at line ${c.line}` : ""}` });
 }
 
-async function linkify(roots) {
-  const conv = app.route && app.route.id;
-  if (!conv || linker.off || !sendKey) return;
+// Wraps the characters start..end of a run, one element per text node they cross. Candidates go from the last, so the
+// nodes before keep their offsets.
+function wrapRun(run, starts, c, make) {
+  for (let i = run.nodes.length - 1; i >= 0; i--) {
+    const node = run.nodes[i], from = starts[i];
+    if (from >= c.end || from + node.data.length <= c.start) continue;
+    const s = Math.max(c.start - from, 0), e = Math.min(c.end - from, node.data.length);
+    if (e < node.data.length) node.splitText(e);
+    const piece = s > 0 ? node.splitText(s) : node;
+    const el = make();
+    piece.replaceWith(el);
+    el.append(piece);
+  }
+}
+
+// where: { conv, cwd } for a panel's text, looked up from that folder; the conversation on screen otherwise.
+async function linkify(roots, where = null) {
+  const conv = where ? where.conv : app.route && app.route.id;
+  if (!conv) return;
   const work = [];
   for (const root of roots) {
     if (!root.isConnected) continue;
-    for (const node of textNodes(root)) {
-      const found = candidates(node.data);
-      if (found.length) work.push({ node, found });
+    for (const run of textRuns(root)) {
+      const found = candidates(run.text);
+      if (found.length) work.push({ run, found });
     }
   }
   if (!work.length) return;
-  try {
-    await resolveRefs(conv, work.flatMap((w) => w.found.filter((c) => c.kind === "commit").map((c) => c.token)),
-      work.flatMap((w) => w.found.filter((c) => c.kind === "file").map((c) => c.token)));
-  } catch (err) {
-    if (err.status === 403) linker.off = true;
-    return;
-  }
-  if (!app.route || app.route.id !== conv) return;
-  const refs = refsOf(conv);
-  for (const { node, found } of work) {
-    if (!node.isConnected) continue;
-    const text = node.data, parts = [];
-    let at = 0;
-    for (const c of found) {
-      const span = refSpan(c, text.slice(c.start, c.end), refs);
-      if (!span) continue;
-      parts.push(text.slice(at, c.start), span);
-      at = c.end;
+  const scope = where && where.cwd ? { cwd: where.cwd } : {};
+  // URLs need nothing from the server.
+  if (sendKey && !linker.off) {
+    try {
+      await resolveRefs(conv, work.flatMap((w) => w.found.filter((c) => c.kind === "commit").map((c) => c.token)),
+        work.flatMap((w) => w.found.filter((c) => c.kind === "file").map((c) => c.token)), scope);
+    } catch (err) {
+      if (err.status === 403) linker.off = true;
     }
-    if (!parts.length) continue;
-    parts.push(text.slice(at));
-    node.replaceWith(...parts.filter((p) => p !== ""));
+  }
+  if (!where && (!app.route || app.route.id !== conv)) return;
+  const key = refKey(conv, scope), refs = refsOf(key);
+  for (const { run, found } of work) {
+    if (!run.nodes.every((n) => n.isConnected) || run.nodes.map((n) => n.data).join("") !== run.text) continue;
+    let at = 0;
+    const starts = run.nodes.map((n) => (at += n.data.length) - n.data.length);
+    for (const c of found.slice().reverse()) {
+      const make = refMaker(c, refs, key);
+      if (make) wrapRun(run, starts, c, make);
+    }
   }
 }
 
@@ -982,6 +1474,8 @@ function startPanels() {
     };
   }
   document.addEventListener("keydown", escapeClosesPanel);
+  document.addEventListener("keydown", gotoActiveFile);
+  setInterval(checkPanels, WATCH_MS);
   // A hidden tab gives its connection back; the shells pick up from the byte they had reached.
   document.addEventListener("visibilitychange", streamShells);
   window.addEventListener("resize", () => { if (dock.items.length) drawDock(); });
@@ -1004,13 +1498,14 @@ function startPanels() {
 
 function followRef(e) {
   const ref = e.target.closest && e.target.closest(".ref");
-  if (!ref) return;
+  // A URL is a plain link.
+  if (!ref || ref.tagName === "A") return;
   const item = dock.items.find((i) => i.body.contains(ref));
   const conv = item ? item.conv : app.route && app.route.id;
   if (!conv) return;
   e.preventDefault();
   if (ref.dataset.sha) return openCommit(conv, ref.dataset.sha, null, ref.dataset.cwd);
-  const matches = refsOf(conv).files.get(ref.dataset.file) || [];
+  const matches = refsOf(ref.dataset.refs || conv).files.get(ref.dataset.file) || [];
   const at = { line: ref.dataset.line ? Number(ref.dataset.line) : null, end: ref.dataset.end ? Number(ref.dataset.end) : null };
   if (matches.length === 1) openFile(conv, matches[0], at);
   else if (matches.length > 1) choose(conv, matches, at, ref);

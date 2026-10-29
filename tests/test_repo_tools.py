@@ -13,7 +13,8 @@ from unittest import mock
 from fixtures import user
 
 from ctokens.pricing import load_prices
-from ctokens.repo import FileIndex, RepoError, find_commits, find_files, numstat_files, read_file, show_commit
+from ctokens.repo import (FileIndex, RepoError, find_commits, find_files, list_dir, numstat_files, read_file, show_commit,
+                          stat_paths)
 from ctokens.web.server import Config, Handler, Server
 from ctokens.web.shells import Shells
 
@@ -94,6 +95,44 @@ class RepoTest(unittest.TestCase):
         for bad in ("missing.py", "src", "", None):
             with self.subTest(bad=bad), self.assertRaises(RepoError):
                 read_file(self.repo, bad)
+
+    def test_read_file_stamp_follows_writes(self):
+        target = self.repo / "untracked.txt"
+        before = read_file(self.repo, "untracked.txt")["stamp"]
+        target.write_text("newer and longer\n")
+        try:
+            self.assertNotEqual(read_file(self.repo, "untracked.txt")["stamp"], before)
+        finally:
+            target.write_text("new\n")
+
+    def test_list_dir(self):
+        (self.repo / ".gitignore").write_text("build/\n")
+        (self.repo / "build").mkdir(exist_ok=True)
+        try:
+            data = list_dir(self.repo / "src", "..")
+            self.assertEqual((data["path"], data["display"], data["root"]), (str(self.repo), ".", str(self.repo)))
+            names = [e["name"] for e in data["entries"]]
+            self.assertEqual(names, [".git", "build", "docs", "src", ".gitignore", "logo.bin", "untracked.txt"])
+            entries = {e["name"]: e for e in data["entries"]}
+            self.assertEqual((entries["src"]["type"], entries["src"]["size"]), ("dir", None))
+            self.assertEqual((entries["untracked.txt"]["type"], entries["untracked.txt"]["size"]), ("file", 4))
+            self.assertEqual({n for n, e in entries.items() if e["ignored"]}, {".git", "build"})
+            self.assertEqual(list_dir(self.repo, "src/web")["display"], "src/web")
+            self.assertEqual(list_dir(self.repo, "")["path"], str(self.repo))
+        finally:
+            (self.repo / ".gitignore").unlink()
+            (self.repo / "build").rmdir()
+        for bad in ("missing", "src/server.py", None):
+            with self.subTest(bad=bad), self.assertRaises(RepoError):
+                list_dir(self.repo, bad)
+
+    def test_stat_paths(self):
+        stats = stat_paths([str(self.repo / "src" / "server.py"), str(self.repo / "src"), str(self.repo / "gone.py"), "relative.py", 3])
+        self.assertEqual(set(stats), {str(self.repo / "src" / "server.py"), str(self.repo / "src"), str(self.repo / "gone.py")})
+        self.assertEqual(stats[str(self.repo / "src" / "server.py")]["type"], "file")
+        self.assertEqual(stats[str(self.repo / "src")]["type"], "dir")
+        self.assertIsNone(stats[str(self.repo / "gone.py")])
+        self.assertEqual(stats[str(self.repo / "src" / "server.py")]["stamp"], read_file(self.repo, "src/server.py")["stamp"])
 
     def test_read_file_truncates(self):
         with mock.patch("ctokens.repo.MAX_FILE_BYTES", 10):
@@ -253,6 +292,20 @@ class RepoApiTest(unittest.TestCase):
         self.assertEqual(len(data["files"]["server.py"]), 2)
         self.assertEqual(data["root"], str(self.repo))
 
+    def test_resolve_from_a_folder(self):
+        status, data = self.request("POST", f"/api/conversations/{CONV}/resolve", {"files": ["./server.py"], "cwd": str(self.repo / "src/web")})
+        self.assertEqual((status, data["files"]["./server.py"][0]["display"]), (200, "src/web/server.py"))
+        self.assertEqual(self.request("POST", f"/api/conversations/{CONV}/resolve", {"files": [], "cwd": "relative"})[0], 400)
+
+    def test_dir_and_stat(self):
+        status, data = self.request("GET", f"/api/conversations/{CONV}/dir?path=src")
+        self.assertEqual((status, [e["name"] for e in data["entries"]]), (200, ["web", "server.py"]))
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/dir")[1]["path"], str(self.repo))
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/dir?path=nope")[0], 404)
+        status, data = self.request("POST", f"/api/conversations/{CONV}/stat", {"paths": [str(self.repo / "src"), str(self.repo / "x")]})
+        self.assertEqual((status, data["stats"][str(self.repo / "src")]["type"], data["stats"][str(self.repo / "x")]), (200, "dir", None))
+        self.assertEqual(self.request("POST", f"/api/conversations/{CONV}/stat", {"paths": "x"})[0], 400)
+
     def test_resolve_bad_body(self):
         status, _ = self.request("POST", f"/api/conversations/{CONV}/resolve", {"commits": "x"})
         self.assertEqual(status, 400)
@@ -261,7 +314,9 @@ class RepoApiTest(unittest.TestCase):
         for method, path, body in (("POST", f"/api/conversations/{CONV}/resolve", {}),
                                    ("POST", f"/api/conversations/{CONV}/shell", {}),
                                    ("GET", f"/api/conversations/{CONV}/commit?sha={self.first}", None),
-                                   ("GET", f"/api/conversations/{CONV}/file?path=src/server.py", None)):
+                                   ("GET", f"/api/conversations/{CONV}/file?path=src/server.py", None),
+                                   ("GET", f"/api/conversations/{CONV}/dir?path=src", None),
+                                   ("POST", f"/api/conversations/{CONV}/stat", {"paths": []})):
             for key in (None, "wrong"):
                 with self.subTest(path=path, key=key):
                     self.assertEqual(self.request(method, path, body, key=key)[0], 403)

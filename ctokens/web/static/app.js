@@ -77,6 +77,7 @@ const ICON_PATHS = {
   clipboard: ["M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z",
     "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"],
   check: ["M20 6 9 17l-5-5"],
+  chevron: ["m6 9 6 6 6-6"],
   failed: ["M18 6 6 18", "m6 6 12 12"],
   folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
   star: ["m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"],
@@ -145,6 +146,9 @@ function copyable(el, value) {
   el.title = "Double-click to copy";
   el.addEventListener("dblclick", () => {
     getSelection().removeAllRanges();
+    // Above, unless that is cut off by the top of the panel or the page.
+    const clip = el.closest(".panel-body, .dock-win, .dock-box");
+    el.classList.toggle("copied-below", el.getBoundingClientRect().top - (clip ? clip.getBoundingClientRect().top : 0) < 28);
     copyText(value, el, (ok) => {
       if (ok == null) delete el.dataset.copied;
       else el.dataset.copied = ok ? "Copied" : "Copy failed";
@@ -679,16 +683,52 @@ const folderText = () => projectsDir || "the projects folder";
 const lastFolder = (path) => String(path || "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
 
 // Inside a card's link a click filters the list by the project instead of opening the conversation.
-function projectChip(project) {
-  return h("span", { class: "project link", title: `${project}\nClick to show only this project's conversations`,
+function projectChip(project, id) {
+  return h("span", { class: "project link", title: `${project}\nClick to show only this project's conversations · right-click for more`,
     onclick: (e) => {
       e.preventDefault();
       e.stopPropagation();
-      listFilter = project || "";
-      listState.page = 0;
-      show();
-      window.scrollTo(0, 0);
-    } }, icon("folder"), lastFolder(project));
+      filterProject(project);
+    },
+    oncontextmenu: (e) => projectMenu(e, id, project) }, icon("folder"), lastFolder(project));
+}
+
+function filterProject(project) {
+  listFilter = project || "";
+  listState.page = 0;
+  if (app.route && app.route.view === "list") {
+    show();
+    window.scrollTo(0, 0);
+  } else location.hash = "#/";
+}
+
+function projectTotals(project) {
+  totalsFilter = totalsDraft = project;
+  if (app.route && app.route.view === "totals") load({ refresh: false });
+  else location.hash = "#/totals";
+}
+
+// Right-click on a project: what can be done in its folder, from the conversation it belongs to; nothing destructive.
+function projectMenu(e, id, project) {
+  if (!project || !id) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const target = e.currentTarget;
+  const copy = (value) => copyText(value, target, (ok) => {
+    target.classList.add("copy-flash");
+    if (ok == null) delete target.dataset.copied;
+    else target.dataset.copied = ok ? "Copied" : "Copy failed";
+  });
+  const keyed = (tip) => (keyState === "ok" || sendKey ? tip : KEY_NOTES[keyState] || KEY_NOTES.missing);
+  pointMenu(e.clientX, e.clientY, lastFolder(project), [
+    ["▦ Browse the folder", () => openDir(id, project), keyed(`Browse ${project}`)],
+    ["❯ Shell here", () => openShell(id, project), keyed(`An interactive shell in ${project}`)],
+    ["New session here", () => startSession(id, "new-session"), keyed(START_ACTIONS["new-session"].title)],
+    ["Only this project's conversations", () => filterProject(project)],
+    ["Totals of this project", () => projectTotals(project)],
+    ["Copy the path", () => copy(project), project],
+    ["Copy a cd command", () => copy(`cd ${shellQuote(project)}`), `cd ${shellQuote(project)}`],
+  ]);
 }
 
 // What a live session waits on, from its screen: the question (or the permission it asks for) and a way to answer it.
@@ -848,7 +888,7 @@ function conversationCard(row, now) {
       h("time", { class: "conv-when", datetime: row.modified, title: `Last message ${utcMinute(row.modified)} UTC` }, cardTime(row.modified, now))),
     dialogLine(row),
     row.new ? h("p", { class: "recap" }, "No messages yet") : recapLine(row),
-    h("div", { class: "conv-meta" }, projectChip(row.project),
+    h("div", { class: "conv-meta" }, projectChip(row.project, row.id),
       h("span", {}, fmtBytes(row.size_bytes)),
       row.subagents ? h("span", {}, `${fmt(row.subagents)} ${row.subagents === 1 ? "subagent" : "subagents"}`) : null));
   // A button cannot sit inside the card's link, so it is laid over the card's corner instead.
@@ -1022,7 +1062,7 @@ function favoriteItem(row) {
     h("a", { class: "fav-title", href }, titleText(row.id, row.title, "favorite", href,
       h("span", { class: "untitled" }, row.new ? "New session" : "Untitled"))),
     h("span", { class: "fav-state" }, startError(row.id), row.live ? liveBadge(row.live, false, row.id) : startButton(row.id, "go-live")),
-    projectChip(row.project));
+    projectChip(row.project, row.id));
 }
 
 function favoritesSection() {
@@ -1158,7 +1198,8 @@ function shortState(live) {
 }
 
 // With an id the badge opens that conversation's Conversation tab, even from inside a card's link.
-function liveBadge(live, long = false, id = null) {
+// id: the conversation a click opens; conv: the one a right-click acts on, which may be the one on screen.
+function liveBadge(live, long = false, id = null, conv = id) {
   if (!live) return null;
   const state = liveState(live);
   const since = live.status_since ? ` since ${utcMinute(live.status_since)} UTC` : "";
@@ -1166,8 +1207,42 @@ function liveBadge(live, long = false, id = null) {
   const open = id ? (e) => { e.preventDefault(); e.stopPropagation(); location.hash = convHref(id, "messages"); } : null;
   return h("span", { class: `live ${live.status || ""}${live.read_only ? " read-only" : ""}${id ? " link" : ""}`,
     title: `Running in Claude Code process ${live.pid}${live.name ? ` (${live.name})` : ""} · ${state}${since}`
-      + (live.read_only ? `\nRead only: ${live.read_only_reason}` : "") + (id ? "\nClick to open the conversation" : ""), onclick: open },
+      + (live.read_only ? `\nRead only: ${live.read_only_reason}` : "") + (id ? "\nClick to open the conversation" : "")
+      + (conv ? " · right-click to go offline" : ""), onclick: open,
+    oncontextmenu: conv ? (e) => sessionMenu(e, conv, live) : null },
   h("i", { "aria-hidden": "true" }), long ? `Live · ${state}${readOnly}` : `Live · ${shortState(live)}${readOnly}`);
+}
+
+function sessionMenu(e, id, live) {
+  e.preventDefault();
+  e.stopPropagation();
+  const here = app.route && app.route.id === id && app.route.view === "messages";
+  pointMenu(e.clientX, e.clientY, `Live · PID ${live.pid}`, [
+    ...(here ? [] : [["Open the conversation", () => { location.hash = convHref(id, "messages"); }]]),
+    ["Go offline…", () => goOffline(id), "Stop this Claude Code process, after asking; the conversation stays and GO LIVE resumes it"],
+  ]);
+}
+
+// Stops the session's claude, as closing its terminal would; the tmux window goes too when this tool opened it.
+async function goOffline(id) {
+  const live = liveOf(id);
+  if (!live) return;
+  const name = (convRows.get(id) || {}).title || live.name || id.slice(0, 8);
+  if (!confirm(`Go offline: stop the Claude Code session “${name}” (PID ${live.pid}) running in tmux?\n\n`
+    + `Whatever it is doing is interrupted. Its tmux window closes if this tool opened it; a pane of yours keeps its shell. `
+    + `The conversation stays, and GO LIVE resumes it.`)) return;
+  startErrors.delete(id);
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(id)}/go-offline`, { method: "POST",
+      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: "{}" });
+    startErrors.set(id, data.closed_window ? "Offline: the session stopped and its tmux window closed."
+      : "Offline: the session stopped; its tmux pane is still open.");
+  } catch (err) {
+    startErrors.set(id, `Still live: ${err.message}`);
+  }
+  await refreshList();
+  if (app.route && app.route.id === id) await fetchLive(id);
+  redrawStart(id);
 }
 
 // ---------- starting claude in a new tmux window: GO LIVE (resume) and New session ----------
@@ -1373,13 +1448,15 @@ function convHead(route) {
   const title = (row && row.title) || convTasks.get(route.id) || (row && row.new ? "New session" : "Untitled conversation");
   const resume = row ? `cd ${shellQuote(row.project)} && claude --resume ${shellQuote(route.id)}` : null;
   const live = liveOf(route.id);
-  const meta = [live ? h("span", {}, liveBadge(live, true, route.view === "messages" ? null : route.id), ` PID ${live.pid}`) : null,
+  const meta = [live ? h("span", {}, liveBadge(live, true, route.view === "messages" ? null : route.id, route.id), ` PID ${live.pid}`) : null,
     h("span", { class: "conv-id" }, copyable(h("span", { class: "mono" }, route.id), route.id),
       resume && !live ? copyButton(resume, resume, "Copy resume") : null),
     h("span", { class: "conv-actions-head" }, live ? null : startButton(route.id, "go-live"), startButton(route.id, "new-session"),
-      row || live ? shellButton(route.id, row ? row.project : live.cwd) : null, startError(route.id))];
+      row || live ? [dirButton(route.id, row ? row.project : live.cwd), shellButton(route.id, row ? row.project : live.cwd)] : null,
+      startError(route.id))];
   if (row) {
-    meta.push(h("span", {}, copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
+    meta.push(h("span", { title: "Right-click for more", oncontextmenu: (e) => projectMenu(e, route.id, row.project) },
+      copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
       h("span", {}, `${fmtBytes(row.size_bytes)} · ${fmt(row.subagents)} subagent${row.subagents === 1 ? "" : "s"}`));
   }
   return h("div", { class: "page-head", id: "conv-head" },
@@ -2157,7 +2234,8 @@ function messagesPath(route) {
 // ---------- composer: typing into the running session, as if in its terminal ----------
 const STICK_MARGIN = 80;
 const composer = { id: null, el: null, text: null, button: null, note: null, sending: false, sent: null, error: null,
-  dialog: null, dialogBody: null, own: null, answer: null, answerButton: null, answering: false };
+  dialog: null, dialogBody: null, own: null, answer: null, answerButton: null, answering: false, strip: null,
+  images: new Map(), imageCount: 0, uploading: 0 };
 
 const KEY_NOTES = {
   disabled: "Sending is disabled on this server.",
@@ -2172,7 +2250,7 @@ function composerNote(status) {
   if (status.live.dialog) return ["Each button presses its key in the session's terminal; you can also answer there.", ""];
   if (status.send_problem) return [status.send_problem, "warn"];
   const sent = composer.sent ? `Sent at ${utcTime(composer.sent)} UTC · ` : "";
-  return [`${sent}Typed into the session's terminal · Enter sends, Shift+Enter adds a line`, ""];
+  return [`${sent}Typed into the session's terminal · Enter sends, Shift+Enter adds a line, Ctrl+V or dropping adds an image`, ""];
 }
 
 // The path:line a double-click on a file's line copied, pasted where the cursor is by a double-click in the message box.
@@ -2210,8 +2288,15 @@ function buildComposer(id) {
       e.preventDefault();
       sendMessage();
     },
-    oninput: () => { composer.error = null; drawComposer(); } });
+    oninput: () => { composer.error = null; drawComposer(); },
+    onpaste: (e) => {
+      const files = imageFiles(e.clipboardData && e.clipboardData.files);
+      if (!files.length) return;
+      e.preventDefault();
+      attachImages(files);
+    } });
   const button = h("button", { class: "btn primary", type: "submit" }, "Send");
+  const strip = h("div", { class: "composer-images", hidden: true });
   const note = h("div", { class: "composer-note", "aria-live": "polite" });
   const working = h("div", { class: "composer-activity", hidden: true });
   const answerButton = h("button", { class: "btn primary", type: "button", onclick: () => typeAnswer() }, "Answer");
@@ -2226,10 +2311,109 @@ function buildComposer(id) {
   const own = h("div", { class: "dialog-own" }, answer, answerButton);
   const dialogBody = h("div", { class: "dialog-body" }), dialogKeys = h("div", { class: "dialog-keys" });
   const dialog = h("div", { class: "dialog", hidden: true }, dialogBody, own, dialogKeys);
-  const el = h("form", { class: "composer", id: "composer", onsubmit: (e) => { e.preventDefault(); sendMessage(); } },
-    working, dialog, h("div", { class: "composer-row" }, text, button), note);
-  Object.assign(composer, { id, el, text, button, note, working, dialog, dialogBody, dialogKeys, own, answer, answerButton,
-    sending: false, sent: null, error: null, answering: false });
+  const dragging = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+  const el = h("form", { class: "composer", id: "composer", onsubmit: (e) => { e.preventDefault(); sendMessage(); },
+    ondragover: (e) => {
+      if (!dragging(e) || text.disabled) return;
+      e.preventDefault();
+      el.classList.add("dropping");
+    },
+    ondragleave: (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove("dropping"); },
+    ondrop: (e) => {
+      el.classList.remove("dropping");
+      if (!dragging(e) || text.disabled) return;
+      e.preventDefault();
+      const files = imageFiles(e.dataTransfer.files);
+      if (files.length) attachImages(files);
+      else {
+        composer.error = "Only PNG, JPEG, GIF and WebP images can be dropped here.";
+        drawComposer();
+      }
+    } },
+    working, dialog, strip, h("div", { class: "composer-row" }, text, button), note);
+  Object.assign(composer, { id, el, text, button, note, working, dialog, dialogBody, dialogKeys, own, answer, answerButton, strip,
+    sending: false, sent: null, error: null, answering: false, images: new Map(), imageCount: 0, uploading: 0 });
+}
+
+// ---------- images in a message: saved by the server, pasted into the session as paths that Claude Code attaches ----------
+const COMPOSER_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const MAX_COMPOSER_IMAGE = 10 << 20;
+const IMAGE_MARK_RE = /\[Image #(\d+)\]/g;
+const imageMark = (n) => `[Image #${n}]`;
+const imageFiles = (list) => [...(list || [])].filter((f) => COMPOSER_IMAGE_TYPES.includes(f.type));
+const markedImages = (text) => new Set([...text.matchAll(IMAGE_MARK_RE)].map((m) => m[1]));
+
+function readDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Each image goes into the text as [Image #N], where the cursor is, as Claude Code shows it; the mark is what sends it.
+async function attachImages(files) {
+  const mine = composer.images, id = composer.id;
+  for (const file of files) {
+    if (file.size > MAX_COMPOSER_IMAGE) {
+      composer.error = `${file.name || "The image"} is larger than ${MAX_COMPOSER_IMAGE >> 20} MB.`;
+      drawComposer();
+      continue;
+    }
+    const key = String(++composer.imageCount);
+    const image = { key, path: null, url: null, chip: null };
+    mine.set(key, image);
+    insertIntoComposer(`${imageMark(key)} `);
+    composer.uploading++;
+    drawComposer();
+    try {
+      image.url = await readDataUrl(file);
+      const data = await api(`/api/conversations/${encodeURIComponent(id)}/image`, { method: "POST",
+        headers: { ...sendHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ type: file.type, data: image.url.slice(image.url.indexOf(",") + 1) }) });
+      image.path = data.path;
+    } catch (err) {
+      if (composer.images !== mine) return;
+      dropImage(key);
+      composer.error = `Image not attached: ${err.message}`;
+    } finally {
+      // A composer built since, for another conversation, has its own count.
+      if (composer.images === mine) {
+        composer.uploading--;
+        image.chip = null;
+        drawComposer();
+      }
+    }
+  }
+}
+
+function dropImage(key) {
+  composer.images.delete(key);
+  const box = composer.text;
+  box.value = box.value.split(`${imageMark(key)} `).join("").split(imageMark(key)).join("");
+}
+
+function imageChip(image) {
+  if (image.chip) return image.chip;
+  const name = imageMark(image.key);
+  image.chip = h("span", { class: `composer-image${image.path ? "" : " loading"}`, title: image.path ? `${name}: ${image.path}` : `${name}: saving…` },
+    image.url ? h("img", { src: image.url, alt: name }) : h("span", { class: "spinner small", "aria-hidden": "true" }),
+    h("span", { class: "mono" }, `#${image.key}`),
+    h("button", { class: "dock-x", type: "button", title: "Remove the image", "aria-label": `Remove ${name}`, onclick: () => {
+      dropImage(image.key);
+      composer.text.focus();
+      drawComposer();
+    } }, "×"));
+  return image.chip;
+}
+
+// The images whose mark is still in the text.
+function drawImages() {
+  const marked = markedImages(composer.text.value);
+  const shown = [...composer.images.values()].filter((i) => marked.has(i.key));
+  composer.strip.hidden = !shown.length;
+  composer.strip.replaceChildren(...shown.map(imageChip));
 }
 
 // ---------- dialogs: a question or a permission prompt the session waits on, answered as if in its terminal ----------
@@ -2326,8 +2510,9 @@ function drawComposer() {
   if (composer.id !== route.id) buildComposer(route.id);
   composer.text.disabled = !!status.live.read_only;
   composer.text.placeholder = status.live.read_only ? "Read only: this session cannot take messages" : "Message to the running session";
-  composer.button.disabled = !canSend(status) || composer.sending || !composer.text.value.trim();
-  composer.button.textContent = composer.sending ? "Sending…" : "Send";
+  composer.button.disabled = !canSend(status) || composer.sending || composer.uploading > 0 || !composer.text.value.trim();
+  composer.button.textContent = composer.sending ? "Sending…" : composer.uploading ? "Saving image…" : "Send";
+  drawImages();
   const busy = status.live.status === "busy";
   composer.working.hidden = !busy;
   composer.working.replaceChildren(h("span", { class: "spinner small", "aria-hidden": "true" }),
@@ -2346,13 +2531,19 @@ function drawComposer() {
 
 async function sendMessage() {
   const id = composer.id, text = composer.text.value, status = liveStatus.get(id);
-  if (composer.sending || !text.trim() || !canSend(status)) return;
+  if (composer.sending || composer.uploading || !text.trim() || !canSend(status)) return;
+  const images = {};
+  for (const key of markedImages(text)) if (composer.images.has(key)) images[key] = composer.images.get(key).path;
   Object.assign(composer, { sending: true, error: null });
   drawComposer();
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(id)}/send`, { method: "POST",
-      headers: { ...sendHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
-    if (composer.text.value === text) composer.text.value = "";
+      headers: { ...sendHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(Object.keys(images).length ? { text, images } : { text }) });
+    if (composer.text.value === text) {
+      composer.text.value = "";
+      Object.assign(composer, { images: new Map(), imageCount: 0 });
+    }
     composer.sent = new Date();
     liveStatus.set(id, { ...status, live: data.live });
   } catch (err) {
@@ -3014,10 +3205,9 @@ function closeSettings(refocus) {
   if (refocus) $("settings").focus();
 }
 
-function segmented(name, label, choices, value) {
+function segmented(name, label, choices, value, save = (v) => saveThemeSettings({ [name]: v })) {
   return h("fieldset", {}, h("legend", {}, label), h("div", { class: "seg" }, choices.map(([v, text]) =>
-    h("label", {}, h("input", { type: "radio", name, value: v, checked: v === value,
-      onchange: () => saveThemeSettings({ [name]: v }) }), text))));
+    h("label", {}, h("input", { type: "radio", name, value: v, checked: v === value, onchange: () => save(v) }), text))));
 }
 
 function settingsField(label, attrs, onchange) {
@@ -3048,8 +3238,15 @@ function openSettings() {
         settingsField("Line height", { type: "number", name: "lineHeight", value: s.lineHeight, min: 1, max: 3, step: 0.05 },
           (v) => saveThemeSettings({ lineHeight: v }))),
       sample),
+    segmented("reload", "Open files and folders that change on disk", [["auto", "Reload them"], ["ask", "Ask first"]], reloadMode(),
+      (v) => store(RELOAD_KEY, v)),
     h("div", { class: "settings-foot" }, h("span", { class: "muted" }, "Saved in this browser"),
-      h("button", { class: "btn small", type: "button", onclick: () => { saveThemeSettings(null); closeSettings(false); openSettings(); } },
+      h("button", { class: "btn small", type: "button", onclick: () => {
+        saveThemeSettings(null);
+        store(RELOAD_KEY, "auto");
+        closeSettings(false);
+        openSettings();
+      } },
         "Reset")));
   document.body.append(el);
   paintSample();
