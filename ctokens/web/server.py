@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import functools
 import hmac
 import json
 import os
@@ -20,14 +21,14 @@ from urllib.parse import parse_qs
 
 from ..catalog import (CONVERSATION_ID, active_time, clean_title, conversation_rows, conversation_text, find_conversation,
                        iso_utc, last_activity, last_recap, project_path_of, save_title, session_title)
-from ..content import bash_commands, conversation_messages, full_text, last_response, touched_files
+from ..content import bash_commands, conversation_messages, full_text, last_response, tool_calls, touched_files
 from ..live import (MAX_IMAGE_BYTES, SendError, activity, answer, channel, go_live, go_offline, live_sessions, new_session,
                     public, read_record, rename, save_image, send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
 from ..repo import (FileIndex, RepoError, find_commits, find_files, list_commits, list_dir, read_file, repo_root, search,
                    show_commit, stat_paths)
 from ..reports import report, scan_totals, totals_report
-from .cache import StatsCache, TranscriptCache
+from .cache import StatsCache, TranscriptCache, Workers
 from .favorites import Favorites, favorites_path
 from .shells import MAX_SHELLS, ShellError, Shells, clamp
 
@@ -373,6 +374,9 @@ class Handler(BaseHTTPRequestHandler):
         project = params.get("project", [None])[0]
         if path == "/api/conversations":
             search = params.get("q", [None])[0]
+            if search:
+                logs = config.projects_dir.glob("*/*.jsonl") if config.projects_dir.is_dir() else []
+                cache.warm("text", logs, conversation_text, self.server.workers)
             rows = conversation_rows(config.projects_dir, project, *cached_meta(cache), search, cached_text(cache),
                                      cached_activity(cache))
             live = live_sessions(sessions_dir(config.projects_dir))
@@ -398,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(400, {"error": f"at most {MAX_RECAP_IDS} ids per request"})
             return json_response(200, {"recaps": {i: recap_of(cache, config, i) for i in ids}})
         if path == "/api/totals":
-            return json_response(200, cached_totals(cache, config, project))
+            return json_response(200, cached_totals(cache, config, project, self.server.workers))
         if ACTION_ROUTE.fullmatch(path) or SHELL_ACTION_ROUTE.fullmatch(path):
             return json_response(405, {"error": "method not allowed"}, (("Allow", "POST"),))
         repo = REPO_ROUTE.fullmatch(path)
@@ -406,14 +410,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.repo(*repo.groups(), params)
         match = CONVERSATION_ROUTE.fullmatch(path)
         if match:
-            first = params.get("from", [None])[0]
+            first, tail = params.get("from", [None])[0], params.get("tail", [None])[0]
             if first is not None and not first.isdigit():
                 return json_response(400, {"error": "from must be a message index"})
+            if tail is not None and not tail.isdigit():
+                return json_response(400, {"error": "tail must be a number of messages"})
             return self.conversation(config, cache, *match.groups(), params.get("source", ["main"])[0],
-                                     None if first is None else int(first), params.get("at", [None])[0])
+                                     None if first is None else int(first), params.get("at", [None])[0],
+                                     None if tail is None else int(tail))
         return NOT_FOUND
 
-    def conversation(self, config, cache, conversation_id, view, source, first=None, at=None):
+    def conversation(self, config, cache, conversation_id, view, source, first=None, at=None, tail=None):
         if view == "live":
             info = live_sessions(sessions_dir(config.projects_dir)).get(conversation_id)
             if info is None and find_conversation(conversation_id, config.projects_dir)[0] is None:
@@ -429,10 +436,13 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(404, {"error": "conversation not found"})
         if view == "last-response":
             return json_response(200, {"last_response": last_response(path)})
+        if view in (None, "bash", "files"):
+            namespace, compute = ("parse_log", PARSE_ANY) if view is None else ("tool_calls", functools.partial(tool_calls, quick=True))
+            cache.warm(namespace, [log for _, log in conversation_sources(path)], compute, self.server.workers)
         if view == "bash":
-            return json_response(200, {"bash_commands": bash_commands(path)})
+            return json_response(200, {"bash_commands": bash_commands(path, cached_calls(cache))})
         if view == "files":
-            return json_response(200, {"files": touched_files(path)})
+            return json_response(200, {"files": touched_files(path, cached_calls(cache))})
         if view == "full":
             log = dict(conversation_sources(path)).get(source)
             text = log and full_text(log, config.prices, at)
@@ -441,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
             read = self.server.transcripts.get
             start = first
             if start is None:
-                data = conversation_messages(path, source, config.prices, read)
+                data = conversation_messages(path, source, config.prices, read, tail)
                 return json_response(200, data) if data else json_response(404, {"error": "source not found"})
             log = dict(conversation_sources(path)).get(source)
             if log is None:
@@ -532,21 +542,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self, name):
         try:
+            stat = os.stat(self.server.static_dir / name)
             body = (self.server.static_dir / name).read_bytes()
         except OSError:
             return NOT_FOUND
         content_type = CONTENT_TYPES[Path(name).suffix]
         if not content_type.startswith("text/html"):
-            return Response(200, body, content_type)
+            # Asked again on every load, but sent only when it changed: a megabyte less each time through a tunnel.
+            tag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+            headers = (("ETag", tag), ("Cache-Control", "no-cache"))
+            if tag in (self.headers.get("If-None-Match") or "").split(", "):
+                return Response(304, b"", content_type, headers)
+            return Response(200, body, content_type, headers)
         nonce = secrets.token_urlsafe(18)
         return Response(200, body.replace(NONCE_MARK, nonce.encode("ascii")), content_type,
                         (("Content-Security-Policy", CSP.format(nonce=nonce)),))
 
     def respond(self, response):
         self.send_response(response.status)
-        self.send_header("Content-Type", response.content_type)
-        self.send_header("Content-Length", str(len(response.body)))
-        for name, value in (*COMMON_HEADERS.items(), *response.headers):
+        if response.status != 304:
+            self.send_header("Content-Type", response.content_type)
+            self.send_header("Content-Length", str(len(response.body)))
+        for name, value in {**COMMON_HEADERS, **dict(response.headers)}.items():
             self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
@@ -689,16 +706,23 @@ def new_session_view(view, source):
     return json_response(404, {"error": "This session has no messages yet."})
 
 
-def cached_totals(cache, config, project):
+def cached_totals(cache, config, project, workers):
     seen = set()
 
     def stats(path):
         seen.add(Path(path))
         return cache.get("file_stats", path, file_stats)
 
-    data = totals_report(scan_totals(config.projects_dir, project, stats=stats), config.prices)
+    def warm(paths):
+        cache.warm("file_stats", paths, file_stats, workers)
+
+    data = totals_report(scan_totals(config.projects_dir, project, stats=stats, warm=warm), config.prices)
     cache.prune(seen)
     return data
+
+
+# What parse_log() finds does not depend on the names the report gives each log, which cached_parse() puts in.
+PARSE_ANY = functools.partial(parse_log, kind="", identifier="", task="")
 
 
 def cached_parse(cache):
@@ -724,6 +748,10 @@ def recap_of(cache, config, conversation_id):
         return None
 
 
+def cached_calls(cache):
+    return lambda path: cache.get("tool_calls", path, lambda p: tool_calls(p, quick=True))
+
+
 def cached_activity(cache):
     return lambda path: cache.get("activity", path, last_activity)
 
@@ -744,6 +772,7 @@ class Server(ThreadingHTTPServer):
         self.transcripts = TranscriptCache()
         self.favorites = Favorites(favorites_path(config.projects_dir))
         self.file_index = FileIndex()
+        self.workers = Workers()
         self.shells = Shells()
         self.stopping = threading.Event()
         super().__init__((HOST, port), Handler)
@@ -758,8 +787,10 @@ class Server(ThreadingHTTPServer):
     def reap_shells(self):
         while not self.stopping.wait(SHELL_REAP_EVERY):
             self.shells.reap()
+            self.workers.reap()
 
     def server_close(self):
         self.stopping.set()
         self.shells.close_all()
+        self.workers.close()
         super().server_close()

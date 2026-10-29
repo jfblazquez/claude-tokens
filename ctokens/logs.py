@@ -16,10 +16,11 @@ def zero():
     return dict.fromkeys(FIELDS, 0)
 
 
-def lines(path):
+def lines(path, needle=None):
+    """The JSON objects of a log; with a needle, only those of the lines that hold it, which spares parsing the rest."""
     with path.open(encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
-            if not line.strip():
+            if not line.strip() or (needle and needle not in line):
                 continue
             try:
                 value = json.loads(line)

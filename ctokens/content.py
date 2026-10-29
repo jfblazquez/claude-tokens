@@ -56,45 +56,57 @@ def chronological_key(timestamp):
     return (0, stamp, float("0." + fraction.group(1)) if fraction else 0.0)
 
 
-def bash_commands(main):
-    """Every Bash tool_use command of the conversation and its subagents, in chronological order."""
-    commands, seen = [], set()
+def tool_calls(path, quick=False):
+    """The Bash, Read, Write and Edit calls of one log, in log order; the server keeps them per log, so that only the
+    logs that changed are read again. quick reads only the lines with a tool call, and says nothing of broken ones."""
+    calls, seen = [], set()
+    for event in lines(path, '"tool_use"' if quick else None):
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        timestamp = event.get("timestamp")
+        timestamp = timestamp if parse_timestamp(timestamp) else None
+        for block in tool_uses(message, seen):
+            data = block.get("input")
+            data = data if isinstance(data, dict) else {}
+            if block.get("name") == "Bash":
+                calls.append({"id": block.get("id"), "name": "Bash", "timestamp": timestamp,
+                              "command": str(data.get("command") or ""), "description": str(data.get("description") or "")})
+            elif block.get("name") in ("Read", "Write", "Edit") and data.get("file_path"):
+                calls.append({"id": block.get("id"), "name": block["name"], "file_path": str(data["file_path"])})
+    return calls
+
+
+def new_calls(main, calls):
+    """(source, call) across the conversation and its subagents, each call once though several logs repeat it."""
+    seen = set()
     for source, path in conversation_sources(main):
-        for event in lines(path):
-            message = event.get("message")
-            if not isinstance(message, dict):
-                continue
-            timestamp = event.get("timestamp")
-            timestamp = timestamp if parse_timestamp(timestamp) else None
-            for block in tool_uses(message, seen):
-                if block.get("name") == "Bash":
-                    data = block.get("input") or {}
-                    commands.append({"command": str(data.get("command") or ""),
-                                     "description": str(data.get("description") or ""),
-                                     "source": source, "timestamp": timestamp})
+        for call in calls(path):
+            if isinstance(call["id"], str):
+                if call["id"] in seen:
+                    continue
+                seen.add(call["id"])
+            yield source, call
+
+
+def bash_commands(main, calls=tool_calls):
+    """Every Bash tool_use command of the conversation and its subagents, in chronological order."""
+    commands = [{"command": call["command"], "description": call["description"], "source": source, "timestamp": call["timestamp"]}
+                for source, call in new_calls(main, calls) if call["name"] == "Bash"]
     # sorted() is stable, so undated entries keep their log order.
     return sorted(commands, key=lambda entry: chronological_key(entry["timestamp"]))
 
 
-def touched_files(main):
+def touched_files(main, calls=tool_calls):
     """Files opened by Read or changed by Write/Edit across the conversation and its subagents."""
-    files, seen = {}, set()
-    for source, path in conversation_sources(main):
-        for event in lines(path):
-            message = event.get("message")
-            if not isinstance(message, dict):
-                continue
-            for block in tool_uses(message, seen):
-                name = block.get("name")
-                if name not in ("Read", "Write", "Edit"):
-                    continue
-                target = (block.get("input") or {}).get("file_path")
-                if not target:
-                    continue
-                entry = files.setdefault(str(target), {"Read": 0, "Write": 0, "Edit": 0, "sources": []})
-                entry[name] += 1
-                if source not in entry["sources"]:
-                    entry["sources"].append(source)
+    files = {}
+    for source, call in new_calls(main, calls):
+        if call["name"] == "Bash":
+            continue
+        entry = files.setdefault(call["file_path"], {"Read": 0, "Write": 0, "Edit": 0, "sources": []})
+        entry[call["name"]] += 1
+        if source not in entry["sources"]:
+            entry["sources"].append(source)
     return files
 
 
@@ -434,9 +446,20 @@ def source_list(main):
             for source, path in conversation_sources(main)]
 
 
-def conversation_messages(main, source, prices, read=transcript):
-    """Messages of the main log or of one subagent, plus every source; None when the source does not exist."""
+def conversation_messages(main, source, prices, read=transcript, tail=None):
+    """Messages of the main log or of one subagent, plus every source; None when the source does not exist. With tail,
+    only about the last tail messages, from "from", with how many numbered ones come before them."""
     path = dict(conversation_sources(main)).get(source)
     if path is None:
         return None
-    return {"source": source, "sources": source_list(main), "messages": read(path, prices)}
+    messages = read(path, prices)
+    if tail is None:
+        return {"source": source, "sources": source_list(main), "messages": messages}
+    start = max(0, len(messages) - tail)
+    # Tool results render under their call, so the part shown first does not begin halfway through a batch of them.
+    while start > 0 and messages[start].get("kind") == "tool_result":
+        start -= 1
+    # Numbered as the page does: not the tool results, which go under their call, nor the events.
+    before = sum(1 for m in messages[:start] if m.get("kind") != "tool_result" and m["role"] != "event")
+    return {"source": source, "sources": source_list(main), "from": start, "total": len(messages), "numbered_before": before,
+            "messages": messages[start:]}
