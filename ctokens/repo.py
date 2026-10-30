@@ -125,7 +125,8 @@ def find_files(cwd, names, index):
         direct = Path(os.path.expanduser(clean))
         if not direct.is_absolute() and cwd:
             direct = Path(cwd) / direct
-        if direct.is_file():
+        # os.path swallows the errors pathlib raises, such as a name under a folder nobody may read.
+        if os.path.isfile(direct):
             paths.append(Path(os.path.normpath(direct)))
         # ./x, ../x, /x and ~/x say where the file is; only a plain relative name may be anywhere in the repository.
         if root is not None and not name.startswith(("./", "../", "/", "~")):
@@ -241,6 +242,21 @@ def show_commit(cwd, sha):
             "committer": fields[5], "committer_date": fields[6], "refs": fields[7], "message": fields[8].rstrip("\n"),
             "files": numstat_files(numstat.decode("utf-8", "replace")), "root": str(repo_root(cwd)),
             "patch": patch[:MAX_DIFF_BYTES].decode("utf-8", "replace"), "truncated": len(patch) > MAX_DIFF_BYTES}
+
+
+def show_blob(cwd, sha, path):
+    """A file as a commit has it, to show the lines around a diff's hunks; binary files and the bytes past
+    MAX_FILE_BYTES are left out."""
+    if not isinstance(sha, str) or not COMMIT.fullmatch(sha) or repo_root(cwd) is None:
+        raise RepoError("unknown commit")
+    if not isinstance(path, str) or not path or len(path) > MAX_NAME_CHARS or path.startswith(("/", "-")) or "\0" in path:
+        raise RepoError("expected a path in the repository")
+    data = git(cwd, "cat-file", "blob", f"{sha}:{path}")
+    if data is None:
+        raise RepoError("no such file in that commit")
+    binary = b"\0" in data[:8192]
+    return {"sha": sha, "path": path, "size": len(data), "binary": binary, "truncated": len(data) > MAX_FILE_BYTES,
+            "text": "" if binary else data[:MAX_FILE_BYTES].decode("utf-8", "replace")}
 
 
 def numstat_files(text):

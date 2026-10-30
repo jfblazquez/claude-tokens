@@ -1484,7 +1484,7 @@ function convHead(route) {
       resume && !live ? copyButton(resume, resume, "Copy resume") : null),
     h("span", { class: "conv-actions-head" }, live ? null : startButton(route.id, "go-live"), startButton(route.id, "new-session"),
       folder ? [dirButton, shellButton, commitsButton, searchButton].map((button) => button(route.id, folder)) : null,
-      startError(route.id))];
+      starredButton(route.id), startError(route.id))];
   if (row) {
     meta.push(h("span", { title: "Right-click for more", oncontextmenu: (e) => projectMenu(e, route.id, row.project) },
       copyable(h("b", { class: "mono" }, row.project), row.project)), h("span", {}, `Modified ${utcMinute(row.modified)} UTC`),
@@ -1510,7 +1510,8 @@ function drawConvBar() {
     h("button", { class: "bar-conv-name", type: "button", title: `${title}\nBack to the top`, onclick: () => window.scrollTo(0, 0) }, title),
     live ? liveBadge(live, false, null, route.id) : null, h("span", { class: "spacer" }),
     startButton(route.id, "new-session"),
-    folder ? [dirButton, shellButton, commitsButton, searchButton].map((button) => button(route.id, folder)) : null));
+    folder ? [dirButton, shellButton, commitsButton, searchButton].map((button) => button(route.id, folder)) : null,
+    starredButton(route.id)));
   syncConvBar();
 }
 
@@ -2124,12 +2125,215 @@ function messageCopy(m) {
   return copyMenuButton("Copy the message", m.role === "assistant" ? markdownFormats(text) : promptFormats(text));
 }
 
+// ---------- starred messages: kept in this browser, per conversation and source, by their place in the log ----------
+// { "<conversation>|<source>": { "<message index>": { n, role, kind, text, title, when, at } } }
+const STARRED_KEY = "ctokens.messages.starred";
+let starredMemory = {};
+
+function starredAll() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STARRED_KEY) || "{}");
+    if (data && typeof data === "object") starredMemory = data;
+  } catch (e) { /* what this page starred so far */ }
+  return starredMemory;
+}
+
+const starredKey = () => `${messagesState.id}|${messagesState.source}`;
+const starredHere = () => starredAll()[starredKey()] || {};
+const starredCount = (all) => Object.values(all).reduce((n, marks) => n + Object.keys(marks).length, 0);
+
+// changes: [key, index, mark or null to unstar]. Everything that shows stars follows.
+function setStars(changes) {
+  const all = starredAll();
+  for (const [key, i, mark] of changes) {
+    const marks = { ...(all[key] || {}) };
+    if (mark) marks[i] = mark;
+    else delete marks[i];
+    if (Object.keys(marks).length) all[key] = marks;
+    else delete all[key];
+  }
+  starredMemory = all;
+  try {
+    localStorage.setItem(STARRED_KEY, JSON.stringify(all));
+  } catch (e) { /* kept for this page only */ }
+  const here = starredHere();
+  for (const button of document.querySelectorAll(".msgs .msg-star")) paintStar(button, !!here[button.dataset.i]);
+  drawStarredButton();
+  const panel = dock.items.find((i) => i.kind === "starred");
+  if (panel) panel.view.draw();
+}
+
+function messageStar(m) {
+  const button = h("button", { class: "msg-star", type: "button", "data-i": m.i, "data-n": m.n, onclick: () => {
+    const text = m.blocks.filter((b) => b.type === "text").map((b) => b.text).join(" ").replace(/\s+/g, " ").trim()
+      || m.blocks.filter((b) => b.type === "tool_use").map((b) => b.name).join(", ");
+    setStars([[starredKey(), m.i, starredHere()[m.i] ? null : { n: m.n, role: m.role, kind: m.kind, text: ellipsis(text, 120),
+      title: convTitle({ id: messagesState.id }), when: m.when ? m.when.toISOString() : null, at: new Date().toISOString() }]]);
+  } });
+  paintStar(button, !!starredHere()[m.i]);
+  return button;
+}
+
+function paintStar(button, on) {
+  const n = button.dataset.n;
+  button.classList.toggle("on", on);
+  button.setAttribute("aria-pressed", String(on));
+  button.setAttribute("aria-label", `Star #${n}`);
+  button.title = on ? `Unstar #${n}` : `Star #${n}, to find it again in ★ Starred`;
+  button.textContent = on ? "★" : "☆";
+  const item = button.closest(".msgs > li");
+  if (item) item.classList.toggle("starred", on);
+}
+
+// In the header and in the bar that takes its place on scroll; it counts the stars of every source of the conversation.
+function starredButton(conv) {
+  const button = h("button", { class: "btn starred-btn", type: "button", "data-conv": conv, onclick: openStarred });
+  paintStarredButton(button);
+  return button;
+}
+
+function paintStarredButton(button) {
+  const all = starredAll(), conv = button.dataset.conv;
+  const count = starredCount(Object.fromEntries(Object.entries(all).filter(([key]) => key.split("|")[0] === conv)));
+  button.textContent = count ? `★ Starred ${count}` : "★ Starred";
+  button.title = `Starred messages: ${count} in this conversation, ${starredCount(all)} in all; ☆ in a message's header stars it`;
+}
+
+function drawStarredButton() {
+  for (const button of document.querySelectorAll(".starred-btn")) paintStarredButton(button);
+}
+
+const starRole = (mark) => (mark.role === "assistant" ? "Assistant" : KIND_LABELS[mark.kind] || "User");
+
+// The panel of every starred message, those of the conversation on screen first.
+function openStarred() {
+  const item = openPanel("starred", "Starred", "starred", app.route && app.route.id, (it) => {
+    it.tip = "Starred messages";
+    it.view = starredView(it);
+    it.onShow = () => it.view.draw();
+  });
+  item.view.draw();
+}
+
+function starredView(item) {
+  const filter = h("input", { class: "search-q", type: "search", placeholder: "Filter by text or conversation", "aria-label": "Filter",
+    spellcheck: "false", autocomplete: "off", oninput: () => draw() });
+  const only = h("input", { type: "checkbox", onchange: () => draw() });
+  const summary = h("span", { class: "muted" });
+  const list = h("div", { class: "dir-scroll starred-list" });
+  const copy = h("button", { class: "btn small", type: "button", title: "Copy the messages listed, one per line",
+    onclick: () => copyText(shown().map(([, , title, marks]) => [`${title}`, ...marks.map(([, mark]) => `  #${mark.n} ${starRole(mark)}: ${mark.text}`)]
+      .join("\n")).join("\n\n"), copy, (ok) => { copy.textContent = ok == null ? "Copy list" : ok ? "Copied" : "Copy failed"; }) }, "Copy list");
+  const clear = h("button", { class: "btn small", type: "button", onclick: () => {
+    const pairs = shown().flatMap(([key, , , marks]) => marks.map(([i]) => [key, i, null]));
+    if (pairs.length && confirm(`Unstar the ${pairs.length} message${pairs.length === 1 ? "" : "s"} listed?`)) setStars(pairs);
+  } }, "Unstar all listed");
+  item.body.replaceChildren(h("div", { class: "search-form" }, h("div", { class: "search-row" }, filter),
+    h("div", { class: "starred-tools" }, h("label", { class: "switch" }, only, " This conversation only"), h("span", { class: "spacer" }), copy, clear)),
+  h("div", { class: "search-bar" }, summary), list);
+
+  // [key, conversation, title, [[index, mark]...]] matching the filter, the conversation on screen first, then the most
+  // recently starred.
+  function shown() {
+    const here = app.route && app.route.id, words = filter.value.trim().toLowerCase();
+    return Object.entries(starredAll()).map(([key, marks]) => {
+      const [conv, source] = key.split("|");
+      const name = (convRows.get(conv) || {}).title || Object.values(marks).map((m) => m.title).find(Boolean) || conv.slice(0, 8);
+      const title = source === "main" ? name : `${name} · ${sourceLabel(source)}`;
+      const rows = Object.entries(marks).map(([i, mark]) => [Number(i), mark])
+        .filter(([, mark]) => !words || `${title} #${mark.n} ${starRole(mark)} ${mark.text}`.toLowerCase().includes(words))
+        .sort((a, b) => a[0] - b[0]);
+      const latest = Math.max(...Object.values(marks).map((m) => Date.parse(m.at) || 0));
+      return [key, conv, title, rows, latest];
+    }).filter(([, conv, , rows]) => rows.length && (!only.checked || conv === here))
+      .sort((a, b) => (b[1] === here) - (a[1] === here) || b[4] - a[4]);
+  }
+
+  function draw() {
+    const groups = shown(), count = groups.reduce((n, g) => n + g[3].length, 0), total = starredCount(starredAll());
+    summary.textContent = !total ? "" : count === total ? `${exact(total)} starred message${total === 1 ? "" : "s"}`
+      : `${exact(count)} of ${exact(total)} starred messages`;
+    copy.disabled = clear.disabled = !count;
+    if (!total) {
+      list.replaceChildren(h("div", { class: "muted pad" }, "No starred messages yet: ☆ in the header of a prompt or a response stars it."));
+      return;
+    }
+    list.replaceChildren(...groups.map(([key, conv, title, marks]) => {
+      const [, source] = key.split("|");
+      return h("details", { class: "search-file", open: true },
+        h("summary", { title: conv }, h("b", {}, title), h("span", { class: "chip" }, marks.length),
+          h("button", { class: "btn small starred-clear", type: "button", title: "Unstar every message of this conversation listed here",
+            onclick: (e) => {
+              e.preventDefault();
+              setStars(marks.map(([i]) => [key, i, null]));
+            } }, "Unstar these")),
+        marks.map(([i, mark]) => h("div", { class: "starred-row" },
+          h("button", { class: "search-hit", type: "button", title: mark.text || `#${mark.n}`, onclick: () => goToStarred(conv, source, i) },
+            h("span", { class: "ln" }, `#${mark.n}`), h("span", { class: "starred-what" }, h("b", {}, starRole(mark)), " ",
+              h("span", { class: "muted" }, mark.text || ""))),
+          mark.when ? h("time", { class: "muted mono", datetime: mark.when, title: `${mark.when.slice(0, 19).replace("T", " ")} UTC` },
+            utcMinute(mark.when)) : null,
+          h("button", { class: "msg-star on", type: "button", title: `Unstar #${mark.n}`, "aria-label": `Unstar #${mark.n}`,
+            onclick: () => setStars([[key, i, null]]) }, "★"))));
+    }));
+  }
+
+  return { draw, focus: () => filter.focus() };
+}
+
+// A message to bring into view once its conversation and source are drawn: { conv, source, i }.
+let starTarget = null;
+
+function goToStarred(conv, source, i) {
+  const route = app.route;
+  if (route && route.id === conv && route.view === "messages" && messagesState.source === source && document.querySelector(".msgs")) {
+    return goToMessage(i);
+  }
+  starTarget = { conv, source, i };
+  if (route && route.id === conv && route.view === "messages") {
+    const select = $("messages-source");
+    if (select) {
+      select.value = source;
+      select.dispatchEvent(new Event("change"));
+    }
+    return;
+  }
+  // Set before the route changes, so the conversation opens on that source instead of the main one.
+  Object.assign(messagesState, { id: conv, source, anchor: null, unread: null });
+  location.hash = convHref(conv, "messages");
+}
+
+// After a conversation is drawn: true when the message wanted from the starred panel is there and was brought into view.
+function reachStarTarget(source) {
+  const t = starTarget;
+  if (!t || !app.route || app.route.id !== t.conv || source !== t.source) return false;
+  if (!document.querySelector(`.msgs > li[data-i="${t.i}"]`)) return false;
+  starTarget = null;
+  goToMessage(t.i);
+  return true;
+}
+
+// Brings a message into view under the top bar, raising the detail level when it hides it.
+function goToMessage(i) {
+  const el = document.querySelector(`.msgs > li[data-i="${i}"]`);
+  if (!el) return flash("That message is not drawn yet: the earlier messages are still loading.");
+  while (!el.getClientRects().length && messagesState.level < LEVELS.length - 1) {
+    setLevel(messagesState.level + 1);
+    const range = document.querySelector(".field.level input");
+    if (range) range.value = messagesState.level;
+  }
+  const below = () => document.querySelector(".appbar").getBoundingClientRect().bottom + NEW_TOP_GAP;
+  settleScroll(() => el.getBoundingClientRect().top + window.scrollY - below());
+  el.classList.remove("found");
+  requestAnimationFrame(() => el.classList.add("found"));
+}
+
 // showModel: the model name is written only when it differs from the previous response; the swatch is always there.
 function messageItem(m, tools, showModel) {
   const time = m.when ? h("time", { datetime: m.when.toISOString(), title: `${m.when.toISOString().slice(0, 19).replace("T", " ")} UTC` }, utcTime(m.when))
     : h("span", { class: "notime" }, "—");
   if (m.role === "event") return eventItem(m, time);
-  const num = m.n ? h("span", { class: "n" }, `#${m.n}`) : null;
+  const num = m.n ? [h("span", { class: "n" }, `#${m.n}`), messageStar(m)] : null;
   if (m.role === "assistant") {
     const flow = m.blocks.some((b) => b.type === "text") ? "" : " flow";
     const item = h("li", { class: (m.kind === "error" ? "msg failed" : "msg") + flow },
@@ -2172,6 +2376,7 @@ function messageItems(messages, tools, context) {
     }
     const item = messageItem(m, tools, m.role === "assistant" && m.model !== context.model);
     item.dataset.i = m.i;
+    if (m.n && item.querySelector(".msg-star.on")) item.classList.add("starred");
     items.push(item);
     if (m.role === "assistant") context.model = m.model;
   }
@@ -2579,10 +2784,22 @@ function drawComposer() {
   composer.note.textContent = message;
   composer.note.className = `composer-note ${tone}`;
   if (!composer.el.isConnected) $("main").append(composer.el);
+  fitComposer();
   if (focusComposerFor === route.id && canSend(status)) {
     focusComposerFor = null;
     composer.text.focus();
   }
+}
+
+// The box grows with its text, up to its CSS max-height, and goes back to two rows once it is sent.
+function fitComposer() {
+  const box = composer.text;
+  if (!box.isConnected) return;
+  // Shrinking it for a moment would shorten the page and pull the reader up from its end.
+  const y = window.scrollY;
+  box.style.height = "";
+  if (box.scrollHeight > box.clientHeight) box.style.height = `${box.scrollHeight + box.offsetHeight - box.clientHeight}px`;
+  if (window.scrollY !== y) window.scrollTo(0, y);
 }
 
 async function sendMessage() {
@@ -2834,9 +3051,12 @@ VIEWS.messages = convView(messagesPath, {
     Object.assign(messagesState, { anchor: null, restore: false, toBottom: false, keep: null });
     drawComposer();
     const kept = keep && shownFrom(keep.i);
-    if (kept) settleScroll(() => kept.getBoundingClientRect().top + window.scrollY - keep.offset);
-    else if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
-    else if (toBottom) scrollToEnd();
+    // A message asked for from the starred panel goes before the reader's place.
+    if (!reachStarTarget(data.source)) {
+      if (kept) settleScroll(() => kept.getBoundingClientRect().top + window.scrollY - keep.offset);
+      else if (restore && anchor && anchor.el.isConnected) settleScroll(() => anchor.el.getBoundingClientRect().top + window.scrollY - anchor.offset);
+      else if (toBottom) scrollToEnd();
+    }
     if (unread != null) requestAnimationFrame(showNewNotice);
     // The log may have grown while this tab was hidden or loading.
     pullTail();
@@ -2899,6 +3119,7 @@ async function fillEarlier(route, part) {
     if (list.isConnected) window.scrollBy(0, first.getBoundingClientRect().top - y);
     end = start;
   }
+  reachStarTarget(whole.source);
   prefetchConv(route.id);
 }
 

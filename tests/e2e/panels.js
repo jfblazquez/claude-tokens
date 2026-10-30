@@ -354,7 +354,7 @@ check("the header folds into the app bar while the page scrolls", async ({ page 
   await page.waitForSelector("#bar-conv:not([hidden])");
   assert.equal(await page.locator(".bar-conv-name").textContent(), "Add rate limiting to the public API");
   assert.deepEqual(await page.locator("#bar-conv .btn").evaluateAll((els) => els.map((e) => e.textContent.trim())),
-    ["", "New session", "▦ Browse", "❯ Shell", "☰ Commits", "Search"]);
+    ["", "New session", "▦ Browse", "❯ Shell", "☰ Commits", "Search", "★ Starred"]);
   // Laid over the page: the conversation does not move when it shows.
   assert.equal(await page.evaluate(() => window.scrollY), 1200);
   await page.click("#bar-conv button:has-text('Search')");
@@ -533,6 +533,238 @@ check("links a URL and a path the terminal wrapped onto the next row", async ({ 
   await clickRow(page, rest);
   await page.waitForSelector(".dock-tab[aria-selected='true']:has-text('rate_limit.py')");
   await page.waitForSelector(".panel-body.file:not([hidden]) .fv-mark:not([hidden])");
+});
+
+check("a lookup of names that failed is asked again the next time they are drawn", async ({ page }) => {
+  let failures = 0;
+  await page.route(`**/api/conversations/${CONV}/resolve`, (route) => (failures++ ? route.continue() : route.fulfill({ status: 500, json: { error: "internal error" } })));
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.waitForFunction(() => document.querySelector(".md a.ref-url"));
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator(".md .ref-file").count(), 0);
+  await page.click("#conv-nav a[title='Usage']");
+  await page.click("#conv-nav a[title='Conversation']");
+  await page.waitForSelector(".md p .ref-file[data-file='ab.py']");
+});
+
+check("Ctrl+F finds in the open file, and its name in every file", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click(".md p .ref-file[data-file='src/middleware/rate_limit.py']");
+  await page.waitForSelector(".fv-mark:not([hidden])");
+  await page.click(".fv-text");
+  await page.keyboard.press("Control+f");
+  assert.equal(await page.evaluate(() => document.activeElement.className), "find-q");
+  await page.keyboard.type("bucket");
+  const count = page.locator(".panel-body.file:not([hidden]) .find-count");
+  await page.waitForFunction(() => /of \d+$/.test(document.querySelector(".panel-body.file:not([hidden]) .find-count").textContent));
+  const total = Number((await count.textContent()).split(" of ")[1]);
+  assert.ok(total > 1, await count.textContent());
+  assert.equal(await page.evaluate(() => CSS.highlights.get("find").size), total);
+  const first = await count.textContent();
+  await page.keyboard.press("Enter");
+  assert.notEqual(await count.textContent(), first);
+  await page.keyboard.press("Shift+Enter");
+  assert.equal(await count.textContent(), first);
+  await page.click(".find-bar .search-opt[title='Match case']");
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator(".find-bar").isVisible(), false);
+  assert.equal(await page.evaluate(() => CSS.highlights.get("find").size), 0);
+  // Escape closed the find bar, not the panel.
+  assert.equal(await page.locator(".dock-tab").count(), 1);
+  await page.click(".panel-body.file:not([hidden]) button:has-text('References')");
+  await page.waitForSelector(".panel-body.search:not([hidden]) .search-file");
+  assert.equal(await page.inputValue(".panel-body.search:not([hidden]) .search-q"), "rate_limit");
+  const found = await page.locator(".panel-body.search:not([hidden]) .search-file > summary b").allTextContents();
+  assert.ok(found.includes("router.py") && found.includes("__init__.py"), found.join());
+});
+
+check("a commit's diff shows the lines around its changes, or the whole file", async ({ page, repo }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click("#conv-head button:has-text('Commits')");
+  await page.click(".log-row:has-text('Return Retry-After')");
+  await page.waitForSelector(".diff .dl.add");
+  const numbers = () => page.locator(".diff .dl[data-new]").evaluateAll((els) => els.map((e) => Number(e.dataset.new)));
+  assert.equal((await numbers())[0], 16);
+  await page.click(".dl.gap .gap-btn");
+  await page.waitForFunction(() => document.querySelector(".diff .dl[data-new]").dataset.new === "1");
+  const shown = await numbers();
+  assert.deepEqual(shown.slice(0, 17), Array.from({ length: 17 }, (_, i) => i + 1));
+  assert.equal(await page.locator(".diff .dl.hunk").count(), 0);
+  // The old and new numbers of an unchanged line agree above the change.
+  assert.deepEqual(await page.locator(".diff .dl[data-new='3'] .ln").allTextContents(), ["3", "3"]);
+  await page.click(".dock-tab:has-text('Commits')");
+  await page.click(".log-row:has-text('Add token bucket')");
+  await page.waitForSelector(".commit-subject:has-text('Add token bucket')");
+  const router = page.locator(".panel-body.commit:not([hidden]) .diff-file:has-text('src/router.py')");
+  await router.locator("button:has-text('Whole file')").click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".panel-body.commit:not([hidden]) .diff-file")]
+    .find((d) => d.textContent.includes("src/router.py")).querySelectorAll(".dl.gap").length === 0);
+  const lines = await router.locator(".dl[data-new]").evaluateAll((els) => els.map((e) => Number(e.dataset.new)));
+  const wc = fs.readFileSync(path.join(repo, "src", "router.py"), "utf8").split("\n").length - 1;
+  assert.deepEqual(lines, Array.from({ length: wc }, (_, i) => i + 1));
+});
+
+// Drags a tab by the mouse to a point, as a person would.
+async function dragTo(page, tab, x, y) {
+  const from = await page.locator(tab).boundingBox();
+  await page.mouse.move(from.x + 20, from.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(x, y, { steps: 8 });
+  assert.ok(await page.locator(".dock-drop:not([hidden])").isVisible(), `a drop area shows for ${tab}`);
+  await page.mouse.up();
+}
+
+const groupTitles = (page) => page.locator(".dock-region").evaluateAll((regions) => Object.fromEntries(regions.map((r) => [r.dataset.region,
+  [...r.querySelectorAll(".dock-group")].map((g) => [...g.querySelectorAll(".dock-title")].map((t) => t.textContent).join(","))])));
+
+// Every group fills its share of its region: no gap is left where a closed one was.
+const gaps = (page) => page.locator(".dock-region").evaluateAll((regions) => regions.flatMap((r) => {
+  const box = r.getBoundingClientRect(), area = [...r.querySelectorAll(".dock-group")].reduce((n, g) => {
+    const b = g.getBoundingClientRect();
+    return n + b.width * b.height;
+  }, 0);
+  return area < box.width * box.height * 0.97 ? [r.dataset.region] : [];
+}));
+
+check("tabs split their panel any way, dock on any side of the conversation and leave no gap when closed", async ({ page }) => {
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.click(".md p .ref-file[data-file='src/middleware/rate_limit.py']");
+  await page.click("#conv-head button:has-text('Commits')");
+  await page.click("#conv-head button:has-text('Search')");
+  await page.waitForSelector(".log-row", { state: "attached" });
+  let body = await page.locator(".dock-bodies").boundingBox();
+  await dragTo(page, ".dock-tab:has-text('rate_limit.py')", body.x + body.width / 2, body.y + body.height - 30);
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits,Search", "rate_limit.py"] });
+  const [top, bottom] = await page.locator(".dock-group").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().top));
+  assert.ok(top < bottom, "split down");
+  // A split down and then a split right of its lower half.
+  await page.click(".dock-tab:has-text('Search')", { button: "right" });
+  await page.click(".copy-menu-item:has-text('Split right')");
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits", "Search", "rate_limit.py"] });
+  assert.equal(await page.locator(".dock-region.right > .dock-split.column > .dock-split.row > .dock-group").count(), 2);
+  assert.deepEqual(await gaps(page), []);
+  // Closing a group gives its room back.
+  await page.click(".dock-tab:has-text('Search') .dock-x");
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits", "rate_limit.py"] });
+  assert.deepEqual(await gaps(page), []);
+  // Dropped near the left edge of the conversation, it docks there; the conversation moves aside.
+  const main = await page.locator("main").boundingBox();
+  await dragTo(page, ".dock-tab:has-text('rate_limit.py')", main.x + 40, main.y + 300);
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits"], left: ["rate_limit.py"] });
+  const left = await page.locator(".dock-region.left").boundingBox();
+  assert.ok((await page.locator("main").boundingBox()).x >= left.x + left.width - 1, "the conversation starts after the left panel");
+  // Above the conversation, from the tab's menu, and below by dragging.
+  await page.click(".dock-tab:has-text('rate_limit.py')", { button: "right" });
+  await page.click(".copy-menu-item:has-text('Dock above the conversation')");
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits"], top: ["rate_limit.py"] });
+  const above = await page.locator(".dock-region.top").boundingBox();
+  assert.ok(above.y < (await page.locator(".msgs").boundingBox()).y, "above the messages");
+  await page.click("#conv-head button:has-text('Browse')").catch(() => page.click("#bar-conv button:has-text('Browse')"));
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits"], top: ["rate_limit.py,api-gateway/"] });
+  body = await page.locator(".dock-region.right .dock-bodies").boundingBox();
+  const c = await page.evaluate(() => [innerWidth, innerHeight]);
+  await dragTo(page, ".dock-tab:has-text('api-gateway/')", body.x / 2, c[1] - 20);
+  assert.deepEqual(await groupTitles(page), { right: ["main · commits"], bottom: ["api-gateway/"], top: ["rate_limit.py"] });
+  assert.deepEqual(await gaps(page), []);
+  await page.click(".dock-tab:has-text('commits')", { button: "right" });
+  await page.click(".copy-menu-item:has-text('Join all groups')");
+  assert.equal(await page.locator(".dock-group").count(), 1);
+  assert.equal(await page.locator(".dock-tab").count(), 3);
+  await page.click(".dock-menu-btn");
+  await page.click(".copy-menu-item:has-text('All on the left')");
+  assert.deepEqual(Object.keys(await groupTitles(page)), ["left"]);
+  await page.evaluate(() => { localStorage.removeItem("ctokens.dock.home"); localStorage.removeItem("ctokens.dock.mode"); });
+});
+
+check("opening and closing a panel keeps the message being read in place", async ({ page }) => {
+  const id = await demoConversation(page, "Add rate limiting to the public API");
+  await page.goto(`${page.base}/#/c/${id}/messages`);
+  await page.waitForSelector("#messages-count:not(:has-text('Loading'))");
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight / 2));
+  await page.waitForTimeout(100);
+  const reading = () => page.evaluate(() => {
+    const top = document.querySelector(".appbar").getBoundingClientRect().bottom;
+    const el = [...document.querySelectorAll(".msgs > li")].find((e) => e.getBoundingClientRect().bottom > top);
+    // From the bottom of the top bar, which wraps onto more rows as the panel narrows it.
+    return [el.dataset.i, Math.round(el.getBoundingClientRect().top - top)];
+  });
+  const before = await reading();
+  const same = async () => {
+    const now = await reading();
+    assert.ok(now[0] === before[0] && Math.abs(now[1] - before[1]) <= 1, `${before} -> ${now}`);
+  };
+  await page.click("#bar-conv button:has-text('Commits')");
+  await page.waitForSelector(".log-row");
+  await same();
+  await page.click(".dock-tab .dock-x");
+  await page.waitForFunction(() => !document.body.classList.contains("dock-right"));
+  await same();
+});
+
+check("starred messages are kept in the browser and listed in a panel that finds and unstars them", async ({ page }) => {
+  const id = await demoConversation(page, "Add rate limiting to the public API");
+  await page.goto(`${page.base}/#/c/${id}/messages`);
+  await page.waitForSelector("#messages-count:not(:has-text('Loading'))");
+  const starred = page.locator("#conv-head .starred-btn");
+  assert.equal(await starred.textContent(), "★ Starred");
+  const first = page.locator(".msgs > li.msg.user").first();
+  const number = await first.locator(".n").textContent();
+  await first.hover();
+  await first.locator(".msg-star").click();
+  await page.locator(".msgs > li.msg:not(.user)").filter({ has: page.locator(".n") }).last().locator(".msg-star").click({ force: true });
+  assert.equal(await starred.textContent(), "★ Starred 2");
+  assert.equal(await page.locator(".msgs > li.starred").count(), 2);
+  // One in another conversation too.
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.waitForSelector(".msgs > li.msg.user");
+  await page.locator(".msgs > li.msg.user .msg-star").first().click({ force: true });
+  await page.reload();
+  await page.waitForSelector(".msgs > li.starred");
+  await page.click("#conv-head .starred-btn");
+  await page.waitForSelector(".panel-body.starred .starred-row");
+  const groups = () => page.locator(".panel-body.starred .search-file > summary b").allTextContents();
+  // The conversation on screen first.
+  assert.deepEqual(await groups(), ["Where is it?", "Add rate limiting to the public API"]);
+  assert.match(await page.locator(".panel-body.starred .search-bar").textContent(), /3 starred messages/);
+  // A click opens the other conversation at that message.
+  await page.locator(".panel-body.starred .search-file").nth(1).locator(".search-hit").first().click();
+  await page.waitForFunction((n) => {
+    const el = [...document.querySelectorAll(".msgs > li.starred")].find((e) => e.querySelector(".n").textContent === n);
+    if (!el) return false;
+    const top = el.getBoundingClientRect().top - document.querySelector(".appbar").getBoundingClientRect().bottom;
+    return top >= 0 && top < 40;
+  }, number);
+  assert.equal(new URL(page.url()).hash, `#/c/${id}/messages`);
+  // Unstarred from the panel, the message follows.
+  await page.fill(".panel-body.starred .search-q", `public API ${number} user`);
+  assert.equal(await page.locator(".panel-body.starred .starred-row").count(), 1);
+  await page.click(".panel-body.starred .starred-row .msg-star");
+  assert.equal(await starred.textContent(), "★ Starred 1");
+  assert.equal(await page.locator(".msgs > li.starred").count(), 1);
+  await page.fill(".panel-body.starred .search-q", "");
+  page.once("dialog", (d) => d.accept());
+  await page.click(".panel-body.starred button:has-text('Unstar all listed')");
+  assert.equal(await page.locator(".panel-body.starred .starred-row").count(), 0);
+  assert.equal(await page.locator(".msgs > li.starred").count(), 0);
+  assert.equal(await page.evaluate(() => localStorage.getItem("ctokens.messages.starred")), "{}");
+});
+
+check("the message box grows with its text and shrinks back once sent", async ({ page, repo }) => {
+  await fakeLive(page, repo);
+  await page.goto(`${page.base}/#/c/${CONV}/messages`);
+  await page.waitForSelector("#composer-text");
+  const height = () => page.locator("#composer-text").evaluate((e) => e.offsetHeight);
+  const empty = await height();
+  await page.focus("#composer-text");
+  for (let i = 0; i < 6; i++) await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("seventh line");
+  const grown = await height();
+  assert.ok(grown > empty + 60, `${empty} -> ${grown}`);
+  assert.equal(await page.locator("#composer-text").evaluate((e) => e.scrollHeight <= e.clientHeight), true);
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.getElementById("composer-text").value === "");
+  assert.equal(await height(), empty);
 });
 
 (async () => {
