@@ -4,10 +4,21 @@
 // only declares; everything runs once app.js has booted.
 
 // ---------- dock: where panels live ----------
-const DOCK_MODES = [["side", "Side panel"], ["bottom", "Bottom panel"], ["float", "Floating windows"], ["modal", "Overlay"]];
+// Docked, panels sit in regions around the conversation (right, left, below, above it), each a tree of groups split
+// side by side or one above the other, as an editor's split view; or they float as windows, or cover the page.
+const REGIONS = ["right", "left", "bottom", "top"];
+const REGION_NAMES = { right: "on the right", left: "on the left", bottom: "below", top: "above" };
+const DOCK_LABELS = { right: "right of", left: "left of", bottom: "below", top: "above" };
+const REGION_VARS = { right: "--dock-r", left: "--dock-l", bottom: "--dock-b", top: "--dock-t" };
+const OPPOSITE = { right: "left", left: "right", bottom: "top", top: "bottom" };
+const LAYOUTS = [["dock", "Docked"], ["float", "Floating windows"], ["modal", "Overlay"]];
 const DOCK_MODE_KEY = "ctokens.dock.mode";
+const DOCK_HOME_KEY = "ctokens.dock.home";
 const DOCK_SIZE_KEY = "ctokens.dock.size";
 const DOCK_MIN = 260;
+const DOCK_MIN_H = 140;
+const CENTER_MIN = 320;
+const GROUP_MIN = 100;
 
 function stored(key, fallback) {
   try {
@@ -23,23 +34,104 @@ function store(key, value) {
   } catch (e) { /* kept for this page only */ }
 }
 
-// item: { key, title, tip (the full name, on hover), kind, conv, body, z, rect, min, onShow(), onClose() }
+// item: { key, title, tip (the full name, on hover), kind, conv, body, group, z, rect, min, onShow(), onClose() }
 function storedSize() {
   try {
     const size = JSON.parse(stored(DOCK_SIZE_KEY, "{}"));
-    return size && typeof size === "object" ? size : {};
+    if (!size || typeof size !== "object") return {};
+    if (size.side && !size.right) size.right = size.side;
+    return size;
   } catch (e) {
     return {};
   }
 }
 
-const dock = { mode: DOCK_MODES.some(([m]) => m === stored(DOCK_MODE_KEY, "side")) ? stored(DOCK_MODE_KEY, "side") : "side",
-  items: [], active: null, el: null, z: 30, size: storedSize() };
+// Earlier versions kept "side" or "bottom" as the mode: both are docked, on the right or below.
+function storedLayout() {
+  const mode = stored(DOCK_MODE_KEY, "dock"), legacy = { side: "right", bottom: "bottom" }[mode];
+  const home = legacy || stored(DOCK_HOME_KEY, "right");
+  return { mode: legacy || !LAYOUTS.some(([m]) => m === mode) ? "dock" : mode, home: REGIONS.includes(home) ? home : "right" };
+}
+
+// home: the region a panel opens in when no group has the focus.
+const dock = { ...storedLayout(), items: [], active: null, el: null, z: 30, size: storedSize(), regions: {}, regionEls: {}, px: {} };
+
+// ---------- the layout tree ----------
+// node: a group { id, active, size, parent } or a split { dir: "row" | "column", children, size, parent }; the root of
+// a region has no parent and names its region. size: the node's share of its split.
+let groupCount = 0;
+const newGroup = () => ({ id: ++groupCount, active: null, size: 1, parent: null });
+const isSplit = (node) => !!node.children;
+const edgeAxis = (edge) => (edge === "left" || edge === "right" ? "row" : "column");
+const groupsOf = (node) => (!node ? [] : isSplit(node) ? node.children.flatMap(groupsOf) : [node]);
+const allGroups = () => REGIONS.flatMap((r) => groupsOf(dock.regions[r]));
+const groupItems = (group) => dock.items.filter((i) => i.group === group);
+
+function regionOf(node) {
+  while (node.parent) node = node.parent;
+  return node.region;
+}
+
+// Puts node where old was: in old's split, or at the root of its region.
+function replaceNode(old, node) {
+  node.parent = old.parent;
+  node.size = old.size;
+  if (old.parent) old.parent.children[old.parent.children.indexOf(old)] = node;
+  else {
+    node.region = old.region;
+    dock.regions[old.region] = node;
+  }
+  delete old.region;
+}
+
+// A new group at an edge of node: beside it when its split runs that way, else the two in a new split in its place.
+function splitAt(node, edge) {
+  const dir = edgeAxis(edge), after = edge === "right" || edge === "bottom", group = newGroup();
+  if (node.parent && node.parent.dir === dir) {
+    node.size /= 2;
+    Object.assign(group, { size: node.size, parent: node.parent });
+    node.parent.children.splice(node.parent.children.indexOf(node) + (after ? 1 : 0), 0, group);
+    return group;
+  }
+  const split = { dir, children: after ? [node, group] : [group, node], size: 1, parent: null };
+  replaceNode(node, split);
+  node.parent = group.parent = split;
+  node.size = 1;
+  return group;
+}
+
+// Takes node out: the rest of its split share its room, and a split left with one child gives way to that child.
+function removeNode(node) {
+  const parent = node.parent;
+  if (!parent) {
+    dock.regions[node.region] = null;
+    return;
+  }
+  parent.children.splice(parent.children.indexOf(node), 1);
+  if (parent.children.length > 1) return;
+  const [only] = parent.children, grand = parent.parent;
+  if (isSplit(only) && grand && grand.dir === only.dir) {
+    const total = only.children.reduce((n, c) => n + c.size, 0);
+    for (const c of only.children) Object.assign(c, { size: (c.size / total) * parent.size, parent: grand });
+    grand.children.splice(grand.children.indexOf(parent), 1, ...only.children);
+  } else replaceNode(parent, only);
+}
+
+// The group a panel docked in a region goes to: a new one next to the conversation when the region has panels already.
+function regionGroup(region, fresh = false) {
+  const root = dock.regions[region];
+  if (root) return fresh ? splitAt(root, OPPOSITE[region]) : groupsOf(root)[0];
+  const group = newGroup();
+  group.region = region;
+  dock.regions[region] = group;
+  return group;
+}
 
 function openPanel(key, title, kind, conv, build) {
   let item = dock.items.find((i) => i.key === key);
   if (!item) {
-    item = { key, title, kind, conv, body: h("div", { class: `panel-body ${kind}` }), min: false, onShow: null, onClose: null };
+    const group = dock.active ? dock.active.group : regionGroup(dock.home);
+    item = { key, title, kind, conv, body: h("div", { class: `panel-body ${kind}` }), group, min: false, onShow: null, onClose: null };
     dock.items.push(item);
     build(item);
   }
@@ -49,20 +141,175 @@ function openPanel(key, title, kind, conv, build) {
 
 function focusPanel(item) {
   dock.active = item;
+  item.group.active = item;
   item.min = false;
   item.z = ++dock.z;
   drawDock();
   if (item.onShow) requestAnimationFrame(() => item.onShow());
 }
 
+// Takes an item out of its group, which shows its next tab instead, or goes away with its last one.
+function leaveGroup(item) {
+  const group = item.group, siblings = groupItems(group), at = siblings.indexOf(item);
+  group.active = group.active !== item ? group.active : siblings[at + 1] || siblings[at - 1] || null;
+  if (!group.active) removeNode(group);
+}
+
 function closePanel(item) {
   const i = dock.items.indexOf(item);
   if (i < 0) return;
+  leaveGroup(item);
   dock.items.splice(i, 1);
+  if (findMarks.delete(item)) paintFinds();
   if (item.onClose) item.onClose();
-  if (dock.active === item) dock.active = dock.items[Math.min(i, dock.items.length - 1)] || null;
+  if (dock.active === item) dock.active = item.group.active || (allGroups()[0] || {}).active || null;
   drawDock();
-  if (dock.active && dock.active.onShow) requestAnimationFrame(() => dock.active.onShow());
+  showGroups();
+}
+
+// target: a group, split at edge when given; or a region, to dock the panel there.
+function moveItem(item, target, edge = null) {
+  if (typeof target === "string") target = regionGroup(target, true);
+  else if (edge) target = splitAt(target, edge);
+  if (target === item.group) return;
+  leaveGroup(item);
+  dock.items.splice(dock.items.indexOf(item), 1);
+  dock.items.push(item);
+  item.group = target;
+  focusPanel(item);
+  showGroups();
+}
+
+// Every panel in one group, in a region: the layout as it starts.
+function gatherIn(region) {
+  dock.regions = {};
+  const group = regionGroup(region);
+  for (const item of dock.items) item.group = group;
+  group.active = dock.active;
+  dock.home = region;
+  store(DOCK_HOME_KEY, region);
+  setLayout("dock");
+}
+
+function setLayout(mode) {
+  dock.mode = mode;
+  store(DOCK_MODE_KEY, mode);
+  drawDock();
+  for (const item of dock.items) if (item.onShow) requestAnimationFrame(() => item.onShow());
+}
+
+// Every panel in view takes its new size: a terminal fits its rows and columns to it.
+function showGroups() {
+  requestAnimationFrame(() => {
+    const shown = dock.mode === "dock" ? allGroups().map((g) => g.active) : dock.mode === "float" ? dock.items : [dock.active];
+    for (const item of shown) if (item && item.onShow) item.onShow();
+  });
+}
+
+function groupName(group) {
+  const region = regionOf(group), groups = groupsOf(dock.regions[region]);
+  return groups.length > 1 ? `group ${groups.indexOf(group) + 1} ${REGION_NAMES[region]}` : `the group ${REGION_NAMES[region]}`;
+}
+
+function tabMenu(e, item) {
+  e.preventDefault();
+  if (dock.mode !== "dock") return;
+  const group = item.group, alone = groupItems(group).length === 1, region = regionOf(group);
+  const split = (edge, label) => [label, () => moveItem(item, group, edge),
+    alone ? "The only tab of its group: drag it onto another group or next to the conversation instead" : null, alone];
+  const dockTo = (where) => [`Dock ${DOCK_LABELS[where]} the conversation`, () => moveItem(item, where),
+    `A group of its own ${DOCK_LABELS[where]} the conversation, next to it`, alone && region === where && dock.regions[where] === group];
+  pointMenu(e.clientX, e.clientY, item.title, [
+    split("right", "Split right"), split("left", "Split left"), split("bottom", "Split down"), split("top", "Split up"),
+    ...REGIONS.map(dockTo),
+    ...allGroups().filter((g) => g !== group).map((g) => [`Move to ${groupName(g)}`, () => moveItem(item, g)]),
+    ...(allGroups().length > 1 ? [["Join all groups", () => gatherIn(regionOf(dock.active.group))]] : []),
+    ["Close", () => requestClose(item)],
+    ["Close the others in this group", async () => {
+      for (const other of groupItems(group)) if (other !== item) await requestClose(other);
+    }, null, alone],
+  ], "tab-menu");
+}
+
+// The part of the window the conversation has, between the docked regions.
+function centerRect() {
+  const left = dock.regionEls.left ? dock.regionEls.left.getBoundingClientRect().right : 0;
+  const right = dock.regionEls.right ? dock.regionEls.right.getBoundingClientRect().left : innerWidth;
+  const top = Math.max(0, document.querySelector(".appbar").getBoundingClientRect().bottom);
+  const bottom = dock.regionEls.bottom ? dock.regionEls.bottom.getBoundingClientRect().top : innerHeight;
+  return { left, right, top, bottom, width: right - left, height: bottom - top };
+}
+
+// The edge of r that (x, y) is nearest to, within share of its size.
+function nearEdge(r, x, y, share) {
+  const near = [["left", (x - r.left) / r.width], ["right", (r.right - x) / r.width], ["top", (y - r.top) / r.height],
+    ["bottom", (r.bottom - y) / r.height]].filter(([, d]) => d >= 0 && d < share);
+  return near.length ? near.sort((a, b) => a[1] - b[1])[0][0] : null;
+}
+
+const HALVES = { left: [0, 0, 0.5, 1], right: [0.5, 0, 0.5, 1], top: [0, 0, 1, 0.5], bottom: [0, 0.5, 1, 0.5] };
+
+function part(r, [x, y, w, hgt]) {
+  return { left: r.left + x * r.width, top: r.top + y * r.height, width: w * r.width, height: hgt * r.height };
+}
+
+// Where a dragged tab would land: a group's tabs or the middle of its panel take it in, an edge of its panel splits
+// it there, and an edge of the conversation docks it on that side.
+function dropTarget(item, x, y) {
+  const el = document.elementFromPoint(x, y), box = el && el.closest(".dock-region .dock-group");
+  if (box) {
+    const group = allGroups().find((g) => g.id === Number(box.dataset.group));
+    if (!group) return null;
+    const own = group === item.group, alone = own && groupItems(group).length === 1;
+    if (box.querySelector(".dock-head").contains(el)) return own ? null : { group, edge: null, rect: box.getBoundingClientRect() };
+    const r = box.querySelector(".dock-bodies").getBoundingClientRect(), edge = nearEdge(r, x, y, 0.3);
+    if (own && (alone || !edge)) return null;
+    return { group, edge, rect: edge ? part(r, HALVES[edge]) : part(r, [0, 0, 1, 1]) };
+  }
+  if (el && el.closest(".dock-region, .appbar, .copy-menu")) return null;
+  const c = centerRect(), region = nearEdge(c, x, y, 0.25);
+  if (!region) return null;
+  const band = { left: [0, 0, 0.4, 1], right: [0.6, 0, 0.4, 1], top: [0, 0, 1, 0.4], bottom: [0, 0.6, 1, 0.4] }[region];
+  return { region, rect: part(c, band) };
+}
+
+function dragTab(e, item, tab) {
+  if (e.button !== 0 || e.target.closest("button") || dock.mode !== "dock") return;
+  const x0 = e.clientX, y0 = e.clientY;
+  let dragging = false, target = null;
+  const hint = h("div", { class: "dock-drop", hidden: true });
+  const move = (ev) => {
+    if (!dragging) {
+      if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
+      dragging = true;
+      document.body.classList.add("dragging-tab");
+      document.body.append(hint);
+    }
+    target = dropTarget(item, ev.clientX, ev.clientY);
+    hint.hidden = !target;
+    if (target) Object.assign(hint.style, { left: `${target.rect.left}px`, top: `${target.rect.top}px`, width: `${target.rect.width}px`,
+      height: `${target.rect.height}px` });
+  };
+  const end = (drop) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("keydown", cancel, true);
+    hint.remove();
+    document.body.classList.remove("dragging-tab");
+    if (!dragging) return;
+    // The click that ends a drag does not also pick the tab.
+    tab.addEventListener("click", (ev) => ev.stopPropagation(), { capture: true, once: true });
+    if (drop && target) moveItem(item, target.region || target.group, target.edge);
+  };
+  const up = () => end(true);
+  const cancel = (ev) => {
+    if (ev.key !== "Escape") return;
+    ev.stopPropagation();
+    end(false);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("keydown", cancel, true);
 }
 
 // What a person closes goes through here: a shell running a command asks first.
@@ -86,20 +333,14 @@ function middleCloses(el, item) {
   return el;
 }
 
-function setDockMode(mode) {
-  dock.mode = mode;
-  store(DOCK_MODE_KEY, mode);
-  drawDock();
-  for (const item of dock.items) if (item.onShow) requestAnimationFrame(() => item.onShow());
-}
-
-const KIND_ICONS = { commit: "⎇", commits: "☰", file: "▤", dir: "▦", shell: "❯", pick: "≡" };
+const KIND_ICONS = { commit: "⎇", commits: "☰", file: "▤", dir: "▦", shell: "❯", pick: "≡", starred: "★" };
 // Fonts seldom have a magnifying glass, so search draws its own.
 const kindIcon = (kind) => (kind === "search" ? icon("search") : KIND_ICONS[kind]);
 
-function panelTab(item) {
+function panelTab(item, selected) {
   return item.tabEl = middleCloses(h("div", { class: `dock-tab${item.changed ? " changed" : ""}`, role: "tab",
-    "aria-selected": item === dock.active ? "true" : "false", title: item.tip || item.title, onclick: () => focusPanel(item) },
+    "aria-selected": selected ? "true" : "false", title: item.tip || item.title, onclick: () => focusPanel(item),
+    onpointerdown: (e) => dragTab(e, item, e.currentTarget), oncontextmenu: (e) => tabMenu(e, item) },
   h("span", { class: "dock-kind", "aria-hidden": "true" }, kindIcon(item.kind)), h("span", { class: "dock-title" }, item.title),
   h("button", { class: "dock-x", type: "button", title: "Close (middle click on the tab)", "aria-label": `Close ${item.title}`,
     onclick: (e) => { e.stopPropagation(); requestClose(item); } }, "×")), item);
@@ -134,16 +375,16 @@ function openPanelMenu(button) {
   const entry = (label, act, opts = {}) => h("button", { type: "button", role: opts.role || "menuitem", class: `copy-menu-item${opts.on ? " on" : ""}`,
     "aria-checked": opts.role ? String(!!opts.on) : null, title: opts.tip || null,
     onclick: () => { closeCopyMenu(false); act(); } }, label);
-  const items = [
-    ...dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, kindIcon(item.kind)), " ",
-      h("span", { class: "dock-title" }, item.title)], () => focusPanel(item), { on: item === dock.active, tip: item.tip || item.title })),
-    ...DOCK_MODES.map(([mode, label]) => entry(label, () => setDockMode(mode), { role: "menuitemradio", on: mode === dock.mode })),
-    entry("Close all panels", closeAll),
-  ];
+  const panels = dock.items.map((item) => entry([h("span", { class: "dock-kind", "aria-hidden": "true" }, kindIcon(item.kind)), " ",
+    h("span", { class: "dock-title" }, item.title)], () => focusPanel(item), { on: item === dock.active, tip: item.tip || item.title }));
+  const layouts = LAYOUTS.map(([mode, label]) => entry(label, () => setLayout(mode), { role: "menuitemradio", on: mode === dock.mode }));
+  const gather = REGIONS.map((region) => entry(`All ${REGION_NAMES[region]}`, () => gatherIn(region),
+    { tip: `Every panel in one group ${DOCK_LABELS[region]} the conversation; new panels open there` }));
+  const items = [...panels, ...layouts, ...gather, entry("Close all panels", closeAll)];
   const n = dock.items.length;
   const menu = h("div", { class: "copy-menu dock-menu", role: "menu", "aria-label": "Panels" },
-    h("div", { class: "copy-menu-head" }, `${n} open panel${n === 1 ? "" : "s"}`), items.slice(0, n),
-    h("div", { class: "copy-menu-head" }, "Layout"), items.slice(n, n + DOCK_MODES.length), h("hr"), items.slice(n + DOCK_MODES.length));
+    h("div", { class: "copy-menu-head" }, `${n} open panel${n === 1 ? "" : "s"}`), panels,
+    h("div", { class: "copy-menu-head" }, "Layout"), layouts, h("div", { class: "copy-menu-head" }, "Dock"), gather, h("hr"), items[items.length - 1]);
   document.body.append(menu);
   const r = button.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(r.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
@@ -165,17 +406,18 @@ function openPanelMenu(button) {
   (items.find((b) => b.classList.contains("on")) || items[0]).focus();
 }
 
-function dragResize(handle, axis, read, write) {
+// sign: 1 when dragging toward smaller coordinates grows the size (a panel on the right or below), -1 otherwise.
+function dragResize(handle, axis, read, write, sign = 1) {
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     handle.setPointerCapture(e.pointerId);
     const start = axis === "x" ? e.clientX : e.clientY, from = read();
-    const move = (ev) => write(from + start - (axis === "x" ? ev.clientX : ev.clientY));
+    const move = (ev) => keepReading(() => write(from + sign * (start - (axis === "x" ? ev.clientX : ev.clientY))));
     const up = () => {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
       store(DOCK_SIZE_KEY, JSON.stringify(dock.size));
-      for (const item of dock.items) if (item.onShow) item.onShow();
+      showGroups();
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", up);
@@ -187,26 +429,126 @@ function barHeight() {
   return bar ? bar.getBoundingClientRect().height : 0;
 }
 
-function drawDock() {
+// Opening, closing or resizing a panel narrows, widens or moves the conversation, whose messages then wrap anew: the
+// message at the top of the screen stays where it was, as the browser's own scroll anchoring does not manage here.
+// The top bar may wrap onto more rows as it narrows, and holds the panels above, so the place is kept from its bottom.
+function keepReading(change) {
+  const below = () => document.querySelector(".appbar").getBoundingClientRect().bottom;
+  const anchor = document.querySelector(".msgs") ? topMessage() : null, bar = anchor && below();
+  change();
+  if (!anchor || !anchor.el.isConnected) return;
+  const moved = anchor.el.getBoundingClientRect().top - below() - (anchor.offset - bar);
+  if (moved) window.scrollBy(0, moved);
+}
+
+const drawDock = () => keepReading(layoutDock);
+
+// A region's size in pixels, from what was dragged or a share of the window, leaving the conversation its room.
+function regionSize(region) {
+  const across = region === "left" || region === "right", opposite = dock.regions[OPPOSITE[region]];
+  const room = across ? innerWidth - CENTER_MIN : innerHeight - barHeight() - 160;
+  const max = Math.max(across ? DOCK_MIN : DOCK_MIN_H, room - (opposite ? dock.px[OPPOSITE[region]] || 0 : 0));
+  const fallback = across ? innerWidth * (opposite ? 0.3 : 0.45) : innerHeight * (opposite ? 0.3 : 0.4);
+  return Math.round(Math.max(across ? DOCK_MIN : DOCK_MIN_H, Math.min(max, dock.size[region] || fallback)));
+}
+
+function regionView(region) {
+  const root = document.documentElement, across = region === "left" || region === "right";
+  dock.px[region] = regionSize(region);
+  root.style.setProperty(REGION_VARS[region], `${dock.px[region]}px`);
+  const grip = h("div", { class: `dock-grip ${region}`, title: "Drag to resize" });
+  dragResize(grip, across ? "x" : "y", () => dock.px[region], (v) => {
+    dock.size[region] = Math.max(across ? DOCK_MIN : DOCK_MIN_H, v);
+    dock.px[region] = regionSize(region);
+    root.style.setProperty(REGION_VARS[region], `${dock.px[region]}px`);
+  }, region === "right" || region === "bottom" ? 1 : -1);
+  return dock.regionEls[region] = h("div", { class: `dock-region ${region}`, "data-region": region }, grip, nodeView(dock.regions[region]));
+}
+
+function nodeView(node) {
+  if (!isSplit(node)) return groupView(node, groupItems(node), false);
+  const total = node.children.reduce((n, c) => n + c.size, 0), n = node.children.length;
+  const views = node.children.map((child) => {
+    const view = nodeView(child);
+    view.style.flexGrow = (child.size / total) * n;
+    return view;
+  });
+  return h("div", { class: `dock-split ${node.dir}` }, views.flatMap((view, i) => (i ? [splitGrip(node, i), view] : [view])));
+}
+
+// Drags the line between two neighbours of a split, which share their room.
+function splitGrip(split, i) {
+  const grip = h("div", { class: `group-grip ${split.dir}`, title: "Drag to resize" });
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const a = split.children[i - 1], b = split.children[i], row = split.dir === "row";
+    const [boxA, boxB] = [grip.previousElementSibling, grip.nextElementSibling];
+    const sizeA = row ? boxA.offsetWidth : boxA.offsetHeight, sizeB = row ? boxB.offsetWidth : boxB.offsetHeight;
+    const start = row ? e.clientX : e.clientY, scale = (a.size + b.size) / (sizeA + sizeB);
+    const grow = split.children.length / split.children.reduce((n, c) => n + c.size, 0);
+    const move = (ev) => {
+      const d = Math.max(GROUP_MIN - sizeA, Math.min(sizeB - GROUP_MIN, (row ? ev.clientX : ev.clientY) - start));
+      a.size = (sizeA + d) * scale;
+      b.size = (sizeB - d) * scale;
+      boxA.style.flexGrow = a.size * grow;
+      boxB.style.flexGrow = b.size * grow;
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      showGroups();
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+  return grip;
+}
+
+function layoutDock() {
   // Its button is about to be drawn anew.
   if (copyMenu && copyMenu.menu.classList.contains("dock-menu")) closeCopyMenu(false);
   if (!dock.el) {
     dock.el = h("div", { id: "dock" });
     document.body.append(dock.el);
   }
+  for (const el of Object.values(dock.regionEls)) el.remove();
+  dock.regionEls = {};
+  dock.px = {};
   const root = document.documentElement;
   root.style.setProperty("--bar-h", `${barHeight()}px`);
-  const shown = dock.items.length > 0;
-  document.body.classList.toggle("dock-side", shown && dock.mode === "side");
-  document.body.classList.toggle("dock-bottom", shown && dock.mode === "bottom");
-  if (!shown) {
+  const docked = dock.items.length > 0 && dock.mode === "dock";
+  for (const region of REGIONS) {
+    const on = docked && !!dock.regions[region];
+    document.body.classList.toggle(`dock-${region}`, on);
+    if (!on) root.style.setProperty(REGION_VARS[region], "0px");
+  }
+  if (!dock.items.length) {
     dock.el.replaceChildren();
     dock.el.className = "";
     return;
   }
   if (dock.mode === "float") return drawFloating();
-  const active = dock.active || dock.items[0];
-  const tabs = h("div", { class: "dock-tabs", role: "tablist" }, dock.items.map(panelTab));
+  if (dock.mode === "modal") {
+    const active = dock.active || dock.items[0];
+    dock.el.className = "dock modal";
+    const box = h("div", { class: "dock-box", role: "dialog", "aria-modal": "true", "aria-label": active.title },
+      groupView({ id: 0, active }, dock.items, true));
+    dock.el.replaceChildren(h("div", { class: "dock-backdrop", onclick: closeAll }), box);
+    return;
+  }
+  dock.el.className = "dock docked";
+  // Left and right first: the regions above and below fit between them.
+  const views = ["right", "left", "bottom", "top"].filter((r) => dock.regions[r]).map(regionView);
+  dock.el.replaceChildren(...views.filter((v) => v.dataset.region !== "top"));
+  // Above the conversation means in the top bar, so that the page starts under it and keeps its place there.
+  if (dock.regionEls.top) document.querySelector(".appbar").append(dock.regionEls.top);
+}
+
+// One group: its tabs, the panel menu and the panel in view; the group of the panel in focus is marked.
+function groupView(group, items, closer) {
+  if (!items.includes(group.active)) group.active = items[0];
+  const tabs = h("div", { class: "dock-tabs", role: "tablist" }, items.map((item) => panelTab(item, item === group.active)));
   // No scrollbar under the tabs: the wheel scrolls them sideways and the menu lists the ones out of view.
   tabs.addEventListener("wheel", (e) => {
     if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
@@ -214,44 +556,26 @@ function drawDock() {
     tabs.scrollLeft += e.deltaY;
   }, { passive: false });
   const head = h("div", { class: "dock-head" }, tabs, panelMenu(tabs),
-    dock.mode === "modal" ? h("button", { class: "dock-x big", type: "button", title: "Close all panels",
-      "aria-label": "Close all panels", onclick: closeAll }, "×") : null);
+    closer ? h("button", { class: "dock-x big", type: "button", title: "Close all panels", "aria-label": "Close all panels", onclick: closeAll }, "×")
+      : null);
   requestAnimationFrame(() => {
     const current = tabs.querySelector('[aria-selected="true"]');
     if (current) tabs.scrollLeft = Math.max(0, Math.min(tabs.scrollLeft, current.offsetLeft - 8),
       current.offsetLeft + current.offsetWidth + 8 - tabs.clientWidth);
   });
-  const bodies = dock.items.map((item) => {
-    item.body.hidden = item !== active;
+  const bodies = items.map((item) => {
+    item.body.hidden = item !== group.active;
     return item.body;
   });
-  if (dock.mode === "side") {
-    const width = Math.max(DOCK_MIN, Math.min(innerWidth - 320, dock.size.side || Math.round(innerWidth * 0.45)));
-    root.style.setProperty("--dock-w", `${width}px`);
-    const grip = h("div", { class: "dock-grip x", title: "Drag to resize" });
-    dragResize(grip, "x", () => dock.size.side || width, (w) => {
-      dock.size.side = Math.max(DOCK_MIN, Math.min(innerWidth - 320, w));
-      root.style.setProperty("--dock-w", `${dock.size.side}px`);
-    });
-    dock.el.className = "dock side";
-    dock.el.replaceChildren(grip, head, h("div", { class: "dock-bodies" }, bodies));
-  } else if (dock.mode === "bottom") {
-    const height = Math.max(160, Math.min(innerHeight - 160, dock.size.bottom || Math.round(innerHeight * 0.45)));
-    root.style.setProperty("--dock-h", `${height}px`);
-    const grip = h("div", { class: "dock-grip y", title: "Drag to resize" });
-    dragResize(grip, "y", () => dock.size.bottom || height, (v) => {
-      dock.size.bottom = Math.max(160, Math.min(innerHeight - 160, v));
-      root.style.setProperty("--dock-h", `${dock.size.bottom}px`);
-    });
-    dock.el.className = "dock bottom";
-    dock.el.replaceChildren(grip, head, h("div", { class: "dock-bodies" }, bodies));
-  } else {
-    dock.el.className = "dock modal";
-    const box = h("div", { class: "dock-box", role: "dialog", "aria-modal": "true", "aria-label": active.title },
-      head, h("div", { class: "dock-bodies" }, bodies));
-    const backdrop = h("div", { class: "dock-backdrop", onclick: closeAll });
-    dock.el.replaceChildren(backdrop, box);
-  }
+  const focused = dock.active && dock.active.group === group && allGroups().length > 1;
+  // Working in a group puts it in focus, so the next panel opens there.
+  const onpointerdown = (e) => {
+    if (!group.id || !group.active || dock.active === group.active) return;
+    dock.active = group.active;
+    for (const other of document.querySelectorAll(".dock-region .dock-group")) other.classList.toggle("focused", other === e.currentTarget);
+  };
+  return h("div", { class: `dock-group${focused ? " focused" : ""}`, "data-group": group.id, onpointerdown },
+    head, h("div", { class: "dock-bodies" }, bodies));
 }
 
 // Floating: one window per panel, dragged by its title and resized from its corner; minimized ones wait in a tray.
@@ -328,7 +652,7 @@ function gotoActiveFile(e) {
 
 function escapeClosesPanel(e) {
   if (e.key !== "Escape" || !dock.items.length || pick.el || e.target.closest(".xterm")) return;
-  if (dock.mode === "modal" || (dock.el && dock.el.contains(e.target))) {
+  if (dock.mode === "modal" || e.target.closest(".dock-region, #dock")) {
     const item = dock.mode === "modal" ? dock.active : dock.items.find((i) => i.body.contains(e.target));
     if (item) requestClose(item);
   }
@@ -438,6 +762,9 @@ async function checkPanels() {
 
 // ---------- file viewer ----------
 const LINE_PX = 20;
+// Languages whose imports name a module without its extension: rate_limit.py is imported as rate_limit.
+const IMPORT_STEM_RE = /\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|vue|svelte|java|kt|scala|cs|rb|rs|lua|swift|dart|ex|exs|hs|ml)$/i;
+const referenceName = (path) => baseName(path).replace(IMPORT_STEM_RE, "");
 const HIGHLIGHT_MAX = 400_000;
 const MARKDOWN_RE = /\.(md|markdown|mdown|mkd|mdx)$/i;
 
@@ -456,6 +783,7 @@ function openFile(conv, match, at = {}) {
         e.preventDefault();
         it.view.askLine();
       }
+      findKeys(it, e);
     });
   });
   item.ready.then(() => {
@@ -481,6 +809,185 @@ function loadFile(item, keep = null) {
 function parseLines(text) {
   const m = String(text).trim().match(/^(\d+)(?:(?::\d+)|-(\d+))?$/);
   return m ? { line: Number(m[1]), end: m[2] ? Number(m[2]) : null } : null;
+}
+
+// ---------- find in a panel (Ctrl+F): its own text only, as an editor's find in the open file ----------
+const FIND_MAX = 10000;
+const isFindKey = (e) => e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "f";
+// The matches of every panel's find bar, painted as one highlight (the CSS Custom Highlight API leaves the DOM alone).
+const findMarks = new Map();
+
+function paintFinds() {
+  if (typeof CSS === "undefined" || !CSS.highlights || typeof Highlight === "undefined") return;
+  const all = [], current = [];
+  for (const marks of findMarks.values()) {
+    for (const range of marks.all) all.push(range);
+    if (marks.current) current.push(marks.current);
+  }
+  CSS.highlights.set("find", new Highlight(...all));
+  CSS.highlights.set("find-current", new Highlight(...current));
+}
+
+function textIndex(root) {
+  const nodes = [], starts = [];
+  let text = "";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    nodes.push(walker.currentNode);
+    starts.push(text.length);
+    text += walker.currentNode.data;
+  }
+  return { nodes, starts, text };
+}
+
+// The text node holding offset at: the last one starting before it (at or before it for a start).
+function nodeAt(index, at, start) {
+  let lo = 0, hi = index.starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (start ? index.starts[mid] <= at : index.starts[mid] < at) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+function rangeOf(index, [from, to]) {
+  const a = nodeAt(index, from, true), b = nodeAt(index, to, false);
+  const range = document.createRange();
+  range.setStart(index.nodes[a], from - index.starts[a]);
+  range.setEnd(index.nodes[b], to - index.starts[b]);
+  return range;
+}
+
+// where: { root() the element searched, scroller() the one that scrolls it, everywhere(query) to search the repository }
+function findBar(item, where) {
+  const opts = { case: false, word: false, regex: false };
+  let matches = [], ranges = [], at = -1;
+  const input = h("input", { class: "find-q", type: "search", placeholder: "Find in this panel", "aria-label": "Find in this panel",
+    spellcheck: "false", autocomplete: "off", oninput: () => run(true),
+    onkeydown: (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        step(e.shiftKey ? -1 : 1);
+      } else if (isFindKey(e) && !e.shiftKey) {
+        e.preventDefault();
+        input.select();
+      }
+    } });
+  const toggles = {};
+  const toggle = (name, label, tip) => toggles[name] = h("button", { class: "search-opt", type: "button", title: tip, "aria-label": tip,
+    "aria-pressed": "false", onclick: () => {
+      opts[name] = !opts[name];
+      toggles[name].setAttribute("aria-pressed", String(opts[name]));
+      run(true);
+    } }, label);
+  const count = h("span", { class: "find-count muted", "aria-live": "polite" });
+  const prev = h("button", { class: "btn small", type: "button", title: "Previous match (Shift+Enter)", "aria-label": "Previous match",
+    onclick: () => step(-1) }, "↑");
+  const next = h("button", { class: "btn small", type: "button", title: "Next match (Enter)", "aria-label": "Next match", onclick: () => step(1) }, "↓");
+  const everywhere = h("button", { class: "btn small", type: "button", title: "Look for it in every file of the repository (Ctrl+Shift+F)",
+    onclick: () => where.everywhere(input.value) }, icon("search"), " In all files");
+  // Escape anywhere in the bar closes it, not the panel.
+  const onkeydown = (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
+  const el = h("div", { class: "find-bar", role: "search", hidden: true, onkeydown }, input, toggle("case", "Aa", "Match case"),
+    toggle("word", "ab", "Match whole word"), toggle("regex", ".*", "Use a regular expression"), count, prev, next, everywhere,
+    h("button", { class: "dock-x", type: "button", title: "Close (Escape)", "aria-label": "Close find", onclick: () => close() }, "×"));
+
+  // The first match from the top of what is in view, as an editor starts from the cursor.
+  function fromView() {
+    const top = where.scroller().getBoundingClientRect().top;
+    let lo = 0, hi = ranges.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ranges[mid].getBoundingClientRect().bottom < top) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo < ranges.length ? lo : 0;
+  }
+
+  function run(fromTop = false) {
+    const root = where.root(), pattern = input.value && root ? searchPattern(input.value, opts) : null;
+    matches = [];
+    let index = null;
+    if (pattern) {
+      index = textIndex(root);
+      for (let m = pattern.exec(index.text); m && matches.length < FIND_MAX; m = pattern.exec(index.text)) {
+        if (!m[0]) {
+          pattern.lastIndex++;
+          continue;
+        }
+        matches.push([m.index, m.index + m[0].length]);
+      }
+    }
+    ranges = index ? matches.map((m) => rangeOf(index, m)) : [];
+    at = !ranges.length ? -1 : fromTop ? fromView() : Math.min(Math.max(at, 0), ranges.length - 1);
+    show(true);
+  }
+
+  function step(d) {
+    if (!ranges.length) return run(true);
+    at = (at + d + ranges.length) % ranges.length;
+    show(true);
+  }
+
+  function show(scroll) {
+    const n = ranges.length;
+    count.textContent = !input.value ? "" : !pattern() ? "Bad expression" : n ? `${exact(at + 1)} of ${exact(n)}${n >= FIND_MAX ? "+" : ""}`
+      : "No results";
+    prev.disabled = next.disabled = n < 2;
+    findMarks.set(item, { all: ranges, current: ranges[at] || null });
+    paintFinds();
+    if (scroll && ranges[at]) reveal(ranges[at]);
+  }
+
+  const pattern = () => searchPattern(input.value, opts);
+
+  function reveal(range) {
+    const scroller = where.scroller(), r = range.getBoundingClientRect(), box = scroller.getBoundingClientRect();
+    if (r.top < box.top + LINE_PX || r.bottom > box.bottom - LINE_PX) scroller.scrollTop += r.top - box.top - scroller.clientHeight / 3;
+    if (r.left < box.left + 60 || r.right > box.right - 20) scroller.scrollLeft += r.left - box.left - scroller.clientWidth / 2;
+  }
+
+  function open(query = null) {
+    el.hidden = false;
+    if (query) input.value = query;
+    input.focus();
+    input.select();
+    if (input.value) run(!query);
+  }
+
+  function close() {
+    el.hidden = true;
+    findMarks.delete(item);
+    paintFinds();
+    where.scroller().focus({ preventScroll: true });
+  }
+
+  return { el, open, close, refresh: () => { if (!el.hidden && input.value) run(); }, state: () => (el.hidden ? null : { ...opts, query: input.value }),
+    restore: (saved) => {
+      if (!saved) return;
+      for (const name of Object.keys(opts)) {
+        opts[name] = !!saved[name];
+        toggles[name].setAttribute("aria-pressed", String(opts[name]));
+      }
+      el.hidden = false;
+      input.value = saved.query;
+      run();
+    } };
+}
+
+// Ctrl+F finds in the panel, Ctrl+Shift+F in every file of its repository: the selection, else what the find bar holds.
+function findKeys(item, e) {
+  if (!isFindKey(e) || e.defaultPrevented || !item.view || !item.view.find) return;
+  e.preventDefault();
+  const selection = getSelection(), chosen = selection.isCollapsed ? "" : selection.toString().split("\n").map((l) => l.trim()).find(Boolean) || "";
+  if (e.shiftKey) item.view.everywhere(chosen);
+  else item.view.find(chosen && chosen.length <= 1000 ? chosen : null);
 }
 
 function fileView(conv, item, data, keep) {
@@ -527,6 +1034,9 @@ function fileView(conv, item, data, keep) {
     [["preview", "Preview"], ["source", "Source"]].map(([m, label]) => h("button", { type: "button", "data-mode": m,
       onclick: () => { setMode(m); current().focus({ preventScroll: true }); } }, label))) : null;
   const current = () => (mode === "preview" ? previewScroll : scroller);
+  const folder = data.root || dirOf(data.path);
+  const everywhere = (query) => openSearch(conv, folder, query || (finder.state() || {}).query || null);
+  const finder = findBar(item, { root: () => (mode === "preview" ? preview : code), scroller: current, everywhere });
   function setMode(m) {
     mode = m;
     if (mode === "preview" && !preview) {
@@ -536,6 +1046,7 @@ function fileView(conv, item, data, keep) {
     previewScroll.hidden = mode !== "preview";
     scroller.hidden = mode === "preview";
     if (modes) for (const b of modes.children) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+    finder.refresh();
   }
   function go(line, end) {
     if (!line || line < 1) return;
@@ -558,7 +1069,7 @@ function fileView(conv, item, data, keep) {
   });
   // After the browser has settled the selection; the mouseup of a double-click belongs to the double-click.
   box.addEventListener("mouseup", (e) => {
-    if (e.button === 0 && e.detail < 2) setTimeout(() => selectionMenu(e.clientX, e.clientY, conv, code, data, lang, tell), 0);
+    if (e.button === 0 && e.detail < 2) setTimeout(() => selectionMenu(e.clientX, e.clientY, conv, code, data, lang, tell, finder), 0);
   });
   const notes = [data.binary ? "Binary file: not shown." : null,
     data.truncated ? `Only the first ${fmtBytes(data.text.length)} of ${fmtBytes(data.size)} are shown.` : null].filter(Boolean);
@@ -568,9 +1079,12 @@ function fileView(conv, item, data, keep) {
     copyable(h("span", { class: "mono path" }, breakable(data.display)), data.path),
     h("span", { class: "muted" }, `${fmt(lines.length)} lines · ${fmtBytes(data.size)}${lang && lang !== "plaintext" ? ` · ${languageName(lang)}` : ""}`),
     h("span", { class: "spacer" }), modes, goto,
+    h("button", { class: "btn", type: "button", title: `Look for ${referenceName(data.path)} in every file of ${folder}: where it is included, imported or named`,
+      onclick: () => openSearch(conv, folder, referenceName(data.path)) }, icon("search"), " References"),
     h("button", { class: "btn", type: "button", title: `Browse ${dirOf(data.path)}`, onclick: () => openDir(conv, dirOf(data.path), data.path) }, "▦ Folder"),
     h("button", { class: "btn", type: "button", title: `Open a shell in ${dirOf(data.path)}`, onclick: () => openShell(conv, dirOf(data.path)) }, "❯ Shell here")),
-  notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null, data.binary ? null : [scroller, markdown ? previewScroll : null], note]);
+  data.binary ? null : finder.el, notes.length ? h("div", { class: "notice" }, notes.join(" ")) : null,
+  data.binary ? null : [scroller, markdown ? previewScroll : null], note]);
   setMode(mode);
   if (keep) {
     if (keep.marked) show(...keep.marked);
@@ -578,11 +1092,14 @@ function fileView(conv, item, data, keep) {
     scroller.scrollTop = keep.top;
     scroller.scrollLeft = keep.left;
     previewScroll.scrollTop = keep.previewTop;
+    finder.restore(keep.find);
     tell("Reloaded: the file changed on disk");
   }
   if (hadFocus) current().focus({ preventScroll: true });
   return {
     go,
+    find: (query) => { if (!data.binary) finder.open(query); },
+    everywhere,
     focus: () => { if (!item.body.contains(document.activeElement)) current().focus({ preventScroll: true }); },
     // Ctrl+G: the line box, with the source in view.
     askLine: () => {
@@ -590,7 +1107,8 @@ function fileView(conv, item, data, keep) {
       goto.focus();
       goto.select();
     },
-    state: () => ({ mode, marked, goto: goto.value, top: scroller.scrollTop, left: scroller.scrollLeft, previewTop: previewScroll.scrollTop }),
+    state: () => ({ mode, marked, goto: goto.value, top: scroller.scrollTop, left: scroller.scrollLeft, previewTop: previewScroll.scrollTop,
+      find: finder.state() }),
   };
 }
 
@@ -845,7 +1363,7 @@ function dirView(item) {
 
 // The lines a selection in a file spans, and what can be done with them: copied, with the path and lines as a header,
 // or put into the message to the session.
-function selectionMenu(x, y, conv, code, data, lang, tell) {
+function selectionMenu(x, y, conv, code, data, lang, tell, finder) {
   const selection = getSelection();
   if (selection.isCollapsed || !selection.rangeCount) return;
   const range = selection.getRangeAt(0), chosen = selection.toString();
@@ -868,6 +1386,7 @@ function selectionMenu(x, y, conv, code, data, lang, tell) {
     [`Copy with ${baseName(ref)}`, () => copy(`${ref}\n${chosen}`)],
     ["Ask Claude", ask, composerReady() ? "Put it into the message box, where its cursor is, without sending it"
       : "Needs the Conversation tab of a live session open"],
+    ...(body.includes("\n") ? [] : [["Find in this file", () => finder.open(body), "Every match in this file (Ctrl+F)"]]),
     ...findEntry(conv, chosen, data.root || dirOf(data.path)),
     ...pasteEntries(chosen),
   ]);
@@ -922,12 +1441,12 @@ function flash(message) {
 }
 
 // A menu at a point of the page, closed like the copy menus: outside, Escape, scrolling.
-function pointMenu(x, y, title, entries) {
+function pointMenu(x, y, title, entries, cls = "") {
   closeCopyMenu(false);
   const buttons = entries.map(([label, act, tip, off]) => h("button", { type: "button", role: "menuitem", class: "copy-menu-item",
     title: tip || null, disabled: !!off, onclick: () => { closeCopyMenu(false); act(); } }, label));
   const items = buttons.filter((b) => !b.disabled);
-  const menu = h("div", { class: "copy-menu", role: "menu", "aria-label": title }, h("div", { class: "copy-menu-head" }, title), buttons);
+  const menu = h("div", { class: `copy-menu ${cls}`, role: "menu", "aria-label": title }, h("div", { class: "copy-menu-head" }, title), buttons);
   document.body.append(menu);
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${y + 12 + menu.offsetHeight > innerHeight ? Math.max(8, y - 12 - menu.offsetHeight) : y + 12}px`;
@@ -961,6 +1480,7 @@ const DIFF_HIGHLIGHT_LINES = 1500;
 function openCommit(conv, sha, label, cwd) {
   openPanel(`commit:${sha}`, `${(label || sha).slice(0, 10)}`, "commit", conv, (item) => {
     item.body.append(skeleton(10));
+    item.body.addEventListener("keydown", (e) => findKeys(item, e));
     api(`${convApi(conv, "/commit")}?sha=${encodeURIComponent(sha)}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ""}`, { headers: sendHeaders() })
       .then((data) => {
         item.title = `${data.sha.slice(0, 7)} ${data.message.split("\n")[0]}`;
@@ -975,8 +1495,17 @@ function diffSections(patch) {
   return patch.split(/^(?=diff --git )/m).filter((s) => s.startsWith("diff --git "));
 }
 
+const EXPAND_LINES = 20;
+
+function diffLine(cls, a, b, sign, text, lang, highlight) {
+  const code = h("code", { class: highlight ? `language-${lang}` : "" }, text);
+  return h("div", { class: `dl ${cls}`, "data-new": b === "" ? null : b }, h("span", { class: "ln" }, a), h("span", { class: "ln" }, b),
+    h("span", { class: "dc" }, h("span", { class: "sign" }, sign), code));
+}
+
+// hunks: where each @@ starts and the line numbers right after it, for the lines between them that can be shown.
 function diffRows(section, path, lang) {
-  const rows = [];
+  const rows = [], hunks = [];
   let oldN = 0, newN = 0, inHunk = false;
   const highlight = coloured(lang) && section.length < 400_000;
   for (const line of section.replace(/\n$/, "").split("\n")) {
@@ -985,19 +1514,82 @@ function diffRows(section, path, lang) {
       oldN = Number(hunk[1]);
       newN = Number(hunk[2]);
       inHunk = true;
-      rows.push(h("div", { class: "dl hunk" }, h("span", { class: "ln" }), h("span", { class: "ln" }), h("span", { class: "dc" }, line)));
+      const row = h("div", { class: "dl hunk" }, h("span", { class: "ln" }), h("span", { class: "ln" }), h("span", { class: "dc" }, line));
+      hunks.push({ row, oldStart: oldN, newStart: newN, oldEnd: oldN, newEnd: newN });
+      rows.push(row);
       continue;
     }
     if (!inHunk) continue;
     const sign = line[0];
     const cls = sign === "+" ? "add" : sign === "-" ? "del" : sign === "\\" ? "meta" : "ctx";
     const a = cls === "add" || cls === "meta" ? "" : oldN++, b = cls === "del" || cls === "meta" ? "" : newN++;
-    const text = h("code", { class: highlight ? `language-${lang}` : "" }, line.slice(1));
-    rows.push(h("div", { class: `dl ${cls}`, "data-new": b === "" ? null : b }, h("span", { class: "ln" }, a), h("span", { class: "ln" }, b),
-      h("span", { class: "dc" }, h("span", { class: "sign" }, sign || " "), text)));
+    rows.push(diffLine(cls, a, b, sign || " ", line.slice(1), lang, highlight));
+    Object.assign(hunks[hunks.length - 1], { oldEnd: oldN, newEnd: newN });
   }
   if (highlight && rows.length <= DIFF_HIGHLIGHT_LINES) for (const code of rows.flatMap((r) => [...r.querySelectorAll("code[class]")])) hljs.highlightElement(code);
-  return rows;
+  return { rows, hunks };
+}
+
+// The unchanged lines between hunks, above the first and below the last, shown on demand from the file as the commit
+// left it; between hunks the old and new numbers differ by the same amount.
+function diffGaps(grid, hunks, lines, lang) {
+  const highlight = coloured(lang);
+  const row = (n, delta) => {
+    const r = diffLine("ctx", n + delta, n, " ", lines()[n - 1], lang, highlight);
+    if (highlight) hljs.highlightElement(r.querySelector("code"));
+    return r;
+  };
+  const gaps = hunks.map((hunk, k) => ({ lo: k ? hunks[k - 1].newEnd : 1, hi: hunk.newStart - 1, delta: hunk.oldStart - hunk.newStart,
+    control: hunk.row, first: k === 0 }));
+  const last = hunks[hunks.length - 1];
+  const tail = { lo: last.newEnd, hi: null, delta: last.oldEnd - last.newEnd, control: h("div", { class: "dl hunk gap-end" },
+    h("span", { class: "ln" }), h("span", { class: "ln" }), h("span", { class: "dc" })), last: true };
+  grid.append(tail.control);
+  gaps.push(tail);
+
+  // down: the lines right after the hunk above; up: those right before the hunk below.
+  function reveal(gap, way, count = EXPAND_LINES) {
+    if (gap.hi === null) gap.hi = lines().length;
+    const take = Math.min(count, gap.hi - gap.lo + 1);
+    if (take > 0 && way === "down") {
+      gap.control.before(...Array.from({ length: take }, (_, j) => row(gap.lo + j, gap.delta)));
+      gap.lo += take;
+    } else if (take > 0) {
+      gap.control.after(...Array.from({ length: take }, (_, j) => row(gap.hi - take + 1 + j, gap.delta)));
+      gap.hi -= take;
+    }
+    draw(gap);
+  }
+
+  function draw(gap) {
+    const known = gap.hi !== null, left = known ? gap.hi - gap.lo + 1 : null;
+    if (known && left <= 0) {
+      gap.control.remove();
+      return;
+    }
+    const button = (way, label, tip) => h("button", { class: "gap-btn", type: "button", title: tip, "aria-label": tip,
+      onclick: (e) => { e.stopPropagation(); load(() => reveal(gap, way)); } }, label);
+    const buttons = known && left <= EXPAND_LINES ? [button(gap.last ? "down" : "up", "↕", `Show ${left} more line${left === 1 ? "" : "s"}`)]
+      : [gap.first ? null : button("down", "↓", gap.last ? "Show more lines below" : "Show more lines below the hunk above"),
+        gap.last ? null : button("up", "↑", "Show more lines above")].filter(Boolean);
+    gap.control.firstChild.replaceChildren(...buttons);
+    gap.control.classList.add("gap");
+  }
+
+  let loading = null;
+  const load = (then) => {
+    // Below the last hunk, the file's length says how many lines are left, if any.
+    if (!loading) loading = lines.load().then(() => { for (const gap of gaps) if (gap.hi === null && gap.control.isConnected) reveal(gap, "down", 0); });
+    loading.then(then, (err) => flash(`The file did not load: ${err.message}`));
+  };
+  for (const gap of gaps) {
+    if (gap.hi !== null && gap.hi < gap.lo) {
+      if (gap.last) gap.control.remove();
+      continue;
+    }
+    draw(gap);
+  }
+  return { all: () => load(() => { for (const gap of gaps) if (gap.control.isConnected) reveal(gap, "down", Infinity); }) };
 }
 
 function commitView(conv, item, data) {
@@ -1013,27 +1605,45 @@ function commitView(conv, item, data) {
     const section = sections.get(f.path) || "";
     const lang = highlighting() ? languageOfPath(hljs, f.path) : null;
     const open = () => openFile(conv, { path: `${data.root}/${f.path}`, display: f.path });
-    const box = lazyDetails("diff-file", [h("span", { class: "mono path" }, f.old_path ? `${f.old_path} → ${f.path}` : f.path),
-      h("span", { class: "diff-stat" }, f.added == null ? h("span", { class: "muted" }, "binary") : [h("span", { class: "plus" }, `+${f.added}`), " ",
-        h("span", { class: "minus" }, `−${f.deleted}`)]),
-      h("button", { class: "btn small", type: "button", title: "Open the file as it is now in the working tree",
-        onclick: (e) => { e.preventDefault(); open(); } }, "Open file")],
-    () => {
-      const rows = diffRows(section, f.path, lang);
+    // Only a file the commit changed, not one it added or deleted, has lines the diff leaves out.
+    const partial = f.added != null && /^@@ /m.test(section) && !/^(new|deleted) file mode/m.test(section);
+    let text = null, gaps = null;
+    const lines = () => text;
+    lines.load = () => api(`${convApi(conv, "/blob")}?sha=${data.sha}&path=${encodeURIComponent(f.path)}&cwd=${encodeURIComponent(data.root)}`,
+      { headers: sendHeaders() }).then((blob) => {
+      text = blob.text.split("\n");
+      if (text.length > 1 && text[text.length - 1] === "") text.pop();
+    });
+    const build = () => {
+      const { rows, hunks } = diffRows(section, f.path, lang);
       const grid = h("div", { class: "diff" }, rows.length ? rows : h("div", { class: "muted pad" }, "No textual change."));
+      if (partial && hunks.length) gaps = diffGaps(grid, hunks, lines, lang);
       grid.addEventListener("click", (e) => {
         const row = e.target.closest(".ln") && e.target.closest(".dl[data-new]");
         if (row) openFile(conv, { path: `${data.root}/${f.path}`, display: f.path }, { line: Number(row.dataset.new) });
       });
       return grid;
-    });
+    };
+    const box = lazyDetails("diff-file", [h("span", { class: "mono path" }, f.old_path ? `${f.old_path} → ${f.path}` : f.path),
+      h("span", { class: "diff-stat" }, f.added == null ? h("span", { class: "muted" }, "binary") : [h("span", { class: "plus" }, `+${f.added}`), " ",
+        h("span", { class: "minus" }, `−${f.deleted}`)]),
+      partial ? h("button", { class: "btn small", type: "button", title: "Show every line of the file around the changes",
+        onclick: (e) => {
+          e.preventDefault();
+          const holder = box.querySelector(":scope > .blk-body");
+          if (!holder.firstChild) append(holder, build());
+          box.open = true;
+          if (gaps) gaps.all();
+        } }, "Whole file") : null,
+      h("button", { class: "btn small", type: "button", title: "Open the file as it is now in the working tree",
+        onclick: (e) => { e.preventDefault(); open(); } }, "Open file")], build);
     fileBoxes.set(f.path, box);
     return box;
   });
   if (total <= DIFF_OPEN_LINES) for (const box of fileBoxes.values()) box.open = true;
   const parents = data.parents.map((p) => h("span", { class: "ref ref-commit", role: "link", tabindex: "0", "data-sha": p, "data-cwd": data.root,
     title: `Parent ${p}` }, p.slice(0, 10)));
-  item.body.replaceChildren(h("div", { class: "commit-head" },
+  const content = h("div", { class: "commit-content" }, h("div", { class: "commit-head" },
     h("div", { class: "commit-subject" }, subject),
     body ? h("pre", { class: "commit-body" }, body) : null,
     h("div", { class: "meta" },
@@ -1050,6 +1660,11 @@ function commitView(conv, item, data) {
       h("button", { class: "btn small", type: "button", onclick: () => { for (const b of fileBoxes.values()) b.open = false; } }, "Collapse all")),
     data.truncated ? h("div", { class: "notice" }, "The patch is too long; only its beginning is shown.") : null),
   h("div", { class: "commit-files" }, files));
+  const scroller = h("div", { class: "commit-scroll", tabindex: "-1" }, content);
+  const everywhere = (query) => openSearch(conv, data.root, query || (finder.state() || {}).query || null);
+  const finder = findBar(item, { root: () => content, scroller: () => scroller, everywhere });
+  item.view = { find: (query) => finder.open(query), everywhere };
+  item.body.replaceChildren(finder.el, scroller);
 }
 
 // ---------- commit history ----------
@@ -1771,7 +2386,15 @@ async function resolveRefs(conv, commits, files, scope = {}) {
     const c = commits.slice(i, i + RESOLVE_BATCH), f = files.slice(i, i + RESOLVE_BATCH);
     for (const x of c) refs.commits.set(x, null);
     for (const x of f) refs.files.set(x, null);
-    const data = await postJson(convApi(conv, "/resolve"), { commits: c, files: f, ...scope });
+    let data;
+    try {
+      data = await postJson(convApi(conv, "/resolve"), { commits: c, files: f, ...scope });
+    } catch (err) {
+      // Not known to name nothing: the next text that mentions them asks again.
+      for (const x of c) refs.commits.delete(x);
+      for (const x of f) refs.files.delete(x);
+      throw err;
+    }
     for (const [k, v] of Object.entries(data.commits)) refs.commits.set(k, { ...v, cwd: data.cwd });
     for (const [k, v] of Object.entries(data.files)) refs.files.set(k, v);
   }

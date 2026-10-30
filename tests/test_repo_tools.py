@@ -15,7 +15,7 @@ from fixtures import user
 
 from ctokens.pricing import load_prices
 from ctokens.repo import (FileIndex, RepoError, find_commits, find_files, list_commits, list_dir, numstat_files, pathspecs,
-                          read_file, ripgrep_globs, search, search_command, show_commit, stat_paths)
+                          read_file, ripgrep_globs, search, search_command, show_blob, show_commit, stat_paths)
 from ctokens.web.server import Config, Handler, Server
 from ctokens.web.shells import Shells
 
@@ -89,6 +89,18 @@ class RepoTest(unittest.TestCase):
         self.assertEqual([m["display"] for m in found["untracked.txt"]], ["untracked.txt"])
         self.assertNotIn("missing.py", found)
 
+    def test_files_under_an_unreadable_folder(self):
+        # One such name used to fail the whole request, and every commit and file asked with it stayed unlinked.
+        locked = Path(self.tmp.name) / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        try:
+            found = find_files(self.repo, [str(locked / "report.out"), "src/server.py"], FileIndex())
+        finally:
+            locked.chmod(0o700)
+            locked.rmdir()
+        self.assertEqual(list(found), ["src/server.py"])
+
     def test_read_file(self):
         data = read_file(self.repo, "src/server.py")
         self.assertEqual((data["display"], data["text"], data["binary"], data["truncated"]),
@@ -155,6 +167,17 @@ class RepoTest(unittest.TestCase):
         self.assertEqual(data["parents"], [])
         self.assertEqual(sorted(f["path"] for f in data["files"]), ["docs/notes.md", "src/server.py", "src/web/server.py"])
         self.assertIn("+def serve():", data["patch"])
+
+    def test_show_blob(self):
+        data = show_blob(self.repo, self.first[:9], "src/server.py")
+        self.assertEqual((data["text"], data["binary"], data["truncated"]), ("def serve():\n    return 1\n", False, False))
+        self.assertTrue(show_blob(self.repo, self.second, "logo.bin")["binary"])
+        with mock.patch("ctokens.repo.MAX_FILE_BYTES", 5):
+            self.assertEqual(show_blob(self.repo, self.second, "src/server.py")["text"], "def s")
+        for sha, path in ((self.first, "logo.bin"), (self.first, "/etc/passwd"), (self.first, "--output=x"), ("HEAD", "src/server.py"),
+                          (self.first, ""), (self.first, None)):
+            with self.subTest(sha=sha, path=path), self.assertRaises(RepoError):
+                show_blob(self.repo, sha, path)
 
     def test_show_commit_rejects_options(self):
         for bad in ("--output=/tmp/x", "HEAD", "zzzzzzz", ""):
@@ -430,6 +453,7 @@ class RepoApiTest(unittest.TestCase):
                                    ("GET", f"/api/conversations/{CONV}/file?path=src/server.py", None),
                                    ("GET", f"/api/conversations/{CONV}/dir?path=src", None),
                                    ("GET", f"/api/conversations/{CONV}/commits", None),
+                                   ("GET", f"/api/conversations/{CONV}/blob?sha={self.first}&path=src/server.py", None),
                                    ("GET", f"/api/conversations/{CONV}/search?q=serve", None),
                                    ("POST", f"/api/conversations/{CONV}/stat", {"paths": []})):
             for key in (None, "wrong"):
@@ -452,6 +476,9 @@ class RepoApiTest(unittest.TestCase):
         self.assertEqual((status, data["sha"]), (200, self.second))
         status, data = self.request("GET", f"/api/conversations/{CONV}/file?path=src/web/server.py")
         self.assertEqual((status, data["text"]), (200, "print('web')\n"))
+        status, data = self.request("GET", f"/api/conversations/{CONV}/blob?sha={self.first}&path=src/server.py")
+        self.assertEqual((status, data["text"]), (200, "def serve():\n    return 1\n"))
+        self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/blob?sha={self.first}&path=logo.bin")[0], 404)
         self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/commit?sha=deadbeef00")[0], 404)
         self.assertEqual(self.request("GET", f"/api/conversations/{CONV}/file?path=nope")[0], 404)
         self.assertEqual(self.request("GET", "/api/conversations/66666666-6666-4666-8666-666666666666/file?path=x")[0], 404)

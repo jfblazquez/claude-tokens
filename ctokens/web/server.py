@@ -26,7 +26,7 @@ from ..live import (MAX_IMAGE_BYTES, SendError, activity, answer, channel, go_li
                     public, read_record, rename, save_image, send, send_problem, sessions_dir)
 from ..logs import conversation_sources, discover, file_stats, parse_log
 from ..repo import (FileIndex, RepoError, find_commits, find_files, list_commits, list_dir, read_file, repo_root, search,
-                   show_commit, stat_paths)
+                   show_blob, show_commit, stat_paths)
 from ..reports import report, scan_totals, totals_report
 from .cache import StatsCache, TranscriptCache, Workers
 from .favorites import Favorites, favorites_path
@@ -57,7 +57,7 @@ MAX_IMAGE_BODY = MAX_IMAGE_BYTES * 4 // 3 + 4096
 CONVERSATION_ROUTE = re.compile(r"/api/conversations/([^/]+)(?:/(last-response|bash|files|messages|live|full))?")
 ACTION_ROUTE = re.compile(r"/api/conversations/([^/]+)/(send|answer|go-live|go-offline|new-session|rename|favorite|resolve|stat|shell|image)")
 EVENTS_ROUTE = re.compile(r"/api/conversations/([^/]+)/events")
-REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|commits|search|file|dir)")
+REPO_ROUTE = re.compile(r"/api/conversations/([^/]+)/(commit|commits|blob|search|file|dir)")
 SHELL_ACTION_ROUTE = re.compile(r"/api/shells/([A-Za-z0-9_-]+)/(input|resize|close|state)")
 SHELL_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SHELL_REAP_EVERY = 30.0
@@ -299,8 +299,8 @@ class Handler(BaseHTTPRequestHandler):
         return json_response(200, {"written": True})
 
     def repo(self, conversation_id, view, params):
-        """A commit, the history, a search, a file or a folder of the conversation's; reading any file the user can read
-        needs the key."""
+        """A commit, a file as a commit has it, the history, a search, a file or a folder of the conversation's; reading
+        any file the user can read needs the key."""
         state = self.key_state()
         if state != "ok":
             return json_response(403, {"error": KEY_ERRORS[state], "key": state})
@@ -317,6 +317,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if view == "commit":
                 return json_response(200, show_commit(cwd, params.get("sha", [""])[0]))
+            if view == "blob":
+                return json_response(200, show_blob(cwd, params.get("sha", [""])[0], params.get("path", [""])[0]))
             if view == "dir":
                 return json_response(200, list_dir(cwd, params.get("path", [""])[0]))
             if view == "commits":

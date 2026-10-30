@@ -297,7 +297,7 @@ Inside a conversation the top bar holds its tabs and a **← Conversations**
 button, so they stay on screen however far you scroll. Once the conversation's
 header scrolls out of view, a row under the top bar keeps it at hand: the star,
 the name (a click goes back to the top), the live state and the **New session**,
-**Browse**, **Shell**, **Commits** and **Search** buttons. It lies over the page,
+**Browse**, **Shell**, **Commits**, **Search** and **★ Starred** buttons. It lies over the page,
 so showing it does not move what you are reading. The **Conversation** tab
 keeps the message you were reading when you switch to another tab and back. A
 round **↑** button at the bottom right of every page goes back to the top, and
@@ -413,7 +413,8 @@ Sending needs:
   the browser remembers the key. A new run of the server makes a new key.
 
 Text already in the session's prompt stays there, and the message is appended
-to it.
+to it. The box grows with what you type, up to 40% of the window, and goes back
+to two rows once the message is sent.
 
 While the session waits on a question (AskUserQuestion) or a permission prompt,
 the box shows that dialog instead: its text, its choices as buttons (with the
@@ -484,6 +485,18 @@ below as well. They are kept in `~/.claude/claude-tokens/favorites.json` (next
 to the projects folder), so every browser and every run of the server sees the
 same ones, and starring needs no send key.
 
+Single messages can be starred too, to find them again in a long conversation:
+☆ in the header of a prompt or a response (it shows on hover) stars it. **★ Starred N**,
+among the conversation's buttons (N starred in it), opens the **Starred** panel:
+every starred message of every conversation, grouped by conversation with the one
+on screen first, each with its number, who wrote it, the beginning of its text
+(or the tools it called) and its time. A click opens its conversation, on the
+right source, with the message under the top bar (raising the **Detail** level
+when it hides it). The panel filters by text or conversation, shows only this
+conversation's, unstars one (★), a conversation's (**Unstar these**) or all those
+listed (**Unstar all listed**, after asking), and copies the list. Stars are kept
+in this browser only (`localStorage`), per conversation and source.
+
 Double-click a conversation's name, on its card, in the favorites or in its
 header, to rename it: **Enter** (or clicking elsewhere) saves and **Escape**
 cancels. The name is Claude Code's own, the one `/rename` sets, so the terminal,
@@ -515,18 +528,33 @@ commit of its git repository, and a name that is a file there. A file name is
 looked up as a path from the folder, as an absolute or `~` path, or as the end
 of any path in the repository (tracked files and untracked ones git does not
 ignore); `./x` and `../x` only from the folder. Anything else stays plain text.
+A name the server cannot check, such as a path under a folder you may not read,
+stays plain text without keeping the others from linking, and names whose check
+failed are checked again the next time they are drawn.
 URLs link too, and open in a new tab. In code, a name or a URL that the syntax
 highlighting splits into several pieces still links whole.
 
 - A **commit** opens its message, author, parents (links themselves), refs and
   the diff against its first parent, file by file and syntax-highlighted, with
-  old and new line numbers. A click on a line number opens the file there.
+  old and new line numbers. A click on a line number opens the file there. The
+  unchanged lines the diff leaves out can be shown as in an editor's diff: **↑**
+  on a hunk's header shows 20 more lines above it, **↓** 20 more below the hunk
+  before, **↕** the rest when 20 or fewer are left, and **Whole file** every line
+  of the file around its changes. They come from the file as the commit left it.
 - A **file** opens with line numbers and highlighting. `file:42`, `file:42:7`
   and `file#L42` open it at that line; `file:40-50` marks the range. A name that
   matches several files (`__init__.py`) shows a numbered list: press `1`, `2`...
   (two digits when there are ten or more), use the arrows and Enter, or click.
   **Ctrl+G** in a file (or with the focus nowhere and a file in view) goes to the
-  line box: type `42` or `40-50` and Enter. A **Markdown** file opens rendered,
+  line box: type `42` or `40-50` and Enter. **Ctrl+F** in a file or a commit finds
+  in that panel only, with the selection to start from: every match is marked,
+  Enter and Shift+Enter (or **↑** **↓**) go through them with *3 of 17*, **Aa**,
+  **ab** and **.\*** match case, whole words or a regular expression, and Escape
+  closes the bar. **In all files** (or **Ctrl+Shift+F**) looks for the same text in
+  every file of the repository. **References**, in a file, looks for its name in
+  the repository: where it is included, imported or named; for languages whose
+  imports leave the extension out (Python, JavaScript, TypeScript, Java...) the
+  name without it, so `rate_limit.py` finds `from .rate_limit import`. A **Markdown** file opens rendered,
   for reading, with **Preview** and **Source** to switch; its links to other
   files and folders open them in their panels, from the file's own folder, and
   `#anchors` scroll to their heading. Ctrl+G and a link to a line show the source.
@@ -577,14 +605,38 @@ highlighting splits into several pieces still links whole.
   stops at 5000 results, saying so. Regular expressions are ripgrep's (Rust
   syntax) or git's extended ones. The options and globs are remembered.
 
-They open in a **side panel**, one tab each, that you can widen by dragging its
-edge. Tabs shrink to fit; those that still do not fit scroll with the mouse
-wheel, and the **⌄** menu at the end of the tabs (**+3 ⌄** when three are out of
-view) lists every open panel, closes them all and switches the layout to a bottom
-panel, floating windows (dragged by the title, resized from the corner,
-minimized to a tray) or an overlay; the browser remembers the choice and the
-sizes. With the bottom panel, the message box of a live conversation stays above
-it. Open files and folders follow the disk: when one changes, its panel reloads by
+They open in a **panel** on the right of the conversation, one tab each. Tabs
+shrink to fit; those that still do not fit scroll with the mouse wheel, and the
+**⌄** menu at the end of the tabs (**+3 ⌄** when three are out of view) lists
+every open panel, closes them all, and switches the layout between **Docked**,
+**Floating windows** (dragged by the title, resized from the corner, minimized to
+a tray) and **Overlay**; the browser remembers the choice and the sizes.
+
+Docked, the layout is yours to arrange, as in an editor: panels sit in groups,
+each with its tabs and the panel in view, on any side of the conversation (right,
+left, below or above it), and a group can be split again, side by side or one
+above the other, in any mix. Drag a tab (a shaded area shows where it will land):
+
+- to an edge of a panel, to split it there and put the tab in the new group;
+- onto another group's tabs or the middle of its panel, to move it there;
+- near an edge of the conversation, to dock it on that side: in a group of its
+  own next to the conversation, which moves aside to make room.
+
+The edge of each side widens or narrows it, and the line between two groups
+shares their room. Right-click on a tab for **Split right**, **Split left**,
+**Split down**, **Split up**, **Dock right of / left of / below / above the
+conversation**, **Move to** another group, **Join all groups**, **Close** and
+**Close the others in this group**; the **⌄** menu has **All on the right**,
+**on the left**, **below** and **above**, which gather every panel in one group
+there, where new panels then open. A new panel opens in the group you last
+worked in. A group goes away with its last tab and a side with its last group,
+and their room goes back to their neighbours and to the conversation. Opening,
+closing or resizing a panel keeps the message you are reading where it was, even
+when the narrower top bar wraps onto another row. Below the conversation, the
+message box of a live conversation stays above the panels; above it, the panels
+are part of the top bar.
+
+Open files and folders follow the disk: when one changes, its panel reloads by
 itself, keeping the scroll, the marked lines and the Markdown mode, and says so in
 a corner; one that is hidden reloads when it is shown, and one with a selection
 or a field in use waits until it is free. With **Ask first** in **⚙** it shows
@@ -653,7 +705,7 @@ or stop a session. All of them
 need an `Origin`, when sent, that matches the `Host`, and all but starring also
 need the send key in an `X-Send-Key` header, since any user of the machine can
 reach `127.0.0.1` and a message runs whatever the session is allowed to run. So
-do the `GET`s of a commit, the commit list, a search, a file or a folder, which read outside the projects folder. It writes to the projects folder only to
+do the `GET`s of a commit, a file at a commit, the commit list, a search, a file or a folder, which read outside the projects folder. It writes to the projects folder only to
 rename a conversation that no process runs.
 `--serve` accepts `--port`, `--projects-dir`, `--pricing`,
 `--cold-summary-output` and `--context-window`; the project filter is chosen in
@@ -733,6 +785,7 @@ counterpart:
 | `POST /api/conversations/<id>/resolve` | body `{"commits": [...], "files": [...], "shell"?: "<shell id>", "cwd"?: "<folder>"}` (up to 500 each) with `X-Send-Key`; `{"cwd", "root", "commits": {"<hash>": {sha, subject, author, date}}, "files": {"<name>": [{path, display}]}}` with only those found, looked up from the shell's current folder when `shell` is given, or from `cwd` (an absolute folder) |
 | `POST /api/conversations/<id>/stat` | body `{"paths": [...]}` (absolute, up to 200) with `X-Send-Key`; `{"stats": {"<path>": {type, size, mtime, stamp} or null}}`, null when it is gone; `stamp` changes when a file is written or a folder's entries change |
 | `GET /api/conversations/<id>/commit?sha=&cwd=` | with `X-Send-Key`, from the repository of `cwd` (an absolute folder) when given, else the conversation's: header, `files` (`added`/`deleted`, null for binary; `old_path` on a rename) and `patch` against the first parent (up to 4 MB, `truncated`) |
+| `GET /api/conversations/<id>/blob?sha=&path=&cwd=` | with `X-Send-Key`, from the repository of `cwd` when given, else the conversation's: `{sha, path, size, binary, truncated, text}`, the file `path` (from the repository's root) as commit `sha` has it, the first 2 MB; 404 when the commit does not have it |
 | `GET /api/conversations/<id>/file?path=` | with `X-Send-Key`: `{path, display, root, size, mtime, stamp, binary, truncated, text}`, the first 2 MB; `path` absolute or from the folder |
 | `GET /api/conversations/<id>/commits?skip=&cwd=` | with `X-Send-Key`, from the repository of `cwd` when given, else the conversation's: `{root, branch, upstream, ahead, behind, remotes, fetched, commits: [{sha, parents, author, date, refs, subject, pushed}], incoming: [...], more, skip}`, 100 commits of `HEAD` from `skip`; `pushed` is whether a remote branch has the commit (null with no remote), `incoming` the upstream's commits `HEAD` lacks (up to 100), `fetched` when the repository last fetched, 404 outside a repository |
 | `GET /api/conversations/<id>/search?q=&case=1&word=1&regex=1&include=&exclude=&cwd=` | with `X-Send-Key`, in the folder `cwd` when given, else the conversation's: `{folder, root, matches, truncated, timed_out, files: [{path, display, matches: [{line, text}]}]}`; `q` one line, up to 1000 characters, a fixed string unless `regex`; `include` and `exclude` comma-separated globs; up to 5000 matches, each line up to 1000 characters; 404 with ripgrep's or git's message for a bad expression |
@@ -765,7 +818,12 @@ session faked in the page), the right-click menus and Go offline, the commit lis
 what it marks as pushed and a commit's way back to it, the search with its options and
 globs (also as you type), the selection menus and copy buttons pasting into a shell
 without Enter, the header row under the top bar, a long conversation opening at its
-end, and a conversation coming back from memory. The script builds the demo
+end, a conversation coming back from memory, a failed lookup of names asked again,
+Ctrl+F and References in a file, the lines around a commit's changes and its whole
+file, splitting panels both ways and docking them on every side of the conversation
+by dragging a tab, with no gap left when one closes, the message
+being read kept in place as a panel opens and closes, starred messages and their
+panel, and the message box growing with its text. The script builds the demo
 folder below in a temporary directory, adds a conversation of its own and starts
 a server on it, so it needs nothing else:
 
